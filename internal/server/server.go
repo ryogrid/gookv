@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
+	"github.com/pingcap/kvproto/pkg/raft_serverpb"
 	"github.com/pingcap/kvproto/pkg/tikvpb"
 	"github.com/ryogrid/gookvs/internal/storage/mvcc"
 	"github.com/ryogrid/gookvs/internal/storage/txn"
@@ -25,14 +28,21 @@ type ServerConfig struct {
 
 // Server encapsulates the gRPC server and all server-side components.
 type Server struct {
-	cfg        ServerConfig
-	grpcServer *grpc.Server
-	storage    *Storage
-	listener   net.Listener
+	cfg         ServerConfig
+	grpcServer  *grpc.Server
+	storage     *Storage
+	coordinator *StoreCoordinator
+	listener    net.Listener
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+}
+
+// SetCoordinator sets the StoreCoordinator for Raft message handling.
+// Must be called before Start() if Raft endpoints are needed.
+func (s *Server) SetCoordinator(coord *StoreCoordinator) {
+	s.coordinator = coord
 }
 
 // NewServer creates a Server with all dependencies.
@@ -220,13 +230,31 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 		}
 	}
 
-	errs := svc.server.storage.Prewrite(
-		mutations,
-		req.GetPrimaryLock(),
-		txntypes.TimeStamp(req.GetStartVersion()),
-		req.GetLockTtl(),
-	)
+	startTS := txntypes.TimeStamp(req.GetStartVersion())
+	primary := req.GetPrimaryLock()
+	lockTTL := req.GetLockTtl()
 
+	// Cluster mode: compute modifications then propose via Raft.
+	if coord := svc.server.coordinator; coord != nil {
+		modifies, errs := svc.server.storage.PrewriteModifies(mutations, primary, startTS, lockTTL)
+		for _, err := range errs {
+			if err != nil {
+				keyErr := errToKeyError(err)
+				resp.Errors = append(resp.Errors, keyErr)
+			}
+		}
+		if len(resp.Errors) > 0 || len(modifies) == 0 {
+			return resp, nil
+		}
+		// Propose modifications via Raft for replication to all nodes.
+		if err := coord.ProposeModifies(1, modifies, 10*time.Second); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "raft propose failed: %v", err)
+		}
+		return resp, nil
+	}
+
+	// Standalone mode: direct write.
+	errs := svc.server.storage.Prewrite(mutations, primary, startTS, lockTTL)
 	for _, err := range errs {
 		if err != nil {
 			keyErr := errToKeyError(err)
@@ -241,11 +269,27 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 func (svc *tikvService) KvCommit(ctx context.Context, req *kvrpcpb.CommitRequest) (*kvrpcpb.CommitResponse, error) {
 	resp := &kvrpcpb.CommitResponse{}
 
-	err := svc.server.storage.Commit(
-		req.GetKeys(),
-		txntypes.TimeStamp(req.GetStartVersion()),
-		txntypes.TimeStamp(req.GetCommitVersion()),
-	)
+	keys := req.GetKeys()
+	startTS := txntypes.TimeStamp(req.GetStartVersion())
+	commitTS := txntypes.TimeStamp(req.GetCommitVersion())
+
+	// Cluster mode: compute modifications then propose via Raft.
+	if coord := svc.server.coordinator; coord != nil {
+		modifies, err := svc.server.storage.CommitModifies(keys, startTS, commitTS)
+		if err != nil {
+			resp.Error = errToKeyError(err)
+			return resp, nil
+		}
+		if len(modifies) > 0 {
+			if err := coord.ProposeModifies(1, modifies, 10*time.Second); err != nil {
+				return nil, status.Errorf(codes.Unavailable, "raft propose failed: %v", err)
+			}
+		}
+		return resp, nil
+	}
+
+	// Standalone mode: direct write.
+	err := svc.server.storage.Commit(keys, startTS, commitTS)
 	if err != nil {
 		resp.Error = errToKeyError(err)
 	}
@@ -412,6 +456,55 @@ func (svc *tikvService) handleBatchCmd(ctx context.Context, req *tikvpb.BatchCom
 	}
 
 	return resp
+}
+
+// Raft implements the Tikv_RaftServer streaming endpoint.
+// It receives Raft messages from other nodes and dispatches them to local peers.
+func (svc *tikvService) Raft(stream tikvpb.Tikv_RaftServer) error {
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			return stream.SendAndClose(&raft_serverpb.Done{})
+		}
+		if err != nil {
+			return err
+		}
+
+		coord := svc.server.coordinator
+		if coord == nil {
+			continue // No coordinator; drop messages.
+		}
+
+		if err := coord.HandleRaftMessage(msg); err != nil {
+			// Log but don't fail the stream — message loss is expected.
+			_ = err
+		}
+	}
+}
+
+// BatchRaft implements the Tikv_BatchRaftServer streaming endpoint.
+// It receives batched Raft messages from other nodes.
+func (svc *tikvService) BatchRaft(stream tikvpb.Tikv_BatchRaftServer) error {
+	for {
+		batch, err := stream.Recv()
+		if err == io.EOF {
+			return stream.SendAndClose(&raft_serverpb.Done{})
+		}
+		if err != nil {
+			return err
+		}
+
+		coord := svc.server.coordinator
+		if coord == nil {
+			continue
+		}
+
+		for _, msg := range batch.GetMsgs() {
+			if err := coord.HandleRaftMessage(msg); err != nil {
+				_ = err
+			}
+		}
+	}
 }
 
 // errToKeyError converts an internal error to a kvrpcpb.KeyError.

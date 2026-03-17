@@ -105,6 +105,71 @@ The server exposes:
 
 Shut down gracefully with `SIGINT` or `SIGTERM`.
 
+## Running a Cluster
+
+gookvs supports running multiple nodes as a Raft cluster on a single machine. Data written to any leader node is replicated to all other nodes via Raft consensus.
+
+### Quick Start (Makefile)
+
+```bash
+# Build and start a 5-node cluster
+make cluster-start
+
+# Wait a few seconds for leader election, then verify cross-node replication
+make cluster-verify
+
+# Stop the cluster and clean up data
+make cluster-stop
+```
+
+### Cluster Ports
+
+| Node | gRPC Port | Status Port | Data Directory |
+|------|-----------|-------------|----------------|
+| 1 | 20160 | 20180 | /tmp/gookvs-cluster/node1 |
+| 2 | 20161 | 20181 | /tmp/gookvs-cluster/node2 |
+| 3 | 20162 | 20182 | /tmp/gookvs-cluster/node3 |
+| 4 | 20163 | 20183 | /tmp/gookvs-cluster/node4 |
+| 5 | 20164 | 20184 | /tmp/gookvs-cluster/node5 |
+
+### Manual Cluster Startup
+
+```bash
+# Start 5 nodes (run each in a separate terminal or background)
+CLUSTER="1=127.0.0.1:20160,2=127.0.0.1:20161,3=127.0.0.1:20162,4=127.0.0.1:20163,5=127.0.0.1:20164"
+
+./gookvs-server --store-id 1 --addr 127.0.0.1:20160 --status-addr 127.0.0.1:20180 \
+  --data-dir /tmp/gookvs-cluster/node1 --initial-cluster $CLUSTER &
+
+./gookvs-server --store-id 2 --addr 127.0.0.1:20161 --status-addr 127.0.0.1:20181 \
+  --data-dir /tmp/gookvs-cluster/node2 --initial-cluster $CLUSTER &
+
+./gookvs-server --store-id 3 --addr 127.0.0.1:20162 --status-addr 127.0.0.1:20182 \
+  --data-dir /tmp/gookvs-cluster/node3 --initial-cluster $CLUSTER &
+
+./gookvs-server --store-id 4 --addr 127.0.0.1:20163 --status-addr 127.0.0.1:20183 \
+  --data-dir /tmp/gookvs-cluster/node4 --initial-cluster $CLUSTER &
+
+./gookvs-server --store-id 5 --addr 127.0.0.1:20164 --status-addr 127.0.0.1:20184 \
+  --data-dir /tmp/gookvs-cluster/node5 --initial-cluster $CLUSTER &
+```
+
+### Cross-Node Verification
+
+The `make cluster-verify` target (or `go run scripts/cluster-verify.go`) performs:
+
+1. Health check on all 5 nodes via HTTP status endpoints
+2. Write a key-value pair to the leader node via gRPC (KvPrewrite + KvCommit)
+3. Read the same key from a different (follower) node via gRPC (KvGet)
+4. Verify the value matches, confirming Raft replication is working
+
+### Cluster CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--store-id` | Unique store ID for this node (required for cluster mode) |
+| `--initial-cluster` | Cluster topology: `storeID=addr,...` (e.g., `1=127.0.0.1:20160,2=127.0.0.1:20161`) |
+
 ## Using the Admin CLI
 
 ```bash

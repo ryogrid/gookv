@@ -44,8 +44,9 @@ func (s *Storage) allocCmdID() uint64 {
 	return id
 }
 
-// applyModifies writes the accumulated MVCC modifications to the engine atomically.
-func (s *Storage) applyModifies(modifies []mvcc.Modify) error {
+// ApplyModifies writes the accumulated MVCC modifications to the engine atomically.
+// Exported so coordinator can call it from applyFunc.
+func (s *Storage) ApplyModifies(modifies []mvcc.Modify) error {
 	if len(modifies) == 0 {
 		return nil
 	}
@@ -181,6 +182,76 @@ func (s *Storage) BatchGet(keys [][]byte, version txntypes.TimeStamp) ([]*KvPair
 	return results, nil
 }
 
+// PrewriteModifies performs the first phase of 2PC and returns the MVCC modifications
+// without applying them to the engine. Used in cluster mode to propose via Raft.
+func (s *Storage) PrewriteModifies(mutations []txn.Mutation, primary []byte, startTS txntypes.TimeStamp, lockTTL uint64) ([]mvcc.Modify, []error) {
+	keys := make([][]byte, len(mutations))
+	for i, m := range mutations {
+		keys[i] = m.Key
+	}
+
+	cmdID := s.allocCmdID()
+	lock := s.latches.GenLock(keys)
+	for !s.latches.Acquire(lock, cmdID) {
+	}
+	defer s.latches.Release(lock, cmdID)
+
+	snap := s.engine.NewSnapshot()
+	reader := mvcc.NewMvccReader(snap)
+	defer reader.Close()
+
+	mvccTxn := mvcc.NewMvccTxn(startTS)
+
+	errs := make([]error, len(mutations))
+	props := txn.PrewriteProps{
+		StartTS:   startTS,
+		Primary:   primary,
+		LockTTL:   lockTTL,
+		IsPrimary: false,
+	}
+
+	for i, mut := range mutations {
+		if bytes.Equal(mut.Key, primary) {
+			props.IsPrimary = true
+		} else {
+			props.IsPrimary = false
+		}
+		errs[i] = txn.Prewrite(mvccTxn, reader, props, mut)
+	}
+
+	for _, err := range errs {
+		if err != nil {
+			return nil, errs
+		}
+	}
+
+	return mvccTxn.Modifies, errs
+}
+
+// CommitModifies performs the second phase of 2PC and returns the MVCC modifications
+// without applying them to the engine. Used in cluster mode to propose via Raft.
+func (s *Storage) CommitModifies(keys [][]byte, startTS, commitTS txntypes.TimeStamp) ([]mvcc.Modify, error) {
+	cmdID := s.allocCmdID()
+	lock := s.latches.GenLock(keys)
+	for !s.latches.Acquire(lock, cmdID) {
+	}
+	defer s.latches.Release(lock, cmdID)
+
+	snap := s.engine.NewSnapshot()
+	reader := mvcc.NewMvccReader(snap)
+	defer reader.Close()
+
+	mvccTxn := mvcc.NewMvccTxn(startTS)
+
+	for _, key := range keys {
+		if err := txn.Commit(mvccTxn, reader, key, startTS, commitTS); err != nil {
+			return nil, err
+		}
+	}
+
+	return mvccTxn.Modifies, nil
+}
+
 // Prewrite performs the first phase of 2PC for multiple mutations.
 func (s *Storage) Prewrite(mutations []txn.Mutation, primary []byte, startTS txntypes.TimeStamp, lockTTL uint64) []error {
 	// Collect keys for latching.
@@ -232,7 +303,7 @@ func (s *Storage) Prewrite(mutations []txn.Mutation, primary []byte, startTS txn
 
 	// Only apply modifications if all prewrites succeeded.
 	if !hasError {
-		if err := s.applyModifies(mvccTxn.Modifies); err != nil {
+		if err := s.ApplyModifies(mvccTxn.Modifies); err != nil {
 			// If apply fails, return the error for all mutations.
 			for i := range errs {
 				errs[i] = err
@@ -264,7 +335,7 @@ func (s *Storage) Commit(keys [][]byte, startTS, commitTS txntypes.TimeStamp) er
 		}
 	}
 
-	return s.applyModifies(mvccTxn.Modifies)
+	return s.ApplyModifies(mvccTxn.Modifies)
 }
 
 // BatchRollback rolls back a transaction's locks on the given keys.
@@ -287,7 +358,7 @@ func (s *Storage) BatchRollback(keys [][]byte, startTS txntypes.TimeStamp) error
 		}
 	}
 
-	return s.applyModifies(mvccTxn.Modifies)
+	return s.ApplyModifies(mvccTxn.Modifies)
 }
 
 // Cleanup cleans up a transaction lock on a key (same as rollback for a single key).
@@ -316,7 +387,7 @@ func (s *Storage) Cleanup(key []byte, startTS txntypes.TimeStamp) (txntypes.Time
 	if err := txn.Rollback(mvccTxn, reader, key, startTS); err != nil {
 		return 0, err
 	}
-	return 0, s.applyModifies(mvccTxn.Modifies)
+	return 0, s.ApplyModifies(mvccTxn.Modifies)
 }
 
 // CheckTxnStatus checks the status of a transaction.

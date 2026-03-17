@@ -8,12 +8,19 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/pingcap/kvproto/pkg/metapb"
+	"go.etcd.io/etcd/raft/v3"
+
 	"github.com/ryogrid/gookvs/internal/config"
 	"github.com/ryogrid/gookvs/internal/engine/rocks"
+	"github.com/ryogrid/gookvs/internal/raftstore"
+	raftrouter "github.com/ryogrid/gookvs/internal/raftstore/router"
 	"github.com/ryogrid/gookvs/internal/server"
+	"github.com/ryogrid/gookvs/internal/server/transport"
 	statusserver "github.com/ryogrid/gookvs/internal/server/status"
 )
 
@@ -23,6 +30,8 @@ func main() {
 	statusAddr := flag.String("status-addr", "", "HTTP status listen address (overrides config)")
 	dataDir := flag.String("data-dir", "", "Storage data directory (overrides config)")
 	pdEndpoints := flag.String("pd-endpoints", "", "PD endpoints, comma separated (overrides config)")
+	storeID := flag.Uint64("store-id", 0, "Store ID for this node (enables cluster mode)")
+	initialCluster := flag.String("initial-cluster", "", "Initial cluster topology: storeID=addr,... (e.g. 1=127.0.0.1:20160,2=127.0.0.1:20161)")
 	flag.Parse()
 
 	// Load configuration.
@@ -78,6 +87,54 @@ func main() {
 		ClusterID:  cfg.Server.ClusterID,
 	}
 	srv := server.NewServer(srvCfg, storage)
+
+	// Cluster mode: set up Raft coordination if --store-id is specified.
+	var coord *server.StoreCoordinator
+	if *storeID > 0 && *initialCluster != "" {
+		clusterMap := parseInitialCluster(*initialCluster)
+		if len(clusterMap) == 0 {
+			log.Fatalf("Invalid --initial-cluster format")
+		}
+
+		fmt.Printf("  store-id:    %d\n", *storeID)
+		fmt.Printf("  cluster:     %v\n", clusterMap)
+
+		resolver := server.NewStaticStoreResolver(clusterMap)
+		raftClient := transport.NewRaftClient(resolver, transport.DefaultRaftClientConfig())
+		rtr := raftrouter.New(256)
+
+		peerCfg := raftstore.DefaultPeerConfig()
+		if cfg.RaftStore.RaftBaseTickInterval.Duration > 0 {
+			peerCfg.RaftBaseTickInterval = cfg.RaftStore.RaftBaseTickInterval.Duration
+		}
+
+		coord = server.NewStoreCoordinator(server.StoreCoordinatorConfig{
+			StoreID: *storeID,
+			Engine:  engine,
+			Storage: storage,
+			Router:  rtr,
+			Client:  raftClient,
+			PeerCfg: peerCfg,
+		})
+		srv.SetCoordinator(coord)
+
+		// Bootstrap a single region (region 1) spanning all stores.
+		peers := make([]*metapb.Peer, 0, len(clusterMap))
+		raftPeers := make([]raft.Peer, 0, len(clusterMap))
+		for sid := range clusterMap {
+			peers = append(peers, &metapb.Peer{Id: sid, StoreId: sid})
+			raftPeers = append(raftPeers, raft.Peer{ID: sid})
+		}
+		region := &metapb.Region{
+			Id:    1,
+			Peers: peers,
+		}
+		if err := coord.BootstrapRegion(region, raftPeers); err != nil {
+			log.Fatalf("Failed to bootstrap region: %v", err)
+		}
+		fmt.Printf("Raft cluster bootstrapped (region 1, %d peers)\n", len(raftPeers))
+	}
+
 	if err := srv.Start(); err != nil {
 		log.Fatalf("Failed to start gRPC server: %v", err)
 	}
@@ -102,6 +159,9 @@ func main() {
 	fmt.Printf("\nReceived signal %v, shutting down...\n", sig)
 
 	// Graceful shutdown.
+	if coord != nil {
+		coord.Stop()
+	}
 	_ = statusSrv.Stop()
 	srv.Stop()
 	fmt.Println("gookvs-server stopped")
@@ -116,4 +176,25 @@ func splitEndpoints(s string) []string {
 		}
 	}
 	return parts
+}
+
+// parseInitialCluster parses "storeID=addr,storeID=addr,..." into a map.
+func parseInitialCluster(s string) map[uint64]string {
+	result := make(map[uint64]string)
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		eqIdx := strings.Index(part, "=")
+		if eqIdx < 0 {
+			continue
+		}
+		id, err := strconv.ParseUint(part[:eqIdx], 10, 64)
+		if err != nil {
+			continue
+		}
+		result[id] = part[eqIdx+1:]
+	}
+	return result
 }

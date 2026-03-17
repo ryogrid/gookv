@@ -303,6 +303,13 @@ func (p *Peer) handleReady() {
 		if p.applyFunc != nil {
 			p.applyFunc(p.regionID, rd.CommittedEntries)
 		}
+		// Invoke pending proposal callbacks for committed entries.
+		for _, e := range rd.CommittedEntries {
+			if cb, ok := p.pendingProposals[e.Index]; ok {
+				cb(e.Data, nil)
+				delete(p.pendingProposals, e.Index)
+			}
+		}
 	}
 
 	// Advance the Raft state machine.

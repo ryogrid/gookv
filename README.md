@@ -405,6 +405,10 @@ go tool pprof http://127.0.0.1:20180/debug/pprof/profile?seconds=10
 | IMPL-020 | internal/storage/txn (pessimistic transactions) | Done |
 | IMPL-021 | cmd/gookvs-ctl (admin CLI) | Done |
 
+## Acknowledgments
+
+The architecture and implementation of gookvs were designed with reference to the [TiKV](https://github.com/tikv/tikv) source code. TiKV is licensed under the Apache License 2.0 — see [TiKV LICENSE](https://github.com/tikv/tikv/blob/de241946c52851ac996e1f1d1047a9d3c914f149/LICENSE).
+
 ## License
 
 See the project root for license information.

@@ -88,9 +88,9 @@ func NewPeer(
 ) (*Peer, error) {
 	storage := NewPeerStorage(regionID, engine)
 
-	// For bootstrap, we need truly empty storage (matching MemoryStorage convention).
-	// etcd/raft will set the hard state during Bootstrap().
 	if len(peers) > 0 {
+		// For bootstrap, we need truly empty storage (matching MemoryStorage convention).
+		// etcd/raft will set the hard state during Bootstrap().
 		storage.SetApplyState(ApplyState{
 			AppliedIndex:   0,
 			TruncatedIndex: 0,
@@ -99,6 +99,12 @@ func NewPeer(
 		storage.SetPersistedLastIndex(0)
 		// Add dummy entry at index 0 (term 0), matching MemoryStorage convention.
 		storage.SetDummyEntry()
+	} else {
+		// Non-bootstrap (restart): recover persisted Raft state from engine
+		// BEFORE creating RawNode, so it reads the correct initial state.
+		if err := storage.RecoverFromEngine(); err != nil {
+			return nil, fmt.Errorf("raftstore: recover from engine: %w", err)
+		}
 	}
 
 	raftCfg := &raft.Config{

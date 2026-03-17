@@ -247,6 +247,61 @@ func (s *PeerStorage) SetDummyEntry() {
 	s.entries = []raftpb.Entry{{Index: 0, Term: 0}}
 }
 
+// RecoverFromEngine restores PeerStorage state from the engine.
+// This should be called when restarting a peer that already has persisted Raft state.
+func (s *PeerStorage) RecoverFromEngine() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Recover hard state.
+	data, err := s.engine.Get(cfnames.CFRaft, keys.RaftStateKey(s.regionID))
+	if err == nil {
+		var hs raftpb.HardState
+		if err := hs.Unmarshal(data); err != nil {
+			return fmt.Errorf("raftstore: unmarshal hard state: %w", err)
+		}
+		s.hardState = hs
+	} else if err != traits.ErrNotFound {
+		return fmt.Errorf("raftstore: read hard state: %w", err)
+	}
+
+	// Scan Raft log entries to find the last persisted index and rebuild cache.
+	startKey, endKey := keys.RaftLogKeyRange(s.regionID)
+	iter := s.engine.NewIterator(cfnames.CFRaft, traits.IterOptions{
+		LowerBound: startKey,
+		UpperBound: endKey,
+	})
+	defer iter.Close()
+
+	var lastIdx uint64
+	var entries []raftpb.Entry
+	for iter.SeekToFirst(); iter.Valid(); iter.Next() {
+		var entry raftpb.Entry
+		if err := entry.Unmarshal(iter.Value()); err != nil {
+			return fmt.Errorf("raftstore: unmarshal entry during recovery: %w", err)
+		}
+		entries = append(entries, entry)
+		if entry.Index > lastIdx {
+			lastIdx = entry.Index
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return fmt.Errorf("raftstore: iterate entries during recovery: %w", err)
+	}
+
+	if lastIdx > 0 {
+		s.persistedLastIndex = lastIdx
+		// Keep only the most recent entries in cache.
+		const maxCacheSize = 1024
+		if len(entries) > maxCacheSize {
+			entries = entries[len(entries)-maxCacheSize:]
+		}
+		s.entries = entries
+	}
+
+	return nil
+}
+
 // --- Internal helpers ---
 
 func (s *PeerStorage) firstIndexLocked() uint64 {

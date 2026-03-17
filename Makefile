@@ -18,7 +18,7 @@ vet:
 	go vet ./...
 
 proto:
-	@echo "TODO: protoc generation for kvproto"
+	@echo "Proto generation is not needed: gookvs uses pre-generated Go code from github.com/pingcap/kvproto"
 
 cluster-start: build
 	@echo "Starting $(CLUSTER_NODES)-node gookvs cluster..."

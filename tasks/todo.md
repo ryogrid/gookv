@@ -203,5 +203,33 @@
 - [x] Binary builds successfully
 - [x] 5 tests passing
 
+## Additional Implementation (task-batch)
+
+### Phase 1 (Priority 1) - COMPLETE
+- [x] task-08-writebatch-savepoint: WriteBatch SavePoint with Copy-on-SavePoint (14 tests)
+- [x] task-11-raw-kv-api: Raw KV API - RawGet/Put/Delete/Scan/Batch ops (16 tests)
+- [x] task-09-cli-improvements: region command, dump --decode, compact fix (15 tests)
+- [x] task-06-mvcc-scanner: MVCC Scanner for efficient range queries (18 tests)
+
+### Phase 2 (Priority 2) - COMPLETE
+- [x] task-05-txn-scheduler: TxnScheduler command dispatcher (9 tests)
+- [x] task-07-rpc-wiring: Pessimistic lock, ResolveLock, TxnHeartBeat RPCs
+- [x] task-03-raft-log-compaction: Raft log compaction/GC (11 tests)
+
+### Phase 3 (Priority 3) - COMPLETE
+- [x] task-01-raft-snapshot: SST export/ingest and snapshot transfer (13 tests)
+- [x] task-10-coprocessor-rpc: Coprocessor gRPC integration (12 tests)
+
+### Phase 4 (Priority 4) - PARTIAL
+- [x] task-12-gc-worker: GC worker for MVCC version cleanup (8 tests)
+- [x] task-13-pd-server: PD (Placement Driver) server (13 tests)
+- [ ] task-04-conf-change: Raft configuration changes (peer add/remove)
+
+### Phase 5-7 (Priority 5-7) - PENDING
+- [ ] task-14-pd-integration: PD client wiring (depends on task-13, task-04)
+- [ ] task-02-region-split: Region split (depends on task-04, task-14)
+- [ ] task-15-region-merge: Region merge (depends on task-02, task-04, task-14)
+
 ## Summary
 All 21 IMPL user stories complete. Total new tests: 179 across 8 new packages.
+Additional impl: 11 of 15 tasks complete with ~130 new tests.

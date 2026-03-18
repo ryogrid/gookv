@@ -1,0 +1,591 @@
+# 04 Server Layer: gRPC Service, Storage Bridge, and Transport
+
+## 1. Overview
+
+The server layer in gookvs provides the outward-facing gRPC service and the internal machinery that connects client requests to the transactional storage engine and the Raft replication layer. It is organized into the following sub-components:
+
+| Component | Package | Role |
+|---|---|---|
+| **Server** | `internal/server` | Owns the gRPC listener, lifecycle, and configuration |
+| **tikvService** | `internal/server` | Implements `tikvpb.TikvServer` (the TiKV API) |
+| **Storage** | `internal/server` | Bridges gRPC handlers to the MVCC/txn layer |
+| **StoreCoordinator** | `internal/server` | Manages Raft peers and proposes writes via Raft |
+| **RaftClient** | `internal/server/transport` | Inter-node gRPC transport with connection pooling |
+| **Status Server** | `internal/server/status` | HTTP diagnostics: pprof, /metrics, /health, /config |
+| **Flow Control** | `internal/server/flow` | ReadPool EWMA, FlowController, MemoryQuota |
+
+The server registers the `Tikv` gRPC service defined in `proto/tikvpb.proto` and enables gRPC server reflection for tooling such as `grpcurl`.
+
+---
+
+## 2. Key Types
+
+### 2.1 Server (`internal/server/server.go`)
+
+```go
+type ServerConfig struct {
+    ListenAddr string
+    ClusterID  uint64
+}
+
+type Server struct {
+    cfg         ServerConfig
+    grpcServer  *grpc.Server
+    storage     *Storage
+    coordinator *StoreCoordinator
+    listener    net.Listener
+    ctx         context.Context
+    cancel      context.CancelFunc
+    wg          sync.WaitGroup
+}
+```
+
+**Construction** (`NewServer`):
+- Creates a `context.WithCancel` for lifecycle control.
+- Builds gRPC server options via `buildServerOptions`: `MaxRecvMsgSize=16 MB`, `MaxSendMsgSize=16 MB`, and a `clusterIDInterceptor` (when `ClusterID != 0`).
+- Registers the `tikvService` with `tikvpb.RegisterTikvServer`.
+- Enables gRPC server reflection via `reflection.Register`.
+
+**Lifecycle methods**:
+- `Start()` -- binds a TCP listener and launches `grpcServer.Serve` in a goroutine.
+- `Stop()` -- cancels the context and calls `GracefulStop`.
+- `SetCoordinator(coord)` -- injects the `StoreCoordinator` for cluster mode (must be called before `Start`).
+- `Addr()` -- returns the actual listener address.
+
+### 2.2 tikvService (`internal/server/server.go`)
+
+```go
+type tikvService struct {
+    tikvpb.UnimplementedTikvServer
+    server *Server
+}
+```
+
+Embeds `UnimplementedTikvServer` for forward compatibility and holds a back-pointer to `Server` to access `storage` and `coordinator`. This struct carries all the gRPC handler methods (see Section 3 and 4).
+
+### 2.3 Storage (`internal/server/storage.go`)
+
+```go
+type Storage struct {
+    engine    traits.KvEngine
+    latches   *latch.Latches      // key-range latch manager (2048 slots)
+    concMgr   *concurrency.Manager
+    mu        sync.Mutex
+    nextCmdID uint64
+}
+```
+
+**Construction** (`NewStorage`): takes a `traits.KvEngine`, initializes a latch table with 2048 slots, a concurrency manager, and a monotonic command ID counter starting at 1.
+
+**Methods** (details in Section 5):
+
+| Method | Description |
+|---|---|
+| `Get(key, version)` | Transactional point read |
+| `Scan(startKey, endKey, limit, version, keyOnly)` | Transactional range scan |
+| `BatchGet(keys, version)` | Multi-key transactional read |
+| `Prewrite(mutations, primary, startTS, lockTTL)` | 2PC phase-1 with direct engine write |
+| `PrewriteModifies(...)` | 2PC phase-1 returning `[]mvcc.Modify` (for Raft proposal) |
+| `Commit(keys, startTS, commitTS)` | 2PC phase-2 with direct engine write |
+| `CommitModifies(keys, startTS, commitTS)` | 2PC phase-2 returning `[]mvcc.Modify` |
+| `BatchRollback(keys, startTS)` | Rollback locks |
+| `Cleanup(key, startTS)` | Single-key lock cleanup |
+| `CheckTxnStatus(primaryKey, startTS)` | Transaction status inquiry |
+| `ApplyModifies(modifies)` | Write `[]mvcc.Modify` to engine atomically |
+
+### 2.4 StoreCoordinator (`internal/server/coordinator.go`)
+
+```go
+type StoreCoordinator struct {
+    mu      sync.RWMutex
+    storeID uint64
+    engine  traits.KvEngine
+    storage *Storage
+    router  *router.Router
+    client  *transport.RaftClient
+    cfg     raftstore.PeerConfig
+    peers   map[uint64]*raftstore.Peer       // regionID -> Peer
+    cancels map[uint64]context.CancelFunc    // regionID -> cancel
+    dones   map[uint64]chan struct{}          // regionID -> done signal
+}
+```
+
+**Methods**:
+
+| Method | Description |
+|---|---|
+| `BootstrapRegion(region, allPeers)` | Creates and starts a Raft peer for a region |
+| `ProposeModifies(regionID, modifies, timeout)` | Serializes modifies as `RaftCmdRequest` and proposes via Raft; blocks until committed or timeout |
+| `HandleRaftMessage(msg)` | Dispatches incoming `RaftMessage` to the correct peer via the router |
+| `GetPeer(regionID)` | Returns the peer for a region |
+| `Stop()` | Cancels all peers and unregisters from the router |
+
+Helper functions in `internal/server/raftcmd.go` provide the serialization bridge:
+- `ModifiesToRequests([]mvcc.Modify) []*raft_cmdpb.Request` -- leader serialization path.
+- `RequestsToModifies([]*raft_cmdpb.Request) []mvcc.Modify` -- follower/apply deserialization path.
+
+### 2.5 Helper: errToKeyError (`internal/server/server.go`)
+
+Converts internal Go errors to protobuf `kvrpcpb.KeyError` structures:
+
+| Error sentinel | KeyError field set |
+|---|---|
+| `txn.ErrKeyIsLocked` | `Locked` (with empty `LockInfo`) |
+| `txn.ErrWriteConflict` | `Conflict` (with empty `WriteConflict`) |
+| `txn.ErrTxnLockNotFound` | `TxnLockNotFound` |
+| `txn.ErrAlreadyCommitted` | `Abort` (error message string) |
+| (other) | `Retryable` (error message string) |
+
+---
+
+## 3. API Definitions (`proto/tikvpb.proto`)
+
+The `Tikv` service declares the full TiKV-compatible API. Below is the implementation status in gookvs.
+
+### 3.1 Transactional RPCs
+
+| RPC | Request / Response | Implemented |
+|---|---|---|
+| `KvGet` | `GetRequest` / `GetResponse` | Yes |
+| `KvScan` | `ScanRequest` / `ScanResponse` | Yes |
+| `KvPrewrite` | `PrewriteRequest` / `PrewriteResponse` | Yes |
+| `KvCommit` | `CommitRequest` / `CommitResponse` | Yes |
+| `KvBatchGet` | `BatchGetRequest` / `BatchGetResponse` | Yes |
+| `KvBatchRollback` | `BatchRollbackRequest` / `BatchRollbackResponse` | Yes |
+| `KvCleanup` | `CleanupRequest` / `CleanupResponse` | Yes |
+| `KvCheckTxnStatus` | `CheckTxnStatusRequest` / `CheckTxnStatusResponse` | Yes |
+| `KvPessimisticLock` | `PessimisticLockRequest` / `PessimisticLockResponse` | No (unimplemented stub) |
+| `KVPessimisticRollback` | `PessimisticRollbackRequest` / `PessimisticRollbackResponse` | No (unimplemented stub) |
+| `KvTxnHeartBeat` | `TxnHeartBeatRequest` / `TxnHeartBeatResponse` | No (unimplemented stub) |
+| `KvCheckSecondaryLocks` | `CheckSecondaryLocksRequest` / `CheckSecondaryLocksResponse` | No (unimplemented stub) |
+| `KvScanLock` | `ScanLockRequest` / `ScanLockResponse` | No (unimplemented stub) |
+| `KvResolveLock` | `ResolveLockRequest` / `ResolveLockResponse` | No (unimplemented stub) |
+| `KvGC` | `GCRequest` / `GCResponse` | No (unimplemented stub) |
+| `KvDeleteRange` | `DeleteRangeRequest` / `DeleteRangeResponse` | No (unimplemented stub) |
+
+### 3.2 Raw RPCs
+
+| RPC | Implemented |
+|---|---|
+| `RawGet`, `RawPut`, `RawDelete`, `RawScan` | No (unimplemented stubs) |
+| `RawBatchGet`, `RawBatchPut`, `RawBatchDelete` | No (unimplemented stubs) |
+| `RawBatchScan`, `RawGetKeyTTL`, `RawCompareAndSwap`, `RawChecksum` | No (unimplemented stubs) |
+
+All Raw RPCs fall through to the `UnimplementedTikvServer` default, which returns an `Unimplemented` gRPC status.
+
+### 3.3 Raft RPCs
+
+| RPC | Signature | Implemented |
+|---|---|---|
+| `Raft` | `stream RaftMessage` -> `Done` | Yes -- receives messages and dispatches to coordinator |
+| `BatchRaft` | `stream BatchRaftMessage` -> `Done` | Yes -- unpacks batch and dispatches each message |
+| `Snapshot` | `stream SnapshotChunk` -> `Done` | No (unimplemented stub) |
+
+### 3.4 Batch Commands
+
+| RPC | Signature | Implemented |
+|---|---|---|
+| `BatchCommands` | `stream BatchCommandsRequest` <-> `stream BatchCommandsResponse` | Yes |
+
+`BatchCommands` is a bidirectional streaming RPC. The `handleBatchCmd` method routes each sub-command (via a protobuf `oneof cmd`) to the corresponding unary handler (KvGet, KvScan, KvPrewrite, KvCommit, KvBatchGet, KvBatchRollback, KvCleanup, KvCheckTxnStatus). Unsupported command types produce an empty response.
+
+### 3.5 Other RPCs
+
+| RPC | Implemented |
+|---|---|
+| `SplitRegion` | No |
+| `ReadIndex` | No |
+| `MvccGetByKey` | No |
+| `MvccGetByStartTs` | No |
+| `Coprocessor`, `CoprocessorStream`, `BatchCoprocessor` | No |
+
+---
+
+## 4. Request Handling
+
+### 4.1 KvGet Handler Flow
+
+```
+KvGet(ctx, GetRequest) -> GetResponse
+```
+
+1. Extract `key` and `version` from the `GetRequest`.
+2. Call `storage.Get(key, TimeStamp(version))`.
+3. On `ErrKeyIsLocked`: return `GetResponse` with `Error.Locked` set (including `LockInfo` with the key and lock version). This is a *logical* error, not a gRPC error.
+4. On other errors: return a gRPC `Internal` status error.
+5. If `value == nil`: set `resp.NotFound = true`.
+6. Otherwise: set `resp.Value = value`.
+
+### 4.2 KvPrewrite Handler Flow (dual mode)
+
+```
+KvPrewrite(ctx, PrewriteRequest) -> PrewriteResponse
+```
+
+1. Convert proto `Mutation` entries to `txn.Mutation` structs, mapping `Op_Put`/`Op_Insert` to `MutationOpPut`, `Op_Del` to `MutationOpDelete`, and `Op_Lock`/`Op_CheckNotExists` to `MutationOpLock`.
+2. Extract `startTS`, `primary`, `lockTTL` from the request.
+
+**Cluster mode** (when `coordinator != nil`):
+1. Call `storage.PrewriteModifies(mutations, primary, startTS, lockTTL)` -- this performs MVCC checks and computes `[]mvcc.Modify` without writing to the engine.
+2. If any per-mutation errors exist, convert them via `errToKeyError` and return immediately.
+3. Call `coordinator.ProposeModifies(regionID=1, modifies, 10s timeout)` -- this serializes the modifications as a `RaftCmdRequest`, proposes via Raft, and blocks until the entry is committed and applied on all replicas.
+4. Return the response.
+
+**Standalone mode** (when `coordinator == nil`):
+1. Call `storage.Prewrite(mutations, primary, startTS, lockTTL)` -- this performs MVCC checks, computes modifications, and applies them directly to the engine in a single `WriteBatch.Commit`.
+2. Convert any errors and return.
+
+### 4.3 KvCommit Handler Flow (dual mode)
+
+Follows the same dual-mode pattern as KvPrewrite:
+- **Cluster**: `storage.CommitModifies` -> `coordinator.ProposeModifies` -> Raft -> applied.
+- **Standalone**: `storage.Commit` -> direct engine write.
+
+---
+
+## 5. Storage Layer
+
+The `Storage` struct is the central bridge between gRPC handlers and the MVCC transaction processing pipeline. It is located in `internal/server/storage.go`.
+
+### 5.1 Read Path
+
+For read operations (`Get`, `Scan`, `BatchGet`):
+
+1. Create a snapshot from the engine: `engine.NewSnapshot()`.
+2. Create an `mvcc.MvccReader` on top of the snapshot.
+3. Create an `mvcc.PointGetter` with the read timestamp and `IsolationLevelSI` (snapshot isolation).
+4. Call `PointGetter.Get(key)` for each key.
+5. Return results or lock-conflict errors.
+
+`Scan` additionally iterates the `CF_WRITE` column family using MVCC-encoded seek keys, deduplicates by user key, and delegates each individual key read to `PointGetter`.
+
+### 5.2 Write Path -- Standalone (Direct)
+
+For `Prewrite`, `Commit`, `BatchRollback`:
+
+1. **Latch acquisition**: Collect all mutation keys, call `latches.GenLock(keys)`, then spin on `latches.Acquire(lock, cmdID)` until acquired. Latches prevent concurrent writes to overlapping key sets.
+2. **Snapshot + Reader**: `engine.NewSnapshot()` -> `mvcc.NewMvccReader(snap)`.
+3. **MvccTxn creation**: `mvcc.NewMvccTxn(startTS)` -- accumulates modifications in `mvccTxn.Modifies`.
+4. **Transaction operation**: Call the appropriate `txn.Prewrite`/`txn.Commit`/`txn.Rollback` function for each key. These functions read existing MVCC data via the reader and append Put/Delete modifications to the txn.
+5. **Apply**: Call `ApplyModifies(mvccTxn.Modifies)` which creates a `WriteBatch`, translates each `mvcc.Modify` into a Put or Delete on the appropriate column family, and calls `wb.Commit()`.
+6. **Latch release**: Deferred via `latches.Release(lock, cmdID)`.
+
+### 5.3 Write Path -- Cluster (Raft)
+
+For `PrewriteModifies`, `CommitModifies`:
+
+Steps 1-4 are identical to the standalone path, but step 5 is skipped. Instead:
+- The method returns `[]mvcc.Modify` to the caller (the gRPC handler).
+- The handler calls `coordinator.ProposeModifies(regionID, modifies, timeout)`.
+- `ProposeModifies` converts modifies to `[]*raft_cmdpb.Request` via `ModifiesToRequests`, wraps them in a `RaftCmdRequest`, and sends a `PeerMsgTypeRaftCommand` to the peer's mailbox via the router.
+- The peer proposes the entry to Raft. After consensus, the `applyFunc` callback fires.
+- `applyEntries` unmarshals each committed entry back to `RaftCmdRequest`, converts the requests to modifies via `RequestsToModifies`, and calls `storage.ApplyModifies`.
+
+### 5.4 CheckTxnStatus
+
+Does not acquire latches (read-only on lock state). Creates a snapshot and reader, then delegates to `txn.CheckTxnStatus`. Returns a `TxnStatus` struct indicating one of three states:
+- Locked (with lock info including TTL, primary, startTS).
+- Committed (with commitTS).
+- Rolled back (both LockTtl and CommitVersion are zero).
+
+---
+
+## 6. Transport Layer (`internal/server/transport/transport.go`)
+
+### 6.1 RaftClient
+
+```go
+type RaftClient struct {
+    mu          sync.RWMutex
+    connections map[uint64]*connPool  // storeID -> connection pool
+    resolver    StoreResolver
+    batchSize   int
+    dialTimeout time.Duration
+}
+```
+
+**StoreResolver interface**:
+```go
+type StoreResolver interface {
+    ResolveStore(storeID uint64) (string, error)
+}
+```
+
+**Configuration** (`RaftClientConfig`):
+- `PoolSize`: connections per store (default 1)
+- `BatchSize`: max messages per batch send (default 128)
+- `DialTimeout`: connection timeout (default 5s)
+
+### 6.2 Methods
+
+| Method | Description |
+|---|---|
+| `Send(storeID, msg)` | Opens a `Raft` stream to the target store, sends a single `RaftMessage`, then closes. 5s timeout. |
+| `BatchSend(storeID, msgs)` | Opens a `BatchRaft` stream. Sends messages in batches of `batchSize`. 10s timeout. |
+| `SendSnapshot(storeID, msg, data)` | Opens a `Snapshot` stream. Sends data in 1 MB chunks with the `RaftMessage` metadata in the first chunk. 5-minute timeout. |
+| `Close()` | Closes all connection pools. |
+| `RemoveConnection(storeID)` | Closes and removes the pool for a specific store. |
+
+### 6.3 Connection Pooling
+
+Each store gets a `connPool` with lazily-established gRPC connections. Connection options:
+- `insecure.NewCredentials()` (no TLS)
+- Keepalive: `Time=10s`, `Timeout=3s`, `PermitWithoutStream=true`
+- Max message sizes: 64 MB send/recv
+
+`HashRegionForConn(regionID, poolSize)` provides FNV-based consistent hashing for selecting a connection index within a pool (currently unused since pool size defaults to 1).
+
+### 6.4 MessageBatcher
+
+```go
+type MessageBatcher struct {
+    batches map[uint64][]*raft_serverpb.RaftMessage  // storeID -> pending
+    client  *RaftClient
+    maxSize int
+}
+```
+
+Accumulates Raft messages per target store and flushes them all at once via `BatchSend`. Methods: `Add(storeID, msg)`, `Flush() map[uint64]error`, `Pending() map[uint64]int`.
+
+---
+
+## 7. Status Server (`internal/server/status/status.go`)
+
+The status server is a standalone HTTP server for diagnostics and monitoring.
+
+### 7.1 Endpoints
+
+| Path | Handler | Description |
+|---|---|---|
+| `/debug/pprof/` | `pprof.Index` | Go pprof profiling index |
+| `/debug/pprof/cmdline` | `pprof.Cmdline` | Command-line profile |
+| `/debug/pprof/profile` | `pprof.Profile` | CPU profile |
+| `/debug/pprof/symbol` | `pprof.Symbol` | Symbol lookup |
+| `/debug/pprof/trace` | `pprof.Trace` | Execution trace |
+| `/metrics` | `promhttp.Handler()` | Prometheus metrics |
+| `/config` | `handleConfig` | Returns current server config as JSON |
+| `/status` | `handleStatus` | Returns `{"status":"ok","version":"gookvs-dev"}` |
+| `/health` | `handleHealth` | Returns `{"status":"ok"}` (HTTP 200) |
+
+### 7.2 Configuration
+
+```go
+type Config struct {
+    Addr     string              // e.g. "127.0.0.1:20180"
+    ConfigFn func() interface{}  // Returns current config for /config
+}
+```
+
+HTTP server timeouts: `ReadTimeout=10s`, `WriteTimeout=30s`, `IdleTimeout=60s`. Graceful shutdown with a 5-second deadline.
+
+---
+
+## 8. Flow Control (`internal/server/flow/flow.go`)
+
+### 8.1 ReadPool
+
+A worker pool with EWMA-based busy detection.
+
+| Field | Description |
+|---|---|
+| `workers` | Number of goroutine workers (default 4) |
+| `taskCh` | Buffered channel (`workers*16` capacity) |
+| `ewmaSlice` | EWMA of task execution time in nanoseconds (atomic, alpha=0.3) |
+| `queueDepth` | Current number of tasks in the queue (atomic) |
+
+- `Submit(task)` wraps the task with timing instrumentation and enqueues it.
+- `CheckBusy(ctx, thresholdMs)` estimates wait time as `ewma * depth / workers` and returns `ServerIsBusyError` if it exceeds the threshold.
+
+### 8.2 FlowController
+
+Probabilistic request dropping based on compaction pressure.
+
+| Field | Description |
+|---|---|
+| `discardRatio` | Fixed-point 0-1000 representing drop probability 0.0-1.0 (atomic) |
+| `softLimit` | Pending compaction bytes soft limit |
+| `hardLimit` | Pending compaction bytes hard limit |
+
+- `ShouldDrop()` returns true with probability equal to `discardRatio / 1000`.
+- `UpdatePendingCompactionBytes(pending)` recalculates the ratio via linear interpolation between soft and hard limits. Below soft limit the ratio is 0; at or above hard limit the ratio is 1.0.
+
+### 8.3 MemoryQuota
+
+Lock-free memory quota enforcement using atomic CAS.
+
+| Method | Description |
+|---|---|
+| `Acquire(size)` | CAS loop; returns `ErrSchedTooBusy` if `used + size > capacity` |
+| `Release(size)` | Atomically decrements used |
+| `Used()`, `Capacity()`, `Available()` | Introspection methods |
+
+---
+
+## 9. Diagrams
+
+### 9.1 KvGet Request Flow (Sequence)
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant gRPC as gRPC Server
+    participant Svc as tikvService
+    participant Stor as Storage
+    participant MVCC as PointGetter / MvccReader
+    participant Eng as KvEngine
+
+    Client->>gRPC: KvGet(GetRequest{key, version})
+    gRPC->>Svc: KvGet(ctx, req)
+    Svc->>Stor: Get(key, TimeStamp(version))
+    Stor->>Eng: NewSnapshot()
+    Eng-->>Stor: Snapshot
+    Stor->>MVCC: NewMvccReader(snap)
+    Stor->>MVCC: NewPointGetter(reader, version, SI)
+    Stor->>MVCC: pg.Get(key)
+    MVCC->>Eng: read CF_LOCK, CF_WRITE, CF_DEFAULT
+    Eng-->>MVCC: data
+    MVCC-->>Stor: value or ErrKeyIsLocked
+    alt ErrKeyIsLocked
+        Stor-->>Svc: error
+        Svc-->>gRPC: GetResponse{Error: KeyError{Locked}}
+    else value found
+        Stor-->>Svc: value
+        Svc-->>gRPC: GetResponse{Value: value}
+    else not found
+        Stor-->>Svc: nil
+        Svc-->>gRPC: GetResponse{NotFound: true}
+    end
+    gRPC-->>Client: GetResponse
+```
+
+### 9.2 KvPrewrite in Cluster Mode (Sequence)
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant gRPC as gRPC Server
+    participant Svc as tikvService
+    participant Stor as Storage
+    participant Coord as StoreCoordinator
+    participant Peer as raftstore.Peer
+    participant Raft as etcd/raft
+    participant Apply as applyEntries
+
+    Client->>gRPC: KvPrewrite(PrewriteRequest)
+    gRPC->>Svc: KvPrewrite(ctx, req)
+    Svc->>Stor: PrewriteModifies(mutations, primary, startTS, lockTTL)
+    Note over Stor: Acquire latches for all keys
+    Stor->>Stor: NewSnapshot + MvccReader + MvccTxn
+    Stor->>Stor: txn.Prewrite for each mutation
+    Stor-->>Svc: []mvcc.Modify, []error
+    alt any prewrite error
+        Svc-->>gRPC: PrewriteResponse{Errors: [KeyError...]}
+        gRPC-->>Client: PrewriteResponse
+    else all prewrites ok
+        Svc->>Coord: ProposeModifies(regionID=1, modifies, 10s)
+        Coord->>Coord: ModifiesToRequests(modifies)
+        Coord->>Coord: Build RaftCmdRequest
+        Coord->>Peer: router.Send(regionID, PeerMsgTypeRaftCommand)
+        Peer->>Raft: Propose(cmdReq bytes)
+        Note over Raft: Consensus among replicas
+        Raft-->>Peer: Committed entries
+        Peer->>Apply: applyFunc(regionID, entries)
+        Apply->>Apply: Unmarshal RaftCmdRequest
+        Apply->>Apply: RequestsToModifies(requests)
+        Apply->>Stor: ApplyModifies(modifies)
+        Stor->>Stor: WriteBatch Put/Delete per CF
+        Stor->>Stor: wb.Commit()
+        Apply-->>Peer: done
+        Peer-->>Coord: callback(RaftCmdResponse)
+        Coord-->>Svc: nil (success)
+        Svc-->>gRPC: PrewriteResponse{}
+        gRPC-->>Client: PrewriteResponse
+    end
+```
+
+### 9.3 Component Relationships (Class Diagram)
+
+```mermaid
+classDiagram
+    class Server {
+        -cfg ServerConfig
+        -grpcServer *grpc.Server
+        -storage *Storage
+        -coordinator *StoreCoordinator
+        -listener net.Listener
+        -ctx context.Context
+        -cancel context.CancelFunc
+        -wg sync.WaitGroup
+        +NewServer(cfg, storage) Server
+        +SetCoordinator(coord)
+        +Start() error
+        +Stop()
+        +Addr() string
+    }
+
+    class tikvService {
+        -server *Server
+        +KvGet(ctx, req) resp, err
+        +KvScan(ctx, req) resp, err
+        +KvPrewrite(ctx, req) resp, err
+        +KvCommit(ctx, req) resp, err
+        +KvBatchGet(ctx, req) resp, err
+        +KvBatchRollback(ctx, req) resp, err
+        +KvCleanup(ctx, req) resp, err
+        +KvCheckTxnStatus(ctx, req) resp, err
+        +BatchCommands(stream) error
+        +Raft(stream) error
+        +BatchRaft(stream) error
+    }
+
+    class Storage {
+        -engine traits.KvEngine
+        -latches *latch.Latches
+        -concMgr *concurrency.Manager
+        -nextCmdID uint64
+        +Get(key, version) value, err
+        +Scan(...) pairs, err
+        +BatchGet(keys, version) pairs, err
+        +Prewrite(mutations, ...) errs
+        +PrewriteModifies(mutations, ...) modifies, errs
+        +Commit(keys, startTS, commitTS) err
+        +CommitModifies(keys, ...) modifies, err
+        +BatchRollback(keys, startTS) err
+        +Cleanup(key, startTS) commitTS, err
+        +CheckTxnStatus(key, startTS) status, err
+        +ApplyModifies(modifies) err
+    }
+
+    class StoreCoordinator {
+        -storeID uint64
+        -engine traits.KvEngine
+        -storage *Storage
+        -router *router.Router
+        -client *transport.RaftClient
+        -peers map~uint64, Peer~
+        +BootstrapRegion(region, peers) err
+        +ProposeModifies(regionID, modifies, timeout) err
+        +HandleRaftMessage(msg) err
+        +GetPeer(regionID) Peer
+        +Stop()
+    }
+
+    class RaftClient {
+        -connections map~uint64, connPool~
+        -resolver StoreResolver
+        -batchSize int
+        -dialTimeout time.Duration
+        +Send(storeID, msg) err
+        +BatchSend(storeID, msgs) err
+        +SendSnapshot(storeID, msg, data) err
+        +Close()
+    }
+
+    Server "1" *-- "1" tikvService : registers
+    Server "1" *-- "1" Storage : owns
+    Server "1" o-- "0..1" StoreCoordinator : optional
+    tikvService --> Server : back-pointer
+    StoreCoordinator --> Storage : calls ApplyModifies
+    StoreCoordinator --> RaftClient : sends Raft messages
+    StoreCoordinator --> "router.Router" : dispatches peer messages
+```

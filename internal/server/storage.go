@@ -12,7 +12,6 @@ import (
 	"github.com/ryogrid/gookvs/internal/storage/txn"
 	"github.com/ryogrid/gookvs/internal/storage/txn/concurrency"
 	"github.com/ryogrid/gookvs/internal/storage/txn/latch"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
 	"github.com/ryogrid/gookvs/pkg/txntypes"
 )
 
@@ -79,76 +78,39 @@ func (s *Storage) Get(key []byte, version txntypes.TimeStamp) ([]byte, error) {
 // Scan performs a transactional range scan at the given timestamp.
 func (s *Storage) Scan(startKey, endKey []byte, limit uint32, version txntypes.TimeStamp, keyOnly bool) ([]*KvPairResult, error) {
 	snap := s.engine.NewSnapshot()
-	reader := mvcc.NewMvccReader(snap)
-	defer reader.Close()
+	defer snap.Close()
+
+	cfg := mvcc.ScannerConfig{
+		Snapshot:       snap,
+		ReadTS:         version,
+		IsolationLevel: mvcc.IsolationLevelSI,
+		KeyOnly:        keyOnly,
+		LowerBound:     startKey,
+	}
+	if len(endKey) > 0 {
+		cfg.UpperBound = endKey
+	}
+
+	scanner := mvcc.NewScanner(cfg)
+	defer scanner.Close()
 
 	var results []*KvPairResult
-
-	// Use the MVCC key encoding to iterate through CF_WRITE.
-	iter := snap.NewIterator(cfnames.CFWrite, traits.IterOptions{})
-	defer iter.Close()
-
-	// Seek to the start position.
-	seekKey := mvcc.EncodeKey(startKey, version)
-	iter.Seek(seekKey)
-
-	visited := make(map[string]bool)
-
-	for iter.Valid() && (limit == 0 || uint32(len(results)) < limit) {
-		encodedKey := iter.Key()
-		userKey, commitTS, err := mvcc.DecodeKey(encodedKey)
-		if err != nil {
-			return nil, err
-		}
-
-		// Check bounds.
-		if len(endKey) > 0 && bytes.Compare(userKey, endKey) >= 0 {
-			break
-		}
-
-		// Skip keys we've already processed.
-		keyStr := string(userKey)
-		if visited[keyStr] {
-			iter.Next()
-			continue
-		}
-		visited[keyStr] = true
-
-		// Skip if this write's commitTS is after our read version.
-		if commitTS > version {
-			iter.Next()
-			continue
-		}
-
-		// Use PointGetter for correct MVCC read (handles locks, rollbacks, etc.)
-		pg := mvcc.NewPointGetter(reader, version, mvcc.IsolationLevelSI)
-		value, err := pg.Get(userKey)
+	for limit == 0 || uint32(len(results)) < limit {
+		key, value, err := scanner.Next()
 		if err != nil {
 			if errors.Is(err, mvcc.ErrKeyIsLocked) {
 				return nil, err
 			}
-			// Skip keys with errors.
-			iter.Next()
-			continue
+			return nil, err
 		}
-		if value != nil {
-			pair := &KvPairResult{Key: userKey}
-			if !keyOnly {
-				pair.Value = value
-			}
-			results = append(results, pair)
+		if key == nil {
+			break
 		}
-
-		// Skip to the next user key.
-		nextKey := mvcc.EncodeKey(userKey, 0) // ts=0 is the smallest for this user key
-		iter.Seek(nextKey)
-		// Actually, since ts is descending, ts=0 would be the largest encoded.
-		// We need to seek past all entries for this user key.
-		// Use a key just after this user key.
-		nextUserKey := append([]byte{}, userKey...)
-		nextUserKey = append(nextUserKey, 0)
-		seekNext := mvcc.EncodeKey(nextUserKey, version)
-		iter.Seek(seekNext)
+		pair := &KvPairResult{Key: key}
+		if !keyOnly {
+			pair.Value = value
+		}
+		results = append(results, pair)
 	}
 
 	return results, nil

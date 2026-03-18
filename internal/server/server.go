@@ -9,9 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/raft_serverpb"
 	"github.com/pingcap/kvproto/pkg/tikvpb"
+	copkg "github.com/ryogrid/gookvs/internal/coprocessor"
 	"github.com/ryogrid/gookvs/internal/storage/mvcc"
 	"github.com/ryogrid/gookvs/internal/storage/txn"
 	"github.com/ryogrid/gookvs/pkg/txntypes"
@@ -619,6 +621,53 @@ func (svc *tikvService) RawDeleteRange(ctx context.Context, req *kvrpcpb.RawDele
 	return resp, nil
 }
 
+// --- Coprocessor handlers ---
+
+// Coprocessor implements the Coprocessor RPC.
+func (svc *tikvService) Coprocessor(ctx context.Context, req *coprocessor.Request) (*coprocessor.Response, error) {
+	ep := copkg.NewEndpoint(svc.server.storage.Engine())
+
+	ranges := make([]copkg.CopKeyRange, len(req.GetRanges()))
+	for i, r := range req.GetRanges() {
+		ranges[i] = copkg.CopKeyRange{Start: r.GetStart(), End: r.GetEnd()}
+	}
+
+	result, err := ep.Handle(ctx, req.GetTp(), req.GetData(), req.GetStartTs(), ranges)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "coprocessor failed: %v", err)
+	}
+
+	resp := &coprocessor.Response{}
+	if result.OtherError != "" {
+		resp.OtherError = result.OtherError
+	} else {
+		resp.Data = result.Data
+	}
+	return resp, nil
+}
+
+// CoprocessorStream implements the CoprocessorStream RPC.
+func (svc *tikvService) CoprocessorStream(req *coprocessor.Request, stream tikvpb.Tikv_CoprocessorStreamServer) error {
+	ep := copkg.NewEndpoint(svc.server.storage.Engine())
+
+	ranges := make([]copkg.CopKeyRange, len(req.GetRanges()))
+	for i, r := range req.GetRanges() {
+		ranges[i] = copkg.CopKeyRange{Start: r.GetStart(), End: r.GetEnd()}
+	}
+
+	return ep.HandleStream(stream.Context(), req.GetTp(), req.GetData(), req.GetStartTs(), ranges,
+		func(result *copkg.CopResponse) error {
+			resp := &coprocessor.Response{}
+			if result.OtherError != "" {
+				resp.OtherError = result.OtherError
+			} else {
+				resp.Data = result.Data
+			}
+			return stream.Send(resp)
+		},
+	)
+}
+
 // BatchCommands implements the multiplexed bidirectional streaming RPC.
 func (svc *tikvService) BatchCommands(stream tikvpb.Tikv_BatchCommandsServer) error {
 	for {
@@ -726,6 +775,10 @@ func (svc *tikvService) handleBatchCmd(ctx context.Context, req *tikvpb.BatchCom
 	case *tikvpb.BatchCommandsRequest_Request_RawDeleteRange:
 		r, _ := svc.RawDeleteRange(ctx, cmd.RawDeleteRange)
 		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_RawDeleteRange{RawDeleteRange: r}
+
+	case *tikvpb.BatchCommandsRequest_Request_Coprocessor:
+		r, _ := svc.Coprocessor(ctx, cmd.Coprocessor)
+		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_Coprocessor{Coprocessor: r}
 
 	default:
 		// Unsupported command type - return empty response.

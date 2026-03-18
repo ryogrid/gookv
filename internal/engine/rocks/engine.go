@@ -201,6 +201,11 @@ func (e *Engine) GetProperty(cf string, name string) (string, error) {
 	return fmt.Sprintf("%v", metrics), nil
 }
 
+// Path returns the database directory path.
+func (e *Engine) Path() string {
+	return e.path
+}
+
 // Compact compacts the specified key range.
 func (e *Engine) Compact(start, end []byte) error {
 	return e.db.Compact(start, end, true)

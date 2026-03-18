@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -10,10 +11,12 @@ import (
 	"os"
 	"strings"
 
+	"github.com/pingcap/kvproto/pkg/raft_serverpb"
 	"github.com/ryogrid/gookvs/internal/engine/rocks"
 	"github.com/ryogrid/gookvs/internal/engine/traits"
 	"github.com/ryogrid/gookvs/internal/storage/mvcc"
 	"github.com/ryogrid/gookvs/pkg/cfnames"
+	"github.com/ryogrid/gookvs/pkg/keys"
 	"github.com/ryogrid/gookvs/pkg/txntypes"
 )
 
@@ -28,7 +31,7 @@ Commands:
   mvcc        Show MVCC info for a key
   region      Inspect region metadata
   compact     Trigger manual compaction
-  dump        Dump raw key-value pairs
+  dump        Dump key-value pairs (with optional MVCC decoding)
   size        Show approximate data size
 
 Global Options:
@@ -52,6 +55,8 @@ func main() {
 		cmdGet(args)
 	case "mvcc":
 		cmdMvcc(args)
+	case "region":
+		cmdRegion(args)
 	case "dump":
 		cmdDump(args)
 	case "size":
@@ -68,6 +73,15 @@ func main() {
 }
 
 func openDB(path string) traits.KvEngine {
+	eng, err := rocks.Open(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database at %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	return eng
+}
+
+func openDBRocks(path string) *rocks.Engine {
 	eng, err := rocks.Open(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening database at %s: %v\n", path, err)
@@ -248,11 +262,14 @@ func cmdMvcc(args []string) {
 	enc.Encode(info)
 }
 
-func cmdDump(args []string) {
-	fs := flag.NewFlagSet("dump", flag.ExitOnError)
+// --- region command ---
+
+func cmdRegion(args []string) {
+	fs := flag.NewFlagSet("region", flag.ExitOnError)
 	dbPath := fs.String("db", "", "Path to data directory")
-	cf := fs.String("cf", cfnames.CFDefault, "Column family")
-	limit := fs.Int("limit", 50, "Maximum entries")
+	regionID := fs.Uint64("id", 0, "Region ID to inspect")
+	all := fs.Bool("all", false, "List all regions")
+	limit := fs.Int("limit", 100, "Maximum regions to display")
 	fs.Parse(args)
 
 	if *dbPath == "" {
@@ -263,16 +280,281 @@ func cmdDump(args []string) {
 	eng := openDB(*dbPath)
 	defer eng.Close()
 
-	iter := eng.NewIterator(*cf, traits.IterOptions{})
+	if *regionID != 0 {
+		// Lookup specific region.
+		key := keys.RegionStateKey(*regionID)
+		data, err := eng.Get(cfnames.CFRaft, key)
+		if err != nil {
+			if err == traits.ErrNotFound {
+				fmt.Printf("Region %d not found\n", *regionID)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		state := &raft_serverpb.RegionLocalState{}
+		if err := state.Unmarshal(data); err != nil {
+			fmt.Fprintf(os.Stderr, "Error decoding region state: %v\n", err)
+			os.Exit(1)
+		}
+		printRegionState(*regionID, state)
+		return
+	}
+
+	// Default: list all regions (or when --all is set).
+	_ = *all
+	iter := eng.NewIterator(cfnames.CFRaft, traits.IterOptions{})
+	defer iter.Close()
+
+	count := 0
+	for iter.SeekToFirst(); iter.Valid() && count < *limit; iter.Next() {
+		rawKey := iter.Key()
+		if !isRegionStateKey(rawKey) {
+			continue
+		}
+		rid, err := keys.RegionIDFromMetaKey(rawKey)
+		if err != nil {
+			continue
+		}
+		state := &raft_serverpb.RegionLocalState{}
+		if err := state.Unmarshal(iter.Value()); err != nil {
+			fmt.Fprintf(os.Stderr, "[DECODE ERROR] Region %d: %v\n", rid, err)
+			continue
+		}
+		printRegionState(rid, state)
+		fmt.Println("---")
+		count++
+	}
+	fmt.Printf("Total: %d regions\n", count)
+}
+
+func isRegionStateKey(key []byte) bool {
+	// RegionStateKey format: [0x01][0x03][8 bytes regionID][0x01]
+	return len(key) == 11 &&
+		key[0] == keys.LocalPrefix &&
+		key[1] == keys.RegionMetaPrefix &&
+		key[10] == keys.RegionStateSuffix
+}
+
+func printRegionState(id uint64, state *raft_serverpb.RegionLocalState) {
+	fmt.Printf("Region ID: %d\n", id)
+	fmt.Printf("  State:     %s\n", state.GetState().String())
+	if region := state.GetRegion(); region != nil {
+		fmt.Printf("  StartKey:  %s\n", displayKey(region.GetStartKey()))
+		fmt.Printf("  EndKey:    %s\n", displayKey(region.GetEndKey()))
+		fmt.Printf("  Peers:     %v\n", region.GetPeers())
+		if epoch := region.GetRegionEpoch(); epoch != nil {
+			fmt.Printf("  Epoch:     conf_ver:%d version:%d\n", epoch.GetConfVer(), epoch.GetVersion())
+		}
+	}
+}
+
+func displayKey(key []byte) string {
+	if len(key) == 0 {
+		return "(empty)"
+	}
+	return hex.EncodeToString(key)
+}
+
+// --- dump command (enhanced with --decode) ---
+
+func cmdDump(args []string) {
+	fs := flag.NewFlagSet("dump", flag.ExitOnError)
+	dbPath := fs.String("db", "", "Path to data directory")
+	cf := fs.String("cf", cfnames.CFDefault, "Column family")
+	limit := fs.Int("limit", 50, "Maximum entries")
+	decode := fs.Bool("decode", false, "Decode MVCC keys and record values")
+	startHex := fs.String("start", "", "Start key in hex (inclusive)")
+	endHex := fs.String("end", "", "End key in hex (exclusive)")
+	fs.Parse(args)
+
+	if *dbPath == "" {
+		fmt.Fprintln(os.Stderr, "Error: --db is required")
+		os.Exit(1)
+	}
+
+	eng := openDB(*dbPath)
+	defer eng.Close()
+
+	var start, end []byte
+	if *startHex != "" {
+		var err error
+		start, err = hex.DecodeString(*startHex)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid hex start key: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if *endHex != "" {
+		var err error
+		end, err = hex.DecodeString(*endHex)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid hex end key: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	iter := eng.NewIterator(*cf, traits.IterOptions{
+		LowerBound: start,
+		UpperBound: end,
+	})
 	defer iter.Close()
 
 	count := 0
 	for iter.SeekToFirst(); iter.Valid() && count < *limit; iter.Next() {
 		key := iter.Key()
 		value := iter.Value()
-		fmt.Printf("%s\t%s\n", hex.EncodeToString(key), hex.EncodeToString(value))
+
+		if !*decode {
+			fmt.Printf("%s\t%s\n", hex.EncodeToString(key), hex.EncodeToString(value))
+		} else {
+			dumpDecoded(*cf, key, value)
+		}
 		count++
 	}
+}
+
+func dumpDecoded(cf string, key, value []byte) {
+	switch cf {
+	case cfnames.CFWrite:
+		dumpWriteCF(key, value)
+	case cfnames.CFLock:
+		dumpLockCF(key, value)
+	case cfnames.CFDefault:
+		dumpDefaultCF(key, value)
+	case cfnames.CFRaft:
+		dumpRaftCF(key, value)
+	default:
+		fmt.Printf("%s\t%s\n", hex.EncodeToString(key), hex.EncodeToString(value))
+	}
+}
+
+func dumpWriteCF(key, value []byte) {
+	userKey, commitTS, err := mvcc.DecodeKey(key)
+	if err != nil {
+		fmt.Printf("[DECODE ERROR] key=%s err=%v\n", hex.EncodeToString(key), err)
+		return
+	}
+	write, err := txntypes.UnmarshalWrite(value)
+	if err != nil {
+		fmt.Printf("[DECODE ERROR] key=%s value_err=%v\n", hex.EncodeToString(key), err)
+		return
+	}
+	fmt.Printf("[MVCC Write] UserKey: %s  CommitTS: %d\n", hex.EncodeToString(userKey), commitTS)
+	sv := ""
+	if write.ShortValue != nil {
+		sv = fmt.Sprintf("  ShortValue: %q", tryPrintable(write.ShortValue))
+	}
+	fmt.Printf("  WriteType: %s  StartTS: %d%s\n", writeTypeStr(write.WriteType), write.StartTS, sv)
+	fmt.Println("---")
+}
+
+func dumpLockCF(key, value []byte) {
+	userKey, err := mvcc.DecodeLockKey(key)
+	if err != nil {
+		fmt.Printf("[DECODE ERROR] key=%s err=%v\n", hex.EncodeToString(key), err)
+		return
+	}
+	lock, err := txntypes.UnmarshalLock(value)
+	if err != nil {
+		fmt.Printf("[DECODE ERROR] key=%s value_err=%v\n", hex.EncodeToString(key), err)
+		return
+	}
+	fmt.Printf("[MVCC Lock] UserKey: %s\n", hex.EncodeToString(userKey))
+	fmt.Printf("  LockType: %s  Primary: %s  StartTS: %d  TTL: %d\n",
+		string(lock.LockType), hex.EncodeToString(lock.Primary), lock.StartTS, lock.TTL)
+	fmt.Println("---")
+}
+
+func dumpDefaultCF(key, value []byte) {
+	userKey, startTS, err := mvcc.DecodeKey(key)
+	if err != nil {
+		fmt.Printf("[DECODE ERROR] key=%s err=%v\n", hex.EncodeToString(key), err)
+		return
+	}
+	fmt.Printf("[MVCC Default] UserKey: %s  StartTS: %d\n", hex.EncodeToString(userKey), startTS)
+	fmt.Printf("  Value: %s (%d bytes)\n", hex.EncodeToString(value), len(value))
+	fmt.Println("---")
+}
+
+func dumpRaftCF(key, value []byte) {
+	if isRegionStateKey(key) {
+		rid, _ := keys.RegionIDFromMetaKey(key)
+		fmt.Printf("[Raft RegionState] RegionID: %d\n", rid)
+		state := &raft_serverpb.RegionLocalState{}
+		if err := state.Unmarshal(value); err == nil {
+			fmt.Printf("  State: %s\n", state.GetState().String())
+		}
+		fmt.Println("---")
+		return
+	}
+	if len(key) >= 11 && key[0] == keys.LocalPrefix && key[1] == keys.RegionRaftPrefix {
+		rid := binary.BigEndian.Uint64(key[2:10])
+		suffix := key[10]
+		switch suffix {
+		case keys.RaftLogSuffix:
+			if len(key) >= 19 {
+				logIdx := binary.BigEndian.Uint64(key[11:19])
+				fmt.Printf("[Raft Log] RegionID: %d  LogIndex: %d\n", rid, logIdx)
+			} else {
+				fmt.Printf("[Raft Log] RegionID: %d\n", rid)
+			}
+		case keys.RaftStateSuffix:
+			fmt.Printf("[Raft HardState] RegionID: %d\n", rid)
+		case keys.ApplyStateSuffix:
+			fmt.Printf("[Raft ApplyState] RegionID: %d\n", rid)
+		default:
+			fmt.Printf("[Raft Unknown] RegionID: %d  Suffix: %02x\n", rid, suffix)
+		}
+		fmt.Println("---")
+		return
+	}
+	// Fallback to raw hex.
+	fmt.Printf("[Raft] %s\t%s\n", hex.EncodeToString(key), hex.EncodeToString(value))
+	fmt.Println("---")
+}
+
+// --- compact command (fixed with actual Pebble compaction) ---
+
+func cmdCompact(args []string) {
+	fs := flag.NewFlagSet("compact", flag.ExitOnError)
+	dbPath := fs.String("db", "", "Path to data directory")
+	cf := fs.String("cf", "", "Column family to compact (empty = all)")
+	flushOnly := fs.Bool("flush-only", false, "Only flush WAL/memtable (old behavior)")
+	fs.Parse(args)
+
+	if *dbPath == "" {
+		fmt.Fprintln(os.Stderr, "Error: --db is required")
+		os.Exit(1)
+	}
+
+	eng := openDBRocks(*dbPath)
+	defer eng.Close()
+
+	if *flushOnly {
+		if err := eng.SyncWAL(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error flushing WAL: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("WAL flushed successfully.")
+		return
+	}
+
+	if *cf != "" {
+		fmt.Printf("Compacting CF %s...\n", *cf)
+		if err := eng.CompactCF(*cf); err != nil {
+			fmt.Fprintf(os.Stderr, "Error compacting CF %s: %v\n", *cf, err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Println("Compacting all column families...")
+		if err := eng.CompactAll(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error compacting: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	fmt.Println("Compaction completed successfully.")
 }
 
 func cmdSize(args []string) {
@@ -300,28 +582,6 @@ func cmdSize(args []string) {
 		iter.Close()
 		fmt.Printf("CF %-10s: %6d keys, %s\n", cf, count, formatSize(totalSize))
 	}
-}
-
-func cmdCompact(args []string) {
-	fs := flag.NewFlagSet("compact", flag.ExitOnError)
-	dbPath := fs.String("db", "", "Path to data directory")
-	fs.Parse(args)
-
-	if *dbPath == "" {
-		fmt.Fprintln(os.Stderr, "Error: --db is required")
-		os.Exit(1)
-	}
-
-	eng := openDB(*dbPath)
-	defer eng.Close()
-
-	// Force a WAL sync as a compact-like operation.
-	if err := eng.SyncWAL(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error syncing WAL: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("Compaction triggered successfully.")
 }
 
 // --- Helper types ---
@@ -411,6 +671,8 @@ func RunCommand(args []string) int {
 		cmdGet(cmdArgs)
 	case "mvcc":
 		cmdMvcc(cmdArgs)
+	case "region":
+		cmdRegion(cmdArgs)
 	case "dump":
 		cmdDump(cmdArgs)
 	case "size":

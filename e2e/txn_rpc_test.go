@@ -31,27 +31,21 @@ func TestTxnPessimisticLockAcquire(t *testing.T) {
 	t.Log("Pessimistic lock acquire passed")
 }
 
-// TestTxnPessimisticRollbackRPCMismatch tests that KVPessimisticRollback RPC
-// fails due to server method naming mismatch (server defines KvPessimisticRollback
-// but proto expects KVPessimisticRollback).
-func TestTxnPessimisticRollbackRPCMismatch(t *testing.T) {
+// TestTxnPessimisticRollback tests that KVPessimisticRollback RPC works.
+func TestTxnPessimisticRollback(t *testing.T) {
 	addr, _ := startStandaloneServer(t)
 	_, client := dialTikvClient(t, addr)
 	ctx := context.Background()
 
-	// This should fail because the server method is named KvPessimisticRollback
-	// (lowercase 'v') but the proto interface expects KVPessimisticRollback
-	// (uppercase 'V'). This is a known implementation bug.
-	_, err := client.KVPessimisticRollback(ctx, &kvrpcpb.PessimisticRollbackRequest{
+	resp, err := client.KVPessimisticRollback(ctx, &kvrpcpb.PessimisticRollbackRequest{
 		Keys:         [][]byte{[]byte("pessimistic-key-1")},
 		StartVersion: 100,
 		ForUpdateTs:  100,
 	})
-	// We expect this to fail with Unimplemented.
-	assert.Error(t, err, "KVPessimisticRollback should fail due to server method name mismatch")
-	assert.Contains(t, err.Error(), "Unimplemented", "error should be Unimplemented")
+	assert.NoError(t, err, "KVPessimisticRollback should succeed")
+	assert.NotNil(t, resp)
 
-	t.Log("Pessimistic rollback RPC mismatch confirmed (known bug)")
+	t.Log("Pessimistic rollback RPC passed")
 }
 
 // TestTxnHeartBeat tests extending lock TTL via KvTxnHeartBeat.

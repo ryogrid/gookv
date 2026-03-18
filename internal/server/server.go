@@ -59,6 +59,7 @@ func NewServer(cfg ServerConfig, storage *Storage) *Server {
 	grpcSrv := grpc.NewServer(opts...)
 
 	gcWorker := gc.NewGCWorker(storage.Engine(), gc.DefaultGCConfig())
+	gcWorker.Start()
 
 	s := &Server{
 		cfg:        cfg,
@@ -115,6 +116,9 @@ func (s *Server) Addr() string {
 // Stop gracefully shuts down all server components.
 func (s *Server) Stop() {
 	s.cancel()
+	if s.gcWorker != nil {
+		s.gcWorker.Stop()
+	}
 	s.grpcServer.GracefulStop()
 	s.wg.Wait()
 }
@@ -442,8 +446,8 @@ func (svc *tikvService) KvPessimisticLock(ctx context.Context, req *kvrpcpb.Pess
 	return resp, nil
 }
 
-// KvPessimisticRollback implements the KvPessimisticRollback RPC.
-func (svc *tikvService) KvPessimisticRollback(ctx context.Context, req *kvrpcpb.PessimisticRollbackRequest) (*kvrpcpb.PessimisticRollbackResponse, error) {
+// KVPessimisticRollback implements the KVPessimisticRollback RPC.
+func (svc *tikvService) KVPessimisticRollback(ctx context.Context, req *kvrpcpb.PessimisticRollbackRequest) (*kvrpcpb.PessimisticRollbackResponse, error) {
 	resp := &kvrpcpb.PessimisticRollbackResponse{}
 	startTS := txntypes.TimeStamp(req.GetStartVersion())
 	forUpdateTS := txntypes.TimeStamp(req.GetForUpdateTs())
@@ -768,7 +772,7 @@ func (svc *tikvService) handleBatchCmd(ctx context.Context, req *tikvpb.BatchCom
 		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_PessimisticLock{PessimisticLock: r}
 
 	case *tikvpb.BatchCommandsRequest_Request_PessimisticRollback:
-		r, _ := svc.KvPessimisticRollback(ctx, cmd.PessimisticRollback)
+		r, _ := svc.KVPessimisticRollback(ctx, cmd.PessimisticRollback)
 		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_PessimisticRollback{PessimisticRollback: r}
 
 	case *tikvpb.BatchCommandsRequest_Request_TxnHeartBeat:

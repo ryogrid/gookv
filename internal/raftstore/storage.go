@@ -3,6 +3,7 @@ package raftstore
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
@@ -32,6 +33,12 @@ type PeerStorage struct {
 	applyState        ApplyState
 	entries           []raftpb.Entry // In-memory entry cache (most recent entries).
 	persistedLastIndex uint64         // Last index written to engine (tracked independently of cache).
+
+	// Snapshot state machine.
+	snapState    SnapState
+	snapReceiver <-chan GenSnapResult
+	snapCanceled *atomic.Bool
+	snapTriedCnt int
 }
 
 // Ensure PeerStorage implements raft.Storage.

@@ -32,6 +32,7 @@ type Server struct {
 	cfg         ServerConfig
 	grpcServer  *grpc.Server
 	storage     *Storage
+	rawStorage  *RawStorage
 	coordinator *StoreCoordinator
 	listener    net.Listener
 
@@ -57,6 +58,7 @@ func NewServer(cfg ServerConfig, storage *Storage) *Server {
 		cfg:        cfg,
 		grpcServer: grpcSrv,
 		storage:    storage,
+		rawStorage: NewRawStorage(storage.Engine()),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -395,6 +397,136 @@ func (svc *tikvService) KvCheckTxnStatus(ctx context.Context, req *kvrpcpb.Check
 	return resp, nil
 }
 
+// --- Raw KV handlers ---
+
+// RawGet implements the RawGet RPC.
+func (svc *tikvService) RawGet(ctx context.Context, req *kvrpcpb.RawGetRequest) (*kvrpcpb.RawGetResponse, error) {
+	resp := &kvrpcpb.RawGetResponse{}
+	value, err := svc.server.rawStorage.Get(req.GetCf(), req.GetKey())
+	if err != nil {
+		resp.Error = err.Error()
+		return resp, nil
+	}
+	if value == nil {
+		resp.NotFound = true
+	} else {
+		resp.Value = value
+	}
+	return resp, nil
+}
+
+// RawPut implements the RawPut RPC.
+func (svc *tikvService) RawPut(ctx context.Context, req *kvrpcpb.RawPutRequest) (*kvrpcpb.RawPutResponse, error) {
+	resp := &kvrpcpb.RawPutResponse{}
+	if coord := svc.server.coordinator; coord != nil {
+		modify := svc.server.rawStorage.PutModify(req.GetCf(), req.GetKey(), req.GetValue())
+		if err := coord.ProposeModifies(1, []mvcc.Modify{modify}, 10*time.Second); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "raft propose failed: %v", err)
+		}
+	} else {
+		if err := svc.server.rawStorage.Put(req.GetCf(), req.GetKey(), req.GetValue()); err != nil {
+			resp.Error = err.Error()
+		}
+	}
+	return resp, nil
+}
+
+// RawDelete implements the RawDelete RPC.
+func (svc *tikvService) RawDelete(ctx context.Context, req *kvrpcpb.RawDeleteRequest) (*kvrpcpb.RawDeleteResponse, error) {
+	resp := &kvrpcpb.RawDeleteResponse{}
+	if coord := svc.server.coordinator; coord != nil {
+		modify := svc.server.rawStorage.DeleteModify(req.GetCf(), req.GetKey())
+		if err := coord.ProposeModifies(1, []mvcc.Modify{modify}, 10*time.Second); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "raft propose failed: %v", err)
+		}
+	} else {
+		if err := svc.server.rawStorage.Delete(req.GetCf(), req.GetKey()); err != nil {
+			resp.Error = err.Error()
+		}
+	}
+	return resp, nil
+}
+
+// RawScan implements the RawScan RPC.
+func (svc *tikvService) RawScan(ctx context.Context, req *kvrpcpb.RawScanRequest) (*kvrpcpb.RawScanResponse, error) {
+	resp := &kvrpcpb.RawScanResponse{}
+	pairs, err := svc.server.rawStorage.Scan(
+		req.GetCf(), req.GetStartKey(), req.GetEndKey(),
+		req.GetLimit(), req.GetKeyOnly(), req.GetReverse(),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "raw scan failed: %v", err)
+	}
+	for _, p := range pairs {
+		resp.Kvs = append(resp.Kvs, &kvrpcpb.KvPair{Key: p.Key, Value: p.Value})
+	}
+	return resp, nil
+}
+
+// RawBatchGet implements the RawBatchGet RPC.
+func (svc *tikvService) RawBatchGet(ctx context.Context, req *kvrpcpb.RawBatchGetRequest) (*kvrpcpb.RawBatchGetResponse, error) {
+	resp := &kvrpcpb.RawBatchGetResponse{}
+	pairs, err := svc.server.rawStorage.BatchGet(req.GetCf(), req.GetKeys())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "raw batch get failed: %v", err)
+	}
+	for _, p := range pairs {
+		resp.Pairs = append(resp.Pairs, &kvrpcpb.KvPair{Key: p.Key, Value: p.Value})
+	}
+	return resp, nil
+}
+
+// RawBatchPut implements the RawBatchPut RPC.
+func (svc *tikvService) RawBatchPut(ctx context.Context, req *kvrpcpb.RawBatchPutRequest) (*kvrpcpb.RawBatchPutResponse, error) {
+	resp := &kvrpcpb.RawBatchPutResponse{}
+	pairs := make([]KvPair, len(req.GetPairs()))
+	for i, p := range req.GetPairs() {
+		pairs[i] = KvPair{Key: p.GetKey(), Value: p.GetValue()}
+	}
+	if coord := svc.server.coordinator; coord != nil {
+		modifies := make([]mvcc.Modify, len(pairs))
+		for i, p := range pairs {
+			modifies[i] = svc.server.rawStorage.PutModify(req.GetCf(), p.Key, p.Value)
+		}
+		if err := coord.ProposeModifies(1, modifies, 10*time.Second); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "raft propose failed: %v", err)
+		}
+	} else {
+		if err := svc.server.rawStorage.BatchPut(req.GetCf(), pairs); err != nil {
+			resp.Error = err.Error()
+		}
+	}
+	return resp, nil
+}
+
+// RawBatchDelete implements the RawBatchDelete RPC.
+func (svc *tikvService) RawBatchDelete(ctx context.Context, req *kvrpcpb.RawBatchDeleteRequest) (*kvrpcpb.RawBatchDeleteResponse, error) {
+	resp := &kvrpcpb.RawBatchDeleteResponse{}
+	if coord := svc.server.coordinator; coord != nil {
+		modifies := make([]mvcc.Modify, len(req.GetKeys()))
+		for i, key := range req.GetKeys() {
+			modifies[i] = svc.server.rawStorage.DeleteModify(req.GetCf(), key)
+		}
+		if err := coord.ProposeModifies(1, modifies, 10*time.Second); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "raft propose failed: %v", err)
+		}
+	} else {
+		if err := svc.server.rawStorage.BatchDelete(req.GetCf(), req.GetKeys()); err != nil {
+			resp.Error = err.Error()
+		}
+	}
+	return resp, nil
+}
+
+// RawDeleteRange implements the RawDeleteRange RPC.
+func (svc *tikvService) RawDeleteRange(ctx context.Context, req *kvrpcpb.RawDeleteRangeRequest) (*kvrpcpb.RawDeleteRangeResponse, error) {
+	resp := &kvrpcpb.RawDeleteRangeResponse{}
+	if err := svc.server.rawStorage.DeleteRange(req.GetCf(), req.GetStartKey(), req.GetEndKey()); err != nil {
+		resp.Error = err.Error()
+	}
+	return resp, nil
+}
+
 // BatchCommands implements the multiplexed bidirectional streaming RPC.
 func (svc *tikvService) BatchCommands(stream tikvpb.Tikv_BatchCommandsServer) error {
 	for {
@@ -454,6 +586,38 @@ func (svc *tikvService) handleBatchCmd(ctx context.Context, req *tikvpb.BatchCom
 	case *tikvpb.BatchCommandsRequest_Request_CheckTxnStatus:
 		r, _ := svc.KvCheckTxnStatus(ctx, cmd.CheckTxnStatus)
 		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_CheckTxnStatus{CheckTxnStatus: r}
+
+	case *tikvpb.BatchCommandsRequest_Request_RawGet:
+		r, _ := svc.RawGet(ctx, cmd.RawGet)
+		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_RawGet{RawGet: r}
+
+	case *tikvpb.BatchCommandsRequest_Request_RawPut:
+		r, _ := svc.RawPut(ctx, cmd.RawPut)
+		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_RawPut{RawPut: r}
+
+	case *tikvpb.BatchCommandsRequest_Request_RawDelete:
+		r, _ := svc.RawDelete(ctx, cmd.RawDelete)
+		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_RawDelete{RawDelete: r}
+
+	case *tikvpb.BatchCommandsRequest_Request_RawScan:
+		r, _ := svc.RawScan(ctx, cmd.RawScan)
+		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_RawScan{RawScan: r}
+
+	case *tikvpb.BatchCommandsRequest_Request_RawBatchGet:
+		r, _ := svc.RawBatchGet(ctx, cmd.RawBatchGet)
+		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_RawBatchGet{RawBatchGet: r}
+
+	case *tikvpb.BatchCommandsRequest_Request_RawBatchPut:
+		r, _ := svc.RawBatchPut(ctx, cmd.RawBatchPut)
+		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_RawBatchPut{RawBatchPut: r}
+
+	case *tikvpb.BatchCommandsRequest_Request_RawBatchDelete:
+		r, _ := svc.RawBatchDelete(ctx, cmd.RawBatchDelete)
+		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_RawBatchDelete{RawBatchDelete: r}
+
+	case *tikvpb.BatchCommandsRequest_Request_RawDeleteRange:
+		r, _ := svc.RawDeleteRange(ctx, cmd.RawDeleteRange)
+		resp.Cmd = &tikvpb.BatchCommandsResponse_Response_RawDeleteRange{RawDeleteRange: r}
 
 	default:
 		// Unsupported command type - return empty response.

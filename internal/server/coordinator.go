@@ -30,6 +30,8 @@ type StoreCoordinator struct {
 	client  *transport.RaftClient
 	cfg     raftstore.PeerConfig
 
+	pdTaskCh chan<- interface{}
+
 	peers   map[uint64]*raftstore.Peer
 	cancels map[uint64]context.CancelFunc
 	dones   map[uint64]chan struct{}
@@ -37,26 +39,28 @@ type StoreCoordinator struct {
 
 // StoreCoordinatorConfig holds the configuration for creating a StoreCoordinator.
 type StoreCoordinatorConfig struct {
-	StoreID uint64
-	Engine  traits.KvEngine
-	Storage *Storage
-	Router  *router.Router
-	Client  *transport.RaftClient
-	PeerCfg raftstore.PeerConfig
+	StoreID  uint64
+	Engine   traits.KvEngine
+	Storage  *Storage
+	Router   *router.Router
+	Client   *transport.RaftClient
+	PeerCfg  raftstore.PeerConfig
+	PDTaskCh chan<- interface{} // Optional: channel for PD heartbeat tasks
 }
 
 // NewStoreCoordinator creates a new StoreCoordinator.
 func NewStoreCoordinator(cfg StoreCoordinatorConfig) *StoreCoordinator {
 	return &StoreCoordinator{
-		storeID: cfg.StoreID,
-		engine:  cfg.Engine,
-		storage: cfg.Storage,
-		router:  cfg.Router,
-		client:  cfg.Client,
-		cfg:     cfg.PeerCfg,
-		peers:   make(map[uint64]*raftstore.Peer),
-		cancels: make(map[uint64]context.CancelFunc),
-		dones:   make(map[uint64]chan struct{}),
+		storeID:  cfg.StoreID,
+		engine:   cfg.Engine,
+		storage:  cfg.Storage,
+		router:   cfg.Router,
+		client:   cfg.Client,
+		cfg:      cfg.PeerCfg,
+		pdTaskCh: cfg.PDTaskCh,
+		peers:    make(map[uint64]*raftstore.Peer),
+		cancels:  make(map[uint64]context.CancelFunc),
+		dones:    make(map[uint64]chan struct{}),
 	}
 }
 
@@ -100,6 +104,11 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 	peer.SetApplyFunc(func(regionID uint64, entries []raftpb.Entry) {
 		sc.applyEntries(entries)
 	})
+
+	// Wire PD task channel for region heartbeats.
+	if sc.pdTaskCh != nil {
+		peer.SetPDTaskCh(sc.pdTaskCh)
+	}
 
 	// Register with router.
 	if err := sc.router.Register(regionID, peer.Mailbox); err != nil {
@@ -301,6 +310,9 @@ func (sc *StoreCoordinator) CreatePeer(req *raftstore.CreatePeerRequest) error {
 	peer.SetApplyFunc(func(regionID uint64, entries []raftpb.Entry) {
 		sc.applyEntries(entries)
 	})
+	if sc.pdTaskCh != nil {
+		peer.SetPDTaskCh(sc.pdTaskCh)
+	}
 
 	if err := sc.router.Register(regionID, peer.Mailbox); err != nil {
 		return err

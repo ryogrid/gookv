@@ -94,6 +94,10 @@ type Peer struct {
 	// May be nil if no GC worker is configured.
 	logGCWorkerCh chan<- RaftLogGCTask
 
+	// pdTaskCh sends PD tasks (e.g., region heartbeats) to the PDWorker.
+	// May be nil if PD integration is not configured.
+	pdTaskCh chan<- interface{}
+
 	// State flags.
 	stopped     atomic.Bool
 	isLeader    atomic.Bool
@@ -189,6 +193,9 @@ func (p *Peer) SetSendFunc(f func([]raftpb.Message)) { p.sendFunc = f }
 
 // SetApplyFunc sets the function used to send committed entries for application.
 func (p *Peer) SetApplyFunc(f func(uint64, []raftpb.Entry)) { p.applyFunc = f }
+
+// SetPDTaskCh sets the channel for sending PD tasks (region heartbeats).
+func (p *Peer) SetPDTaskCh(ch chan<- interface{}) { p.pdTaskCh = ch }
 
 // Run starts the peer's main event loop. Blocks until the context is cancelled
 // or the peer is destroyed.
@@ -316,9 +323,13 @@ func (p *Peer) handleReady() {
 
 	rd := p.rawNode.Ready()
 
-	// Update leader status.
+	// Update leader status and notify PD on leadership change.
 	if rd.SoftState != nil {
+		wasLeader := p.isLeader.Load()
 		p.isLeader.Store(rd.SoftState.Lead == p.peerID)
+		if p.isLeader.Load() && !wasLeader {
+			p.sendRegionHeartbeatToPD()
+		}
 	}
 
 	// Persist entries and hard state.
@@ -492,6 +503,28 @@ func (p *Peer) scheduleRaftLogGC(compactTo uint64) {
 // SetLogGCWorkerCh sets the channel for sending log GC tasks.
 func (p *Peer) SetLogGCWorkerCh(ch chan<- RaftLogGCTask) {
 	p.logGCWorkerCh = ch
+}
+
+// RegionHeartbeatInfo carries region heartbeat data from a Peer to the PDWorker.
+type RegionHeartbeatInfo struct {
+	Region *metapb.Region
+	Peer   *metapb.Peer
+}
+
+// sendRegionHeartbeatToPD sends a region heartbeat via the pdTaskCh if configured.
+func (p *Peer) sendRegionHeartbeatToPD() {
+	if p.pdTaskCh == nil {
+		return
+	}
+	info := &RegionHeartbeatInfo{
+		Region: p.region,
+		Peer:   &metapb.Peer{Id: p.peerID, StoreId: p.storeID},
+	}
+	// Non-blocking send.
+	select {
+	case p.pdTaskCh <- info:
+	default:
+	}
 }
 
 // Propose proposes data to the Raft group.

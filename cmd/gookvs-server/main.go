@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"go.etcd.io/etcd/raft/v3"
@@ -22,6 +24,7 @@ import (
 	"github.com/ryogrid/gookvs/internal/server"
 	"github.com/ryogrid/gookvs/internal/server/transport"
 	statusserver "github.com/ryogrid/gookvs/internal/server/status"
+	"github.com/ryogrid/gookvs/pkg/pdclient"
 )
 
 func main() {
@@ -90,6 +93,7 @@ func main() {
 
 	// Cluster mode: set up Raft coordination if --store-id is specified.
 	var coord *server.StoreCoordinator
+	var pdWorker *server.PDWorker
 	if *storeID > 0 && *initialCluster != "" {
 		clusterMap := parseInitialCluster(*initialCluster)
 		if len(clusterMap) == 0 {
@@ -108,15 +112,63 @@ func main() {
 			peerCfg.RaftBaseTickInterval = cfg.RaftStore.RaftBaseTickInterval.Duration
 		}
 
+		// Connect to PD if endpoints are configured.
+		var pdTaskCh chan<- interface{}
+		if len(cfg.PD.Endpoints) > 0 && cfg.PD.Endpoints[0] != "" {
+			pdCtx, pdCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			pdClient, err := pdclient.NewClient(pdCtx, pdclient.Config{Endpoints: cfg.PD.Endpoints})
+			pdCancel()
+			if err != nil {
+				fmt.Printf("  PD connection failed (continuing without PD): %v\n", err)
+			} else {
+				fmt.Printf("  PD connected: %v\n", cfg.PD.Endpoints)
+
+				regCtx, regCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				// Register all stores with PD so it knows their addresses.
+				for sid, addr := range clusterMap {
+					_ = pdClient.PutStore(regCtx, &metapb.Store{Id: sid, Address: addr})
+				}
+				regCancel()
+
+				// Bootstrap cluster via PD (idempotent — only the first call succeeds).
+				bsCtx, bsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				bootstrapped, _ := pdClient.IsBootstrapped(bsCtx)
+				if !bootstrapped {
+					peers := make([]*metapb.Peer, 0, len(clusterMap))
+					for sid := range clusterMap {
+						peers = append(peers, &metapb.Peer{Id: sid, StoreId: sid})
+					}
+					region := &metapb.Region{Id: 1, Peers: peers}
+					store := &metapb.Store{Id: *storeID, Address: cfg.Server.Addr}
+					_, _ = pdClient.Bootstrap(bsCtx, store, region)
+					fmt.Println("  PD cluster bootstrapped")
+				}
+				bsCancel()
+
+				// Create PDWorker and get its task channel for peers.
+				pdWorker = server.NewPDWorker(server.PDWorkerConfig{
+					StoreID:  *storeID,
+					PDClient: pdClient,
+				})
+				pdTaskCh = pdWorker.PeerTaskCh()
+			}
+		}
+
 		coord = server.NewStoreCoordinator(server.StoreCoordinatorConfig{
-			StoreID: *storeID,
-			Engine:  engine,
-			Storage: storage,
-			Router:  rtr,
-			Client:  raftClient,
-			PeerCfg: peerCfg,
+			StoreID:  *storeID,
+			Engine:   engine,
+			Storage:  storage,
+			Router:   rtr,
+			Client:   raftClient,
+			PeerCfg:  peerCfg,
+			PDTaskCh: pdTaskCh,
 		})
 		srv.SetCoordinator(coord)
+
+		if pdWorker != nil {
+			pdWorker.SetCoordinator(coord)
+			pdWorker.Run()
+		}
 
 		// Bootstrap a single region (region 1) spanning all stores.
 		peers := make([]*metapb.Peer, 0, len(clusterMap))
@@ -159,6 +211,9 @@ func main() {
 	fmt.Printf("\nReceived signal %v, shutting down...\n", sig)
 
 	// Graceful shutdown.
+	if pdWorker != nil {
+		pdWorker.Stop()
+	}
 	if coord != nil {
 		coord.Stop()
 	}

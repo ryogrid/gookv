@@ -8,6 +8,7 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/ryogrid/gookvs/internal/raftstore"
 	"github.com/ryogrid/gookvs/pkg/pdclient"
 )
 
@@ -66,8 +67,9 @@ type PDWorker struct {
 	pdClient    pdclient.Client
 	coordinator *StoreCoordinator
 
-	taskCh    chan PDTask
-	startTime time.Time
+	taskCh     chan PDTask
+	peerTaskCh chan interface{} // receives RegionHeartbeatInfo from peers
+	startTime  time.Time
 
 	storeHeartbeatInterval time.Duration
 
@@ -88,11 +90,14 @@ func NewPDWorker(cfg PDWorkerConfig) *PDWorker {
 		interval = 10 * time.Second
 	}
 
+	peerTaskCh := make(chan interface{}, capacity)
+
 	return &PDWorker{
 		storeID:                cfg.StoreID,
 		pdClient:               cfg.PDClient,
 		coordinator:            cfg.Coordinator,
 		taskCh:                 make(chan PDTask, capacity),
+		peerTaskCh:             peerTaskCh,
 		startTime:              time.Now(),
 		storeHeartbeatInterval: interval,
 		ctx:                    ctx,
@@ -100,9 +105,21 @@ func NewPDWorker(cfg PDWorkerConfig) *PDWorker {
 	}
 }
 
-// Run starts the PDWorker goroutines: store heartbeat loop and task processor.
+// PeerTaskCh returns the channel that peers can send RegionHeartbeatInfo to.
+func (w *PDWorker) PeerTaskCh() chan<- interface{} {
+	return w.peerTaskCh
+}
+
+// SetCoordinator sets the coordinator after construction (needed when coordinator
+// depends on PDWorker's channel and PDWorker depends on coordinator).
+func (w *PDWorker) SetCoordinator(coord *StoreCoordinator) {
+	w.coordinator = coord
+}
+
+// Run starts the PDWorker goroutines: store heartbeat loop, task processor,
+// and peer task processor.
 func (w *PDWorker) Run() {
-	w.wg.Add(2)
+	w.wg.Add(3)
 	go func() {
 		defer w.wg.Done()
 		w.storeHeartbeatLoop()
@@ -110,6 +127,10 @@ func (w *PDWorker) Run() {
 	go func() {
 		defer w.wg.Done()
 		w.taskProcessorLoop()
+	}()
+	go func() {
+		defer w.wg.Done()
+		w.peerTaskProcessorLoop()
 	}()
 }
 
@@ -218,6 +239,24 @@ func (w *PDWorker) sendRegionHeartbeat(data *RegionHeartbeatData) {
 
 	if err := w.pdClient.ReportRegionHeartbeat(ctx, req); err != nil {
 		slog.Warn("region heartbeat failed", "region", data.Region.GetId(), "err", err)
+	}
+}
+
+// peerTaskProcessorLoop receives RegionHeartbeatInfo from peers and forwards
+// them to PD as region heartbeats.
+func (w *PDWorker) peerTaskProcessorLoop() {
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case task := <-w.peerTaskCh:
+			if info, ok := task.(*raftstore.RegionHeartbeatInfo); ok {
+				w.sendRegionHeartbeat(&RegionHeartbeatData{
+					Region: info.Region,
+					Peer:   info.Peer,
+				})
+			}
+		}
 	}
 }
 

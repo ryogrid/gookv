@@ -127,6 +127,26 @@ type SignificantMsg struct {
 	Status   raft.SnapshotStatus
 }
 
+// CompactLogRequest represents a log compaction admin command.
+type CompactLogRequest struct {
+	CompactIndex uint64
+	CompactTerm  uint64
+}
+
+// CompactLogResult is returned after applying a CompactLog command.
+type CompactLogResult struct {
+	TruncatedIndex uint64
+	TruncatedTerm  uint64
+	FirstIndex     uint64
+}
+
+// RaftLogGCTask is a unit of work for the background log deletion worker.
+type RaftLogGCTask struct {
+	RegionID uint64
+	StartIdx uint64 // Inclusive
+	EndIdx   uint64 // Exclusive
+}
+
 // Raft initialization constants (matching TiKV).
 const (
 	RaftInitLogTerm  uint64 = 5

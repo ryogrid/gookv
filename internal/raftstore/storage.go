@@ -302,6 +302,87 @@ func (s *PeerStorage) RecoverFromEngine() error {
 	return nil
 }
 
+// TruncatedIndex returns the current truncated index.
+func (s *PeerStorage) TruncatedIndex() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.applyState.TruncatedIndex
+}
+
+// TruncatedTerm returns the current truncated term.
+func (s *PeerStorage) TruncatedTerm() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.applyState.TruncatedTerm
+}
+
+// AppliedIndex returns the current applied index.
+func (s *PeerStorage) AppliedIndex() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.applyState.AppliedIndex
+}
+
+// CompactTo removes entries from the in-memory cache up to compactTo.
+// Entries before compactTo will no longer be served from cache.
+func (s *PeerStorage) CompactTo(compactTo uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.entries) == 0 {
+		return
+	}
+
+	cacheFirst := s.entries[0].Index
+	if compactTo <= cacheFirst {
+		return
+	}
+
+	offset := compactTo - cacheFirst
+	if offset >= uint64(len(s.entries)) {
+		s.entries = nil
+		return
+	}
+	s.entries = s.entries[offset:]
+}
+
+// PersistApplyState writes the current ApplyState to the engine.
+func (s *PeerStorage) PersistApplyState() error {
+	s.mu.RLock()
+	state := s.applyState
+	s.mu.RUnlock()
+
+	// Serialize ApplyState as a simple binary format:
+	// [AppliedIndex:8][TruncatedIndex:8][TruncatedTerm:8]
+	data := make([]byte, 24)
+	data[0] = byte(state.AppliedIndex >> 56)
+	data[1] = byte(state.AppliedIndex >> 48)
+	data[2] = byte(state.AppliedIndex >> 40)
+	data[3] = byte(state.AppliedIndex >> 32)
+	data[4] = byte(state.AppliedIndex >> 24)
+	data[5] = byte(state.AppliedIndex >> 16)
+	data[6] = byte(state.AppliedIndex >> 8)
+	data[7] = byte(state.AppliedIndex)
+	data[8] = byte(state.TruncatedIndex >> 56)
+	data[9] = byte(state.TruncatedIndex >> 48)
+	data[10] = byte(state.TruncatedIndex >> 40)
+	data[11] = byte(state.TruncatedIndex >> 32)
+	data[12] = byte(state.TruncatedIndex >> 24)
+	data[13] = byte(state.TruncatedIndex >> 16)
+	data[14] = byte(state.TruncatedIndex >> 8)
+	data[15] = byte(state.TruncatedIndex)
+	data[16] = byte(state.TruncatedTerm >> 56)
+	data[17] = byte(state.TruncatedTerm >> 48)
+	data[18] = byte(state.TruncatedTerm >> 40)
+	data[19] = byte(state.TruncatedTerm >> 32)
+	data[20] = byte(state.TruncatedTerm >> 24)
+	data[21] = byte(state.TruncatedTerm >> 16)
+	data[22] = byte(state.TruncatedTerm >> 8)
+	data[23] = byte(state.TruncatedTerm)
+
+	return s.engine.Put(cfnames.CFRaft, keys.ApplyStateKey(s.regionID), data)
+}
+
 // --- Internal helpers ---
 
 func (s *PeerStorage) firstIndexLocked() uint64 {

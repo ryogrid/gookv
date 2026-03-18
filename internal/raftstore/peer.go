@@ -29,6 +29,15 @@ type PeerConfig struct {
 	PreVote bool
 	// MailboxCapacity is the size of the peer's mailbox channel.
 	MailboxCapacity int
+
+	// RaftLogGCTickInterval is how often the log GC tick fires.
+	RaftLogGCTickInterval time.Duration
+	// RaftLogGCCountLimit triggers compaction when excess entry count exceeds this.
+	RaftLogGCCountLimit uint64
+	// RaftLogGCSizeLimit triggers compaction when estimated log size exceeds this.
+	RaftLogGCSizeLimit uint64
+	// RaftLogGCThreshold is the minimum number of entries to keep.
+	RaftLogGCThreshold uint64
 }
 
 // DefaultPeerConfig returns a PeerConfig with sensible defaults.
@@ -41,6 +50,10 @@ func DefaultPeerConfig() PeerConfig {
 		MaxSizePerMsg:            1 << 20, // 1 MiB
 		PreVote:                  true,
 		MailboxCapacity:          256,
+		RaftLogGCTickInterval:    10 * time.Second,
+		RaftLogGCCountLimit:      72000,
+		RaftLogGCSizeLimit:       72 * 1024 * 1024, // 72 MiB
+		RaftLogGCThreshold:       50,
 	}
 }
 
@@ -70,6 +83,16 @@ type Peer struct {
 
 	// pendingProposals tracks in-flight proposals: index -> callback.
 	pendingProposals map[uint64]func([]byte, error)
+
+	// raftLogSizeHint tracks estimated size of the Raft log.
+	raftLogSizeHint uint64
+
+	// lastCompactedIdx tracks the last index scheduled for GC.
+	lastCompactedIdx uint64
+
+	// logGCWorkerCh sends deletion tasks to the background worker.
+	// May be nil if no GC worker is configured.
+	logGCWorkerCh chan<- RaftLogGCTask
 
 	// State flags.
 	stopped     atomic.Bool
@@ -173,21 +196,48 @@ func (p *Peer) Run(ctx context.Context) {
 	ticker := time.NewTicker(p.cfg.RaftBaseTickInterval)
 	defer ticker.Stop()
 
+	var gcTicker *time.Ticker
+	if p.cfg.RaftLogGCTickInterval > 0 {
+		gcTicker = time.NewTicker(p.cfg.RaftLogGCTickInterval)
+		defer gcTicker.Stop()
+	}
+
 	for {
-		select {
-		case <-ctx.Done():
-			p.stopped.Store(true)
-			return
-
-		case <-ticker.C:
-			p.rawNode.Tick()
-
-		case msg, ok := <-p.Mailbox:
-			if !ok {
+		if gcTicker != nil {
+			select {
+			case <-ctx.Done():
 				p.stopped.Store(true)
 				return
+
+			case <-ticker.C:
+				p.rawNode.Tick()
+
+			case <-gcTicker.C:
+				p.onRaftLogGCTick()
+
+			case msg, ok := <-p.Mailbox:
+				if !ok {
+					p.stopped.Store(true)
+					return
+				}
+				p.handleMessage(msg)
 			}
-			p.handleMessage(msg)
+		} else {
+			select {
+			case <-ctx.Done():
+				p.stopped.Store(true)
+				return
+
+			case <-ticker.C:
+				p.rawNode.Tick()
+
+			case msg, ok := <-p.Mailbox:
+				if !ok {
+					p.stopped.Store(true)
+					return
+				}
+				p.handleMessage(msg)
+			}
 		}
 
 		p.handleReady()
@@ -322,8 +372,133 @@ func (p *Peer) onApplyResult(result *ApplyResult) {
 	}
 	// Process results and invoke pending proposal callbacks.
 	for _, r := range result.Results {
-		_ = r // Process specific result types if needed.
+		switch r.Type {
+		case ExecResultTypeCompactLog:
+			if clr, ok := r.Data.(*CompactLogResult); ok {
+				p.onReadyCompactLog(*clr)
+			}
+		default:
+			// Other result types handled as needed.
+		}
 	}
+}
+
+// onRaftLogGCTick evaluates whether the Raft log should be compacted.
+// Only the leader proposes CompactLog commands.
+func (p *Peer) onRaftLogGCTick() {
+	if !p.isLeader.Load() {
+		return
+	}
+
+	firstIdx, _ := p.storage.FirstIndex()
+	appliedIdx := p.storage.AppliedIndex()
+
+	if appliedIdx <= firstIdx {
+		return
+	}
+
+	excessCount := appliedIdx - firstIdx
+	exceedsCount := excessCount >= p.cfg.RaftLogGCCountLimit
+	exceedsSize := p.raftLogSizeHint >= p.cfg.RaftLogGCSizeLimit
+
+	if !exceedsCount && !exceedsSize {
+		return
+	}
+
+	// Compute compact_idx from follower match indices.
+	status := p.rawNode.Status()
+	var compactIdx uint64 = appliedIdx
+
+	if len(status.Progress) > 1 {
+		// Find the minimum match index across all followers.
+		minMatch := appliedIdx
+		for id, pr := range status.Progress {
+			if id == p.peerID {
+				continue
+			}
+			if pr.Match < minMatch {
+				minMatch = pr.Match
+			}
+		}
+		compactIdx = minMatch
+	}
+
+	// Don't compact past applied index - 1.
+	if compactIdx > appliedIdx-1 {
+		compactIdx = appliedIdx - 1
+	}
+
+	// Ensure we keep at least RaftLogGCThreshold entries.
+	if compactIdx > firstIdx+p.cfg.RaftLogGCThreshold {
+		compactIdx = compactIdx // keep as is
+	} else if excessCount >= p.cfg.RaftLogGCCountLimit*3 {
+		// Force compact when way over limit, even if followers are slow.
+		compactIdx = appliedIdx - 1
+	} else {
+		return
+	}
+
+	if compactIdx <= p.lastCompactedIdx {
+		return
+	}
+
+	// Get the term at the compact index.
+	compactTerm, err := p.storage.Term(compactIdx)
+	if err != nil {
+		return
+	}
+
+	// Propose CompactLog through Raft.
+	req := CompactLogRequest{
+		CompactIndex: compactIdx,
+		CompactTerm:  compactTerm,
+	}
+	data := marshalCompactLogRequest(req)
+	_ = p.rawNode.Propose(data)
+}
+
+// onReadyCompactLog handles the apply result of a CompactLog command.
+func (p *Peer) onReadyCompactLog(result CompactLogResult) {
+	// Update raft log size hint proportionally.
+	if result.FirstIndex > 0 {
+		totalEntries := p.storage.AppliedIndex() - result.FirstIndex + 1
+		remainingEntries := p.storage.AppliedIndex() - result.TruncatedIndex
+		if totalEntries > 0 {
+			p.raftLogSizeHint = p.raftLogSizeHint * remainingEntries / totalEntries
+		}
+	}
+
+	// Compact the in-memory entry cache.
+	p.storage.CompactTo(result.TruncatedIndex + 1)
+
+	// Schedule physical log deletion.
+	p.scheduleRaftLogGC(result.TruncatedIndex + 1)
+
+	p.lastCompactedIdx = result.TruncatedIndex
+}
+
+// scheduleRaftLogGC sends a deletion task to the background worker.
+func (p *Peer) scheduleRaftLogGC(compactTo uint64) {
+	if p.logGCWorkerCh == nil {
+		return
+	}
+
+	task := RaftLogGCTask{
+		RegionID: p.regionID,
+		StartIdx: 0,
+		EndIdx:   compactTo,
+	}
+
+	// Non-blocking send; if the channel is full, skip this round.
+	select {
+	case p.logGCWorkerCh <- task:
+	default:
+	}
+}
+
+// SetLogGCWorkerCh sets the channel for sending log GC tasks.
+func (p *Peer) SetLogGCWorkerCh(ch chan<- RaftLogGCTask) {
+	p.logGCWorkerCh = ch
 }
 
 // Propose proposes data to the Raft group.

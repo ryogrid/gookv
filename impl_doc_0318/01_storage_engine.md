@@ -2,9 +2,9 @@
 
 ## 1. Overview
 
-The storage engine layer provides the `KvEngine` abstraction that sits at the bottom of the gookvs stack. It wraps Pebble -- a pure-Go, RocksDB-compatible embedded key-value store developed by CockroachDB -- so that gookvs avoids any CGo build dependencies while retaining RocksDB-like semantics.
+The storage engine layer provides the `KvEngine` abstraction that sits at the bottom of the gookv stack. It wraps Pebble -- a pure-Go, RocksDB-compatible embedded key-value store developed by CockroachDB -- so that gookv avoids any CGo build dependencies while retaining RocksDB-like semantics.
 
-TiKV natively relies on RocksDB column families (CFs) to separate different categories of data. Pebble does not expose column families, so gookvs emulates them by reserving a single-byte key prefix for each of the four logical CFs:
+TiKV natively relies on RocksDB column families (CFs) to separate different categories of data. Pebble does not expose column families, so gookv emulates them by reserving a single-byte key prefix for each of the four logical CFs:
 
 | Column Family | Constant (`pkg/cfnames`) | Prefix Byte |
 |---------------|--------------------------|-------------|
@@ -443,8 +443,8 @@ All individual mutations in the batch are applied atomically. The commit is sync
 | `internal/storage` | MVCC reader and transaction actions use `KvEngine`, `Snapshot`, and `Iterator` for multi-version data access |
 | `internal/server` | Creates and manages the `Engine` instance; passes it to raftstore and storage layers |
 | `internal/coprocessor` | Reads data through the engine interface for coprocessor request handling |
-| `cmd/gookvs-server` | Entry point that opens the engine |
-| `cmd/gookvs-ctl` | Admin CLI that opens the engine for inspection |
+| `cmd/gookv-server` | Entry point that opens the engine |
+| `cmd/gookv-ctl` | Admin CLI that opens the engine for inspection |
 | `e2e` (test) | End-to-end tests that spin up servers with real engines |
 
 ## 6. Implementation Status

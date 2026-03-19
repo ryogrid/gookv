@@ -10,12 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft/v3"
 
-	"github.com/ryogrid/gookvs/internal/engine/rocks"
-	"github.com/ryogrid/gookvs/internal/raftstore"
-	raftrouter "github.com/ryogrid/gookvs/internal/raftstore/router"
-	"github.com/ryogrid/gookvs/internal/server"
-	"github.com/ryogrid/gookvs/internal/server/transport"
-	"github.com/ryogrid/gookvs/pkg/pdclient"
+	"github.com/ryogrid/gookv/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/raftstore"
+	raftrouter "github.com/ryogrid/gookv/internal/raftstore/router"
+	"github.com/ryogrid/gookv/internal/server"
+	"github.com/ryogrid/gookv/internal/server/transport"
+	"github.com/ryogrid/gookv/pkg/pdclient"
 )
 
 const pdClusterSize = 3

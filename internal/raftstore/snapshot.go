@@ -10,9 +10,9 @@ import (
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
-	"github.com/ryogrid/gookvs/pkg/keys"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/keys"
 )
 
 // SnapState represents the state machine for snapshot generation.

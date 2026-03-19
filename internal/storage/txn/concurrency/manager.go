@@ -6,7 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // Manager tracks in-memory locks and max_ts for async commit correctness.

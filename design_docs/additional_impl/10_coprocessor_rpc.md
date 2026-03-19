@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-This document describes how to wire gookvs's existing local coprocessor executor pipeline (TableScan, Selection, Limit, Aggregation, RPN expressions, ExecutorsRunner) into the gRPC layer, exposing it as TiKV-compatible `Coprocessor` and `CoprocessorStream` RPCs.
+This document describes how to wire gookv's existing local coprocessor executor pipeline (TableScan, Selection, Limit, Aggregation, RPN expressions, ExecutorsRunner) into the gRPC layer, exposing it as TiKV-compatible `Coprocessor` and `CoprocessorStream` RPCs.
 
 ### 1.1 Current State
 
@@ -152,7 +152,7 @@ type ExecutorDesc struct {
 
 **Request type dispatch**: The `coprocessor.Request.tp` field determines the handler:
 
-| Type Code | Handler | gookvs Support |
+| Type Code | Handler | gookv Support |
 |-----------|---------|----------------|
 | `REQ_TYPE_DAG` (103) | DAG executor pipeline | Phase 1 |
 | `REQ_TYPE_ANALYZE` (104) | Statistics collection | Future |
@@ -352,7 +352,7 @@ In standalone mode, key ranges from the request are used directly. In cluster mo
 3. The endpoint validates that the requested key ranges fall within the region's key range
 4. If ranges span multiple regions, the client splits the request (not the server)
 
-For gookvs Phase 1, region validation is deferred; all key ranges are served from the local engine.
+For gookv Phase 1, region validation is deferred; all key ranges are served from the local engine.
 
 ## 4. Error Handling
 
@@ -428,7 +428,7 @@ For gookvs Phase 1, region validation is deferred; all key ranges are served fro
 
 ### Simplifications vs TiKV
 
-| TiKV Feature | gookvs Decision |
+| TiKV Feature | gookv Decision |
 |-------------|-----------------|
 | Column-oriented `LazyBatchColumnVec` | Row-oriented `[]Row` (simpler, adequate for initial scale) |
 | `logical_rows` index filtering | Direct row copying in `SelectionExecutor` |

@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The server layer in gookvs provides the outward-facing gRPC service and the internal machinery that connects client requests to the transactional storage engine and the Raft replication layer. It is organized into the following sub-components:
+The server layer in gookv provides the outward-facing gRPC service and the internal machinery that connects client requests to the transactional storage engine and the Raft replication layer. It is organized into the following sub-components:
 
 | Component | Package | Role |
 |---|---|---|
@@ -140,7 +140,7 @@ Converts internal Go errors to protobuf `kvrpcpb.KeyError` structures:
 
 ## 3. API Definitions (`proto/tikvpb.proto`)
 
-The `Tikv` service declares the full TiKV-compatible API. Below is the implementation status in gookvs.
+The `Tikv` service declares the full TiKV-compatible API. Below is the implementation status in gookv.
 
 ### 3.1 Transactional RPCs
 
@@ -364,7 +364,7 @@ The status server is a standalone HTTP server for diagnostics and monitoring.
 | `/debug/pprof/trace` | `pprof.Trace` | Execution trace |
 | `/metrics` | `promhttp.Handler()` | Prometheus metrics |
 | `/config` | `handleConfig` | Returns current server config as JSON |
-| `/status` | `handleStatus` | Returns `{"status":"ok","version":"gookvs-dev"}` |
+| `/status` | `handleStatus` | Returns `{"status":"ok","version":"gookv-dev"}` |
 | `/health` | `handleHealth` | Returns `{"status":"ok"}` (HTTP 200) |
 
 ### 7.2 Configuration

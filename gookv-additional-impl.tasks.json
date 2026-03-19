@@ -1,5 +1,5 @@
 {
-  "batch_name": "gookvs-additional-impl",
+  "batch_name": "gookv-additional-impl",
   "created": "2026-03-18",
   "config": {
     "stop_on_failure": false,
@@ -65,12 +65,12 @@
         "CompactCF() and CompactAll() methods added to rocks.Engine",
         "Unit tests pass for all three improvements",
         "go build succeeds",
-        "go test ./cmd/gookvs-ctl/... passes"
+        "go test ./cmd/gookv-ctl/... passes"
       ],
       "files": [
-        "cmd/gookvs-ctl/main.go",
+        "cmd/gookv-ctl/main.go",
         "internal/engine/rocks/engine.go",
-        "cmd/gookvs-ctl/main_test.go"
+        "cmd/gookv-ctl/main_test.go"
       ]
     },
     {
@@ -244,12 +244,12 @@
     },
     {
       "id": "task-13-pd-server",
-      "description": "Implement PD (Placement Driver) server. Design doc: design_docs/additional_impl/13_pd_server.md. Create standalone PD binary (cmd/gookvs-pd/) with TSO allocator, cluster metadata store (Pebble), region tree, heartbeat processing, ID allocation, bootstrap.",
+      "description": "Implement PD (Placement Driver) server. Design doc: design_docs/additional_impl/13_pd_server.md. Create standalone PD binary (cmd/gookv-pd/) with TSO allocator, cluster metadata store (Pebble), region tree, heartbeat processing, ID allocation, bootstrap.",
       "priority": 4,
       "phase": 4,
       "dependencies": [],
       "acceptance_criteria": [
-        "cmd/gookvs-pd/main.go entry point created",
+        "cmd/gookv-pd/main.go entry point created",
         "PDServer struct with TSO allocator (physical<<18|logical, monotonic, crash-safe)",
         "Pebble-backed metadata store for cluster/store/region info",
         "RegionTree for region key-range lookup",
@@ -261,10 +261,10 @@
         "GetRegion, GetRegionByID, ScanRegions for region lookup",
         "gRPC server implements pdpb.PD service",
         "Unit tests pass for TSO, metadata store, region tree",
-        "go build ./cmd/gookvs-pd/ succeeds"
+        "go build ./cmd/gookv-pd/ succeeds"
       ],
       "files": [
-        "cmd/gookvs-pd/main.go",
+        "cmd/gookv-pd/main.go",
         "internal/pd/server.go",
         "internal/pd/tso.go",
         "internal/pd/metadata.go",
@@ -300,7 +300,7 @@
     },
     {
       "id": "task-14-pd-integration",
-      "description": "Wire PD client into gookvs-server: heartbeat loops, TSO usage, PD command processing. Design doc: design_docs/additional_impl/14_pd_integration.md. Create PDWorker goroutine, implement store/region heartbeat, handle PD scheduling commands.",
+      "description": "Wire PD client into gookv-server: heartbeat loops, TSO usage, PD command processing. Design doc: design_docs/additional_impl/14_pd_integration.md. Create PDWorker goroutine, implement store/region heartbeat, handle PD scheduling commands.",
       "priority": 5,
       "phase": 5,
       "dependencies": ["task-13-pd-server", "task-04-conf-change"],
@@ -316,7 +316,7 @@
         "go test ./internal/... passes"
       ],
       "files": [
-        "cmd/gookvs-server/main.go",
+        "cmd/gookv-server/main.go",
         "internal/server/pd_worker.go",
         "internal/raftstore/peer.go",
         "internal/server/coordinator.go",

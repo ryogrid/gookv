@@ -1,7 +1,7 @@
 {
-  "project": "gookvs Implementation",
-  "branchName": "gookvs-impl",
-  "description": "Implement gookvs, a TiKV-like distributed transactional KVS in Go. Test-driven: convert TiKV test cases to Go first, then implement. Scope: Tier-1 all + Tier-2 (minus TLS/mTLS) + Tier-4 Admin CLI.",
+  "project": "gookv Implementation",
+  "branchName": "gookv-impl",
+  "description": "Implement gookv, a TiKV-like distributed transactional KVS in Go. Test-driven: convert TiKV test cases to Go first, then implement. Scope: Tier-1 all + Tier-2 (minus TLS/mTLS) + Tier-4 Admin CLI.",
   "userStories": [
     {
       "id": "IMPL-001",
@@ -296,7 +296,7 @@
     },
     {
       "id": "IMPL-021",
-      "title": "cmd/gookvs-ctl: Admin CLI",
+      "title": "cmd/gookv-ctl: Admin CLI",
       "tier": 4,
       "step": "T4-2",
       "description": "Implement admin CLI for inspecting regions, dumping SST, and triggering manual operations.",

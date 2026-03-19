@@ -1,4 +1,4 @@
-// pessimistic.go implements pessimistic transaction support for gookvs.
+// pessimistic.go implements pessimistic transaction support for gookv.
 //
 // Pessimistic locking allows clients to acquire locks before prewrite,
 // preventing write conflicts during interactive transactions.
@@ -12,8 +12,8 @@
 package txn
 
 import (
-	"github.com/ryogrid/gookvs/internal/storage/mvcc"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // PessimisticLockProps holds parameters for pessimistic lock acquisition.

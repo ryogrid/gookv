@@ -1,4 +1,4 @@
-// Package cfnames defines column family name constants for gookvs.
+// Package cfnames defines column family name constants for gookv.
 // These names are byte-identical to TiKV's for storage compatibility.
 package cfnames
 
@@ -16,5 +16,5 @@ const (
 // DataCFs are the column families used for transaction data.
 var DataCFs = []string{CFDefault, CFLock, CFWrite}
 
-// AllCFs are all column families used by gookvs.
+// AllCFs are all column families used by gookv.
 var AllCFs = []string{CFDefault, CFLock, CFWrite, CFRaft}

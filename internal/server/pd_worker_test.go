@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/ryogrid/gookvs/pkg/pdclient"
+	"github.com/ryogrid/gookv/pkg/pdclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

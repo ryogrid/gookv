@@ -10,8 +10,8 @@
 package txn
 
 import (
-	"github.com/ryogrid/gookvs/internal/storage/mvcc"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // AsyncCommitPrewriteProps extends PrewriteProps for async commit.

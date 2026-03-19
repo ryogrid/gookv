@@ -51,10 +51,10 @@
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 - **Minimat Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
 
-## gookvs Development
+## gookv Development
 
 ### Overview
-gookvs is a Go-based distributed transactional KV store modeled after TiKV.
+gookv is a Go-based distributed transactional KV store modeled after TiKV.
 - Design docs: `design_docs/` (00-08) — primary reference
 - TiKV impl docs: `impl_docs/` — secondary reference (use only when stuck)
 - TiKV Rust source: navigate via Serena's Rust LSP — last resort reference
@@ -62,7 +62,7 @@ gookvs is a Go-based distributed transactional KV store modeled after TiKV.
 ### Scope
 - Tier-1: All (steps 1-12 in design_docs/08_priority_and_scope.md)
 - Tier-2: All except TLS/mTLS (internal/security is out of scope)
-- Tier-4: Admin CLI only (cmd/gookvs-ctl)
+- Tier-4: Admin CLI only (cmd/gookv-ctl)
 
 ### TDD Workflow
 1. Find TiKV test cases for the component (use Serena Rust LSP)
@@ -77,11 +77,11 @@ gookvs is a Go-based distributed transactional KV store modeled after TiKV.
 - Use context.Context, goroutine+channel, sync.Map patterns
 
 ### Go Module
-- Module path: github.com/ryogrid/gookvs
+- Module path: github.com/ryogrid/gookv
 - Public packages: pkg/ (codec, keys, cfnames, txntypes, pdclient)
 - Private packages: internal/ (engine, raftstore, storage, server, etc.)
-- Build: `make -f Makefile.gookvs build`
-- Test: `make -f Makefile.gookvs test`
+- Build: `make -f Makefile.gookv build`
+- Test: `make -f Makefile.gookv test`
 
 ### Multi-Agent (Ralph) Usage
 - Available skills: `/orchestrator`, `/iterate`, `/task-batch`, `/gates`, etc.

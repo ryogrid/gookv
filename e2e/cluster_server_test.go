@@ -15,16 +15,16 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/ryogrid/gookvs/internal/engine/rocks"
-	"github.com/ryogrid/gookvs/internal/raftstore"
-	raftrouter "github.com/ryogrid/gookvs/internal/raftstore/router"
-	"github.com/ryogrid/gookvs/internal/server"
-	"github.com/ryogrid/gookvs/internal/server/transport"
+	"github.com/ryogrid/gookv/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/raftstore"
+	raftrouter "github.com/ryogrid/gookv/internal/raftstore/router"
+	"github.com/ryogrid/gookv/internal/server"
+	"github.com/ryogrid/gookv/internal/server/transport"
 )
 
 const serverClusterSize = 5
 
-// serverNode represents a single gookvs-server node in the test cluster.
+// serverNode represents a single gookv-server node in the test cluster.
 type serverNode struct {
 	storeID     uint64
 	srv         *server.Server
@@ -34,7 +34,7 @@ type serverNode struct {
 	cancel      context.CancelFunc
 }
 
-// testServerCluster manages a 5-node gookvs-server cluster for e2e testing.
+// testServerCluster manages a 5-node gookv-server cluster for e2e testing.
 type testServerCluster struct {
 	t        *testing.T
 	nodes    [serverClusterSize]*serverNode

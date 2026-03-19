@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/ryogrid/gookvs/internal/server/transport"
+	"github.com/ryogrid/gookv/internal/server/transport"
 )
 
 // Ensure StaticStoreResolver implements transport.StoreResolver.

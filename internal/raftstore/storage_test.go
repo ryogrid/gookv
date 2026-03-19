@@ -7,8 +7,8 @@ import (
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 
-	"github.com/ryogrid/gookvs/internal/engine/rocks"
-	"github.com/ryogrid/gookvs/internal/engine/traits"
+	"github.com/ryogrid/gookv/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/engine/traits"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

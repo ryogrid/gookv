@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document specifies the design for implementing Raft snapshot generation, transfer, and application in gookvs. Currently, `PeerStorage.Snapshot()` in `internal/raftstore/storage.go` returns a minimal empty snapshot containing only `TruncatedIndex` and `TruncatedTerm` metadata. No actual data is serialized, no SST files are created, no snapshot send/receive logic exists, and `ApplySnapshot` is not implemented.
+This document specifies the design for implementing Raft snapshot generation, transfer, and application in gookv. Currently, `PeerStorage.Snapshot()` in `internal/raftstore/storage.go` returns a minimal empty snapshot containing only `TruncatedIndex` and `TruncatedTerm` metadata. No actual data is serialized, no SST files are created, no snapshot send/receive logic exists, and `ApplySnapshot` is not implemented.
 
 The snapshot mechanism is critical for two scenarios:
 1. **New peer catch-up**: When a new peer joins a Raft group (via conf-change), it may be too far behind to catch up via log replication. The leader sends a snapshot containing the full region state.

@@ -36,7 +36,7 @@ TiKV's scanner implementation lives in `src/storage/mvcc/reader/scanner/`:
 
 1. **Dual-cursor advancement**: The forward scanner simultaneously tracks a write cursor and a lock cursor. At each step, it computes `current_user_key = min(user_key(write_cursor), lock_cursor)` and determines which cursors have data for that key (`has_write`, `has_lock`).
 
-2. **ScanPolicy trait**: TiKV uses a generic `ScanPolicy` trait with `handle_lock()` and `handle_write()` methods, enabling different scan modes (latest KV, entry scan, delta scan) via the same `ForwardScanner` core. For gookvs, we simplify to two concrete modes: forward KV and backward KV.
+2. **ScanPolicy trait**: TiKV uses a generic `ScanPolicy` trait with `handle_lock()` and `handle_write()` methods, enabling different scan modes (latest KV, entry scan, delta scan) via the same `ForwardScanner` core. For gookv, we simplify to two concrete modes: forward KV and backward KV.
 
 3. **SEEK_BOUND optimization**: When advancing the write cursor to the read timestamp or to the next user key, TiKV first tries `Next()` up to `SEEK_BOUND` (8) times. If the target is not found, it falls back to `Seek()`. This avoids expensive seeks when versions are few.
 

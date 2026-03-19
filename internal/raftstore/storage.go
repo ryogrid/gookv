@@ -8,9 +8,9 @@ import (
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
-	"github.com/ryogrid/gookvs/pkg/keys"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/keys"
 )
 
 // ApplyState tracks which Raft entries have been applied to the state machine.

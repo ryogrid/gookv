@@ -7,7 +7,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/ryogrid/gookvs/internal/raftstore"
+	"github.com/ryogrid/gookv/internal/raftstore"
 )
 
 var (

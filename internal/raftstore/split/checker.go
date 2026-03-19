@@ -7,8 +7,8 @@ import (
 	"log/slog"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/pkg/cfnames"
 )
 
 // CheckPolicy controls how the split checker estimates region size.

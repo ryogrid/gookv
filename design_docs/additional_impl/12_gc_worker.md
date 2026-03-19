@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The GC (Garbage Collection) worker is responsible for reclaiming stale MVCC versions from the storage engine. In gookvs's Percolator-based MVCC model, every Put or Delete creates a new version in CF_WRITE (and potentially CF_DEFAULT). Without GC, the storage engine would grow without bound.
+The GC (Garbage Collection) worker is responsible for reclaiming stale MVCC versions from the storage engine. In gookv's Percolator-based MVCC model, every Put or Delete creates a new version in CF_WRITE (and potentially CF_DEFAULT). Without GC, the storage engine would grow without bound.
 
 The GC subsystem consists of three layers:
 
@@ -67,7 +67,7 @@ TiKV's `MAX_TXN_WRITE_SIZE` (32 KB) limits the accumulated modification size per
 
 ### 2.7 GC Fence
 
-The `gc_fence` field on Write records prevents incorrect reads on stale followers. When GC deletes a version that has `has_overlapped_rollback = true`, it must set `gc_fence` on the surviving version to the next version's `commit_ts`. gookvs must implement this for correctness.
+The `gc_fence` field on Write records prevents incorrect reads on stale followers. When GC deletes a version that has `has_overlapped_rollback = true`, it must set `gc_fence` on the surviving version to the next version's `commit_ts`. gookv must implement this for correctness.
 
 ---
 

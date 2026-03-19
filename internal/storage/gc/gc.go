@@ -1,4 +1,4 @@
-// Package gc implements MVCC garbage collection for gookvs.
+// Package gc implements MVCC garbage collection for gookv.
 // It reclaims stale versions from CF_WRITE and CF_DEFAULT below a safe point.
 package gc
 
@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/internal/storage/mvcc"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // GC state machine states.

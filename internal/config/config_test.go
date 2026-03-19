@@ -17,7 +17,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:20160", cfg.Server.Addr)
 	assert.Equal(t, "127.0.0.1:20180", cfg.Server.StatusAddr)
 	assert.Equal(t, ReadableSize(16*MB), cfg.Server.GRPCMaxRecvMsgSize)
-	assert.Equal(t, "/tmp/gookvs/data", cfg.Storage.DataDir)
+	assert.Equal(t, "/tmp/gookv/data", cfg.Storage.DataDir)
 	assert.Equal(t, []string{"127.0.0.1:2379"}, cfg.PD.Endpoints)
 	assert.Equal(t, 2, cfg.RaftStore.RaftHeartbeatTicks)
 	assert.Equal(t, 10, cfg.RaftStore.RaftElectionTimeoutTicks)
@@ -113,7 +113,7 @@ status-addr = "0.0.0.0:20180"
 grpc-concurrency = 8
 
 [storage]
-data-dir = "/data/gookvs"
+data-dir = "/data/gookv"
 
 [pd]
 endpoints = ["10.0.0.1:2379", "10.0.0.2:2379"]
@@ -144,7 +144,7 @@ pipelined = false
 	assert.Equal(t, "json", cfg.Log.Format)
 	assert.Equal(t, "0.0.0.0:20160", cfg.Server.Addr)
 	assert.Equal(t, 8, cfg.Server.GRPCConcurrency)
-	assert.Equal(t, "/data/gookvs", cfg.Storage.DataDir)
+	assert.Equal(t, "/data/gookv", cfg.Storage.DataDir)
 	assert.Equal(t, []string{"10.0.0.1:2379", "10.0.0.2:2379"}, cfg.PD.Endpoints)
 	assert.Equal(t, 2*time.Second, cfg.RaftStore.RaftBaseTickInterval.Duration)
 	assert.Equal(t, 3, cfg.RaftStore.RaftHeartbeatTicks)
@@ -311,5 +311,5 @@ level = "warn"
 	assert.Equal(t, "warn", cfg.Log.Level)
 	// Default values still present.
 	assert.Equal(t, "127.0.0.1:20160", cfg.Server.Addr)
-	assert.Equal(t, "/tmp/gookvs/data", cfg.Storage.DataDir)
+	assert.Equal(t, "/tmp/gookv/data", cfg.Storage.DataDir)
 }

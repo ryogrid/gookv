@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 	"github.com/stretchr/testify/assert"
 )
 

@@ -4,11 +4,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ryogrid/gookvs/internal/engine/rocks"
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/internal/raftstore"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
-	"github.com/ryogrid/gookvs/pkg/keys"
+	"github.com/ryogrid/gookv/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/internal/raftstore"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/keys"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -1,7 +1,7 @@
 {
   "env": {
-    "CLAUDE_CODE_AGENT_ID": "gookvs-primary",
-    "CLAUDE_CODE_AGENT_NAME": "gookvs-dev",
+    "CLAUDE_CODE_AGENT_ID": "gookv-primary",
+    "CLAUDE_CODE_AGENT_NAME": "gookv-dev",
     "CLAUDE_CODE_MAX_AGENT_ITERATIONS": "50"
   },
   "hooks": {
@@ -11,11 +11,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/ryo/work/gookvs/multi-agent-ralph-loop/.claude/hooks/git-safety-guard.py"
+            "command": "/home/ryo/work/gookv/multi-agent-ralph-loop/.claude/hooks/git-safety-guard.py"
           },
           {
             "type": "command",
-            "command": "/home/ryo/work/gookvs/multi-agent-ralph-loop/.claude/hooks/repo-boundary-guard.sh"
+            "command": "/home/ryo/work/gookv/multi-agent-ralph-loop/.claude/hooks/repo-boundary-guard.sh"
           }
         ]
       }

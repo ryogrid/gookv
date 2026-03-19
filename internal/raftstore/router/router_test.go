@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ryogrid/gookvs/internal/raftstore"
+	"github.com/ryogrid/gookv/internal/raftstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

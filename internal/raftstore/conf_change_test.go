@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/ryogrid/gookvs/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/engine/rocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft/v3"

@@ -1,6 +1,6 @@
 # Unimplemented Acceptance Criteria
 
-Results of cross-referencing prd-gookvs-impl.json acceptanceCriteria against the codebase.
+Results of cross-referencing prd-gookv-impl.json acceptanceCriteria against the codebase.
 
 ## Not Implemented (6 items)
 
@@ -23,11 +23,11 @@ Results of cross-referencing prd-gookvs-impl.json acceptanceCriteria against the
   - No `TxnScheduler` type or dispatch logic exists
   - Only individual action functions (Prewrite, Commit, Rollback) are implemented
 
-### IMPL-021: cmd/gookvs-ctl — Region metadata inspection
+### IMPL-021: cmd/gookv-ctl — Region metadata inspection
 - **"Can inspect region metadata"**
   - The `region` command is listed in usage but `cmdRegion()` function is not implemented
 
-### IMPL-021: cmd/gookvs-ctl — SST dump
+### IMPL-021: cmd/gookv-ctl — SST dump
 - **"Can dump SST file contents"**
   - `cmdDump()` only scans raw key-value pairs in a column family
   - No SST file parsing or dump functionality is implemented
@@ -44,7 +44,7 @@ Results of cross-referencing prd-gookvs-impl.json acceptanceCriteria against the
   - Basic tests exist in peer_test.go (bootstrap, election, proposal)
   - No integration tests for snapshot, split, or multi-region scenarios
 
-### IMPL-021: cmd/gookvs-ctl — Manual compaction
+### IMPL-021: cmd/gookv-ctl — Manual compaction
 - **"Can trigger manual compaction"**
   - `cmdCompact()` only calls `eng.SyncWAL()` (WAL sync)
   - Does not trigger actual RocksDB/Pebble compaction

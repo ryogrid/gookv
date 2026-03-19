@@ -1,10 +1,10 @@
-# gookvs Architecture Overview
+# gookv Architecture Overview
 
 ## 1. Project Identity
 
 | Field | Value |
 |---|---|
-| Module | `github.com/ryogrid/gookvs` |
+| Module | `github.com/ryogrid/gookv` |
 | Go version | 1.22.2 |
 | License | See `LICENSE` |
 
@@ -62,8 +62,8 @@
 
 | Package | Description |
 |---|---|
-| `cmd/gookvs-server` | Main server entry point. Parses CLI flags, loads TOML config, opens Pebble engine, creates Storage and gRPC Server, optionally bootstraps Raft cluster mode, starts HTTP status server, handles graceful shutdown on SIGINT/SIGTERM. |
-| `cmd/gookvs-ctl` | Admin CLI. Subcommands: `scan` (range scan by CF), `get` (point read), `mvcc` (MVCC info as JSON), `dump` (raw hex dump), `size` (per-CF key count and size), `compact` (trigger WAL flush). Opens Pebble engine directly. |
+| `cmd/gookv-server` | Main server entry point. Parses CLI flags, loads TOML config, opens Pebble engine, creates Storage and gRPC Server, optionally bootstraps Raft cluster mode, starts HTTP status server, handles graceful shutdown on SIGINT/SIGTERM. |
+| `cmd/gookv-ctl` | Admin CLI. Subcommands: `scan` (range scan by CF), `get` (point read), `mvcc` (MVCC info as JSON), `dump` (raw hex dump), `size` (per-CF key count and size), `compact` (trigger WAL flush). Opens Pebble engine directly. |
 
 ---
 
@@ -72,7 +72,7 @@
 ```mermaid
 graph TB
     subgraph "Client Layer"
-        CLI["gookvs-ctl<br/>(Admin CLI)"]
+        CLI["gookv-ctl<br/>(Admin CLI)"]
         GRPC_CLIENT["gRPC Clients<br/>(TiKV-compatible)"]
     end
 
@@ -195,7 +195,7 @@ When `--store-id N --initial-cluster "1=addr1,2=addr2,..."` is provided:
 
 ## 5. Server Startup Sequence
 
-The startup flow in `cmd/gookvs-server/main.go`:
+The startup flow in `cmd/gookv-server/main.go`:
 
 ```
 main()
@@ -266,8 +266,8 @@ main()
 ```mermaid
 graph LR
     subgraph "cmd"
-        SERVER["gookvs-server"]
-        CTL["gookvs-ctl"]
+        SERVER["gookv-server"]
+        CTL["gookv-ctl"]
     end
 
     subgraph "internal/server"
@@ -426,7 +426,7 @@ graph LR
 
 ### Key Architectural Notes
 
-- **Column family emulation**: Pebble is a single-keyspace LSM. gookvs emulates TiKV's 4 column families (`default`, `lock`, `write`, `raft`) by prepending a one-byte prefix (0x00-0x03) to every key. Iterator bounds are scoped per-CF.
+- **Column family emulation**: Pebble is a single-keyspace LSM. gookv emulates TiKV's 4 column families (`default`, `lock`, `write`, `raft`) by prepending a one-byte prefix (0x00-0x03) to every key. Iterator bounds are scoped per-CF.
 
 - **MVCC three-CF scheme**: Following TiKV's Percolator model:
   - `CF_LOCK` stores active transaction locks (keyed by encoded user key, no timestamp).

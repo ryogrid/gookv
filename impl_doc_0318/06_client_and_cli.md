@@ -2,18 +2,18 @@
 
 ## 1. Overview
 
-gookvs ships two executables:
+gookv ships two executables:
 
 | Binary | Package | Purpose |
 |---|---|---|
-| `gookvs-server` | `cmd/gookvs-server` | Main server daemon -- gRPC API, Raft coordination, HTTP status endpoint |
-| `gookvs-ctl` | `cmd/gookvs-ctl` | Offline admin CLI for inspecting and diagnosing a gookvs data directory |
+| `gookv-server` | `cmd/gookv-server` | Main server daemon -- gRPC API, Raft coordination, HTTP status endpoint |
+| `gookv-ctl` | `cmd/gookv-ctl` | Offline admin CLI for inspecting and diagnosing a gookv data directory |
 
 In addition, the public package `pkg/pdclient` provides a reusable Go client library for communicating with the Placement Driver (PD) service.
 
 ---
 
-## 2. Server Entry Point (`cmd/gookvs-server/main.go`)
+## 2. Server Entry Point (`cmd/gookv-server/main.go`)
 
 ### 2.1 CLI Flags
 
@@ -73,7 +73,7 @@ The `main()` function proceeds through these steps in order:
 
 ---
 
-## 3. Admin CLI (`cmd/gookvs-ctl/main.go`)
+## 3. Admin CLI (`cmd/gookv-ctl/main.go`)
 
 ### 3.1 Command Dispatch
 

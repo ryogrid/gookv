@@ -1,4 +1,4 @@
-# gookvs Implementation Progress
+# gookv Implementation Progress
 
 ## IMPL-001 Proto generation - DONE
 - [x] Reuse kvproto via github.com/pingcap/kvproto Go module dependency
@@ -192,7 +192,7 @@
 - [x] End-to-end flow: acquire -> prewrite(upgrade) -> commit -> read verified
 - [x] 16 tests passing
 
-## IMPL-021 cmd/gookvs-ctl: Admin CLI - DONE
+## IMPL-021 cmd/gookv-ctl: Admin CLI - DONE
 - [x] scan: Scan keys in a column family with start/end bounds and limit
 - [x] get: Get a single key by hex
 - [x] mvcc: Show MVCC info (lock, write records) for a user key as JSON

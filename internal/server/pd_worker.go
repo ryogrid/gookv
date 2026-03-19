@@ -8,8 +8,8 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/ryogrid/gookvs/internal/raftstore"
-	"github.com/ryogrid/gookvs/pkg/pdclient"
+	"github.com/ryogrid/gookv/internal/raftstore"
+	"github.com/ryogrid/gookv/pkg/pdclient"
 )
 
 // PDTaskType identifies the type of PD task.

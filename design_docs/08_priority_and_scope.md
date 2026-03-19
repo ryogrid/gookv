@@ -1,4 +1,4 @@
-# gookvs Priority and Scope
+# gookv Priority and Scope
 
 This document organizes all components and features identified in the architecture overview into priority tiers, providing a roadmap for implementation. It will be updated incrementally as each subsystem design document is completed.
 
@@ -44,13 +44,13 @@ This document organizes all components and features identified in the architectu
 | **Log backup / PITR** (`internal/backup/stream`) | 4 – Optional | XL | backup, raftstore, cdc observer | designed | `components/backup-stream/` tests |
 | **Coprocessor V2 plugins** | 4 – Optional | L | coprocessor, engine | designed | `components/test_coprocessor_plugin/` |
 | **Online config change** | 4 – Optional | M | config | designed | `tests/integrations/config/` dynamic tests |
-| **Admin CLI** (`cmd/gookvs-ctl`) | 4 – Optional | M | engine, raftstore, pdclient | designed | `cmd/tikv-ctl/` tests |
+| **Admin CLI** (`cmd/gookv-ctl`) | 4 – Optional | M | engine, raftstore, pdclient | designed | `cmd/tikv-ctl/` tests |
 | **Region merge** | 4 – Optional | XL | raftstore, pdclient | designed | `tests/integrations/raftstore/` merge tests |
 
 ## 2. Tier Definitions
 
 ### Tier 1 – Essential
-Components required for a **minimal functioning distributed transactional KV store**. Without these, gookvs cannot serve a single `KvGet`/`KvPrewrite`/`KvCommit`. This tier forms the critical path from client request to durable replicated write.
+Components required for a **minimal functioning distributed transactional KV store**. Without these, gookv cannot serve a single `KvGet`/`KvPrewrite`/`KvCommit`. This tier forms the critical path from client request to durable replicated write.
 
 ### Tier 2 – Important
 Components needed for **production viability**: query push-down (coprocessor) for TiDB integration, secure communication (TLS), operational visibility (status server, flow control), and reliable inter-node transport. A cluster without Tier 2 can process basic KV operations but cannot run TiDB SQL workloads or operate safely in production.
@@ -154,9 +154,9 @@ graph LR
 
 ## 4. TiKV Test Area Mapping
 
-For each component, the corresponding TiKV test directories provide reference test cases that can be adapted for gookvs:
+For each component, the corresponding TiKV test directories provide reference test cases that can be adapted for gookv:
 
-| gookvs Component | TiKV Test Sources | Adaptation Notes |
+| gookv Component | TiKV Test Sources | Adaptation Notes |
 |------------------|-------------------|------------------|
 | codec, keys | `components/codec/src/` (inline tests), `components/keys/src/` (inline tests) | Direct port; test memcomparable encoding edge cases, descending uint64 |
 | cfnames | N/A (constants only) | Verify CF names match TiKV exactly: `"default"`, `"lock"`, `"write"`, `"raft"` |
@@ -237,7 +237,7 @@ This section tracks how design decisions made in completed subsystem documents a
 |----------|--------|
 | **Three dispatch helper functions replace TiKV's three macros** | `handleReadRequest()`, `handleTxnCommand()`, `handleBatchCmd()` — Go generics handle type parameterization where macros aren't available |
 | **grpc-go native interceptors for middleware** | `ChainUnaryInterceptor`/`ChainStreamInterceptor` sufficient for clusterID, resource control, metrics, quota limiter — no external middleware library needed |
-| **BatchCommands is primary transport** | Individual RPCs mainly for debugging/admin; `BatchCommands` bidirectional stream is the primary TiDB→gookvs transport |
+| **BatchCommands is primary transport** | Individual RPCs mainly for debugging/admin; `BatchCommands` bidirectional stream is the primary TiDB→gookv transport |
 | **net/http/pprof for diagnostics** | CPU/heap/goroutine profiling out of the box; eliminates need for pprof-rs equivalent |
 | **tls.Config.GetCertificate for hot-reload** | Built-in TLS hook for zero-downtime certificate rotation without filesystem watchers |
 | **RaftClient with lock-free queues** | `sync.Pool` + channel-based per-connection message queues; seahash(region_id) for connection selection; dedicated snapshot stream (1MB chunks) |
@@ -307,7 +307,7 @@ Step T3-6: internal/backup              ← Full backup (SST export, ExternalSto
 
 ```
 Step T4-1: internal/config (online)     ← ConfigController, ConfigManager dispatch, runtime config API
-Step T4-2: cmd/gookvs-ctl              ← Admin CLI (inspect regions, dump SST, trigger manual operations)
+Step T4-2: cmd/gookv-ctl              ← Admin CLI (inspect regions, dump SST, trigger manual operations)
 Step T4-3: internal/coprocessor (v2)    ← Plugin system (Go plugin or wazero WASM)
 Step T4-4: internal/backup/stream       ← Log backup / PITR (TwoPhaseResolver, checkpoint lifecycle)
 Step T4-5: internal/raftstore (merge)   ← Region merge (three-phase PrepareMerge → CommitMerge → Cleanup)

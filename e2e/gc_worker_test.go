@@ -9,10 +9,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ryogrid/gookvs/internal/engine/rocks"
-	"github.com/ryogrid/gookvs/internal/server"
-	"github.com/ryogrid/gookvs/internal/storage/gc"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/server"
+	"github.com/ryogrid/gookv/internal/storage/gc"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // startStandaloneServerWithGC creates a standalone server and also starts

@@ -1,6 +1,6 @@
 # Raft Configuration Changes (Peer Add/Remove)
 
-This document specifies the design for completing Raft configuration change support in gookvs. Currently, `ConfChange` entries are parsed and applied to `RawNode` (updating Raft internal state), but no cluster-level actions follow: no peer creation/destruction on remote stores, no region metadata update, and no PD notification.
+This document specifies the design for completing Raft configuration change support in gookv. Currently, `ConfChange` entries are parsed and applied to `RawNode` (updating Raft internal state), but no cluster-level actions follow: no peer creation/destruction on remote stores, no region metadata update, and no PD notification.
 
 > **Reference**: [tikv_impl_docs/raft_and_replication.md](../../tikv_impl_docs/raft_and_replication.md) section 1.7 (Configuration Changes) and section 2.4 (Peer Creation). TiKV source: `components/raftstore/src/store/fsm/apply.rs` (`exec_change_peer`) and `components/raftstore/src/store/fsm/peer.rs` (`on_ready_change_peer`, `destroy_peer`).
 
@@ -62,7 +62,7 @@ TiKV creates uninitialized peers reactively:
 2. The target store receives a `RaftMessage` for an unknown region.
 3. The store creates an uninitialized `PeerFsm`, registers it, and the new peer catches up via snapshot.
 
-gookvs will use a similar reactive approach, but also support explicit `StoreMsgTypeCreatePeer` for cases where PD orchestrates the creation directly.
+gookv will use a similar reactive approach, but also support explicit `StoreMsgTypeCreatePeer` for cases where PD orchestrates the creation directly.
 
 ### 2.4 Peer Destruction
 

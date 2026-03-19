@@ -1,4 +1,4 @@
-// Package flow implements flow control and backpressure mechanisms for gookvs.
+// Package flow implements flow control and backpressure mechanisms for gookv.
 // It provides read pool busy threshold (EWMA), write flow controller,
 // and scheduler memory quota enforcement.
 package flow

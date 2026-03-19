@@ -1,4 +1,4 @@
-// Package txntypes defines transaction type definitions for gookvs.
+// Package txntypes defines transaction type definitions for gookv.
 // Lock, Write, and Mutation structs with binary serialization that is
 // byte-identical to TiKV's format.
 package txntypes

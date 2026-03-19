@@ -1,8 +1,8 @@
 # Resource Control, Security, and Configuration
 
-This document specifies gookvs's resource control (multi-tenant quota and priority scheduling), encryption at rest, TLS security, configuration system (runtime-changeable config hierarchy), and logging/diagnostics subsystems. These form the operational infrastructure enabling multi-tenancy, data protection, and runtime management.
+This document specifies gookv's resource control (multi-tenant quota and priority scheduling), encryption at rest, TLS security, configuration system (runtime-changeable config hierarchy), and logging/diagnostics subsystems. These form the operational infrastructure enabling multi-tenancy, data protection, and runtime management.
 
-> **Reference**: [impl_docs/resource_control_security_config.md](../impl_docs/resource_control_security_config.md) — TiKV's Rust-based resource control, encryption, security, and configuration subsystems that gookvs draws from.
+> **Reference**: [impl_docs/resource_control_security_config.md](../impl_docs/resource_control_security_config.md) — TiKV's Rust-based resource control, encryption, security, and configuration subsystems that gookv draws from.
 
 **Cross-references**: [Architecture Overview](00_architecture_overview.md), [gRPC API and Server](05_grpc_api_and_server.md), [Raft and Replication](02_raft_and_replication.md), [Transaction and MVCC](03_transaction_and_mvcc.md)
 
@@ -12,7 +12,7 @@ This document specifies gookvs's resource control (multi-tenant quota and priori
 
 ### 1.1 Architecture Overview
 
-gookvs implements a multi-tenant resource control system that enforces CPU and I/O quotas across **resource groups**. Resource groups are managed by PD (Placement Driver) and synced to gookvs nodes. The system uses virtual-time priority scheduling for foreground tasks and token bucket rate limiting for background tasks.
+gookv implements a multi-tenant resource control system that enforces CPU and I/O quotas across **resource groups**. Resource groups are managed by PD (Placement Driver) and synced to gookv nodes. The system uses virtual-time priority scheduling for foreground tasks and token bucket rate limiting for background tasks.
 
 **Core Components:**
 
@@ -31,7 +31,7 @@ graph TB
         PD_RG["Resource Group<br/>Configuration"]
     end
 
-    subgraph "gookvs Node"
+    subgraph "gookv Node"
         RMS["ResourceManagerService<br/>(watches PD)"]
         RGM["ResourceGroupManager<br/>(sync.Map registry)"]
 
@@ -69,7 +69,7 @@ graph TB
 
 ### 1.2 Resource Group Model
 
-Resource groups are configured in PD and synced to gookvs nodes via the `ResourceManagerService`. Each group has:
+Resource groups are configured in PD and synced to gookv nodes via the `ResourceManagerService`. Each group has:
 
 - **RU (Request Unit) Quota** — an abstract cost unit combining CPU and I/O
 - **Priority Level** — High (11–16), Medium (7–10, default), or Low (1–6)
@@ -269,7 +269,7 @@ gRPC Request (ResourceControlContext)
 1. `controlledTask` — wraps the task goroutine to track CPU time via `ResourceController.Consume()`
 2. `limitedTask` (via `WithResourceLimiter()`) — wraps again for token bucket delay enforcement
 
-**Go Design Divergence:** TiKV uses `ControlledFuture` and `LimitedFuture` wrapping Rust futures. gookvs uses goroutine middleware pattern — each wrapper is a function that takes a `func()` task and returns a `func()` with additional behavior.
+**Go Design Divergence:** TiKV uses `ControlledFuture` and `LimitedFuture` wrapping Rust futures. gookv uses goroutine middleware pattern — each wrapper is a function that takes a `func()` task and returns a `func()` with additional behavior.
 
 ### 1.8 Library Options for Rate Limiting
 
@@ -285,7 +285,7 @@ gRPC Request (ResourceControlContext)
 
 ### 2.1 Architecture Overview
 
-gookvs implements **transparent encryption at rest** using a two-tier key hierarchy. All file-level encryption is transparent to upper layers via RocksDB's (grocksdb) encryption environment integration.
+gookv implements **transparent encryption at rest** using a two-tier key hierarchy. All file-level encryption is transparent to upper layers via RocksDB's (grocksdb) encryption environment integration.
 
 ```mermaid
 graph TB
@@ -411,7 +411,7 @@ Background goroutine:
             currentKeyID.Store(newID)
 ```
 
-**Master Key Rotation:** gookvs supports seamless master key rotation via `PreviousMasterKey` config. During startup, if decryption with the current master key fails, it falls back to `PreviousMasterKey`.
+**Master Key Rotation:** gookv supports seamless master key rotation via `PreviousMasterKey` config. During startup, if decryption with the current master key fails, it falls back to `PreviousMasterKey`.
 
 ### 2.5 RocksDB Integration
 
@@ -520,11 +520,11 @@ func CNCheckInterceptor(allowedCN map[string]struct{}) grpc.UnaryServerIntercept
 }
 ```
 
-**Go Design Divergence:** TiKV uses grpcio's `ServerChecker` callback. gookvs uses a standard gRPC unary/stream interceptor, which is the idiomatic grpc-go pattern for per-request authentication.
+**Go Design Divergence:** TiKV uses grpcio's `ServerChecker` callback. gookv uses a standard gRPC unary/stream interceptor, which is the idiomatic grpc-go pattern for per-request authentication.
 
 ### 3.4 Certificate Hot-Reload
 
-gookvs supports zero-downtime certificate rotation using `tls.Config.GetCertificate`:
+gookv supports zero-downtime certificate rotation using `tls.Config.GetCertificate`:
 
 ```go
 // certificateReloader returns a function that reloads certificates when files change.
@@ -558,7 +558,7 @@ func (sm *SecurityManager) certificateReloader() func(*tls.ClientHelloInfo) (*tl
 }
 ```
 
-**Go Design Divergence:** TiKV uses grpcio's `ServerCredentialsFetcher` with `is_modified()` polling. gookvs leverages `tls.Config.GetCertificate`, which is called on every TLS handshake — the callback internally checks file modification timestamps, providing equivalent behavior with no custom polling loop.
+**Go Design Divergence:** TiKV uses grpcio's `ServerCredentialsFetcher` with `is_modified()` polling. gookv leverages `tls.Config.GetCertificate`, which is called on every TLS handshake — the callback internally checks file modification timestamps, providing equivalent behavior with no custom polling loop.
 
 ### 3.5 Log Redaction
 
@@ -577,7 +577,7 @@ func (sm *SecurityManager) certificateReloader() func(*tls.ClientHelloInfo) (*tl
 The root `Config` struct contains all configuration as a nested hierarchy of sub-config structs. Each sub-config is tagged for runtime changeability:
 
 ```go
-// Config is the root configuration struct for gookvs.
+// Config is the root configuration struct for gookv.
 type Config struct {
     Log            LogConfig            `toml:"log"            online:"submodule"`
     Memory         MemoryConfig         `toml:"memory"         online:"submodule"`
@@ -614,7 +614,7 @@ type Config struct {
 
 ### 4.2 Online Config Change Model
 
-gookvs uses a **diff-update model** for runtime configuration changes, replacing TiKV's `OnlineConfig` derive macro with Go reflection and struct tags.
+gookv uses a **diff-update model** for runtime configuration changes, replacing TiKV's `OnlineConfig` derive macro with Go reflection and struct tags.
 
 ```go
 // ConfigChange represents a set of configuration changes.
@@ -647,7 +647,7 @@ type OnlineConfig interface {
 }
 ```
 
-**Go Design Divergence:** TiKV uses the `#[online_config]` derive macro to generate `diff()`, `update()`, and `get_encoder()` methods. gookvs uses Go reflection (`reflect` package) to walk struct fields at runtime, reading `online` struct tags to determine changeability. This trades compile-time code generation for runtime flexibility.
+**Go Design Divergence:** TiKV uses the `#[online_config]` derive macro to generate `diff()`, `update()`, and `get_encoder()` methods. gookv uses Go reflection (`reflect` package) to walk struct fields at runtime, reading `online` struct tags to determine changeability. This trades compile-time code generation for runtime flexibility.
 
 ```mermaid
 flowchart LR
@@ -779,7 +779,7 @@ Each module implements `ConfigManager` to handle the side effects of config chan
 **Validation Pipeline:**
 
 ```
-1. Load last_gookvs.toml from data directory (previous config snapshot)
+1. Load last_gookv.toml from data directory (previous config snapshot)
 2. compatibleAdjust(lastCfg)             // Inherit deprecated field values
 3. config.Validate()                      // Check all constraints:
    - Path setup and consistency
@@ -787,7 +787,7 @@ Each module implements `ConfigManager` to handle the side effects of config chan
    - Block cache auto-sizing (default: 45% of system memory)
    - Resource-based optimization
 4. checkCriticalConfig(lastCfg)           // Prevent accidental breaking changes
-5. Persist to last_gookvs.toml            // Snapshot for next startup
+5. Persist to last_gookv.toml            // Snapshot for next startup
 ```
 
 **Readable Types:**
@@ -814,7 +814,7 @@ type ReadableDuration time.Duration
 
 ### 5.1 Logging Architecture
 
-gookvs uses Go's `log/slog` (stdlib, Go 1.21+) as the primary logging framework, with a custom multi-handler that routes logs to separate outputs based on log attributes.
+gookv uses Go's `log/slog` (stdlib, Go 1.21+) as the primary logging framework, with a custom multi-handler that routes logs to separate outputs based on log attributes.
 
 ```mermaid
 graph TB
@@ -866,7 +866,7 @@ func (d *LogDispatcher) Handle(ctx context.Context, r slog.Record) error {
 }
 ```
 
-**Go Design Divergence:** TiKV uses slog (Rust) with tag-based routing via `LogDispatcher`. gookvs uses Go's `log/slog` with attribute-based routing — structurally identical but uses slog `Attr` values instead of slog tags. The `slog.Handler` interface provides the same extensibility as Rust slog's `Drain` trait.
+**Go Design Divergence:** TiKV uses slog (Rust) with tag-based routing via `LogDispatcher`. gookv uses Go's `log/slog` with attribute-based routing — structurally identical but uses slog `Attr` values instead of slog tags. The `slog.Handler` interface provides the same extensibility as Rust slog's `Drain` trait.
 
 ### 5.3 Log Formats
 
@@ -967,7 +967,7 @@ type RotatingFileLogger struct {
 
 ## 6. Design Divergences from TiKV
 
-| Area | TiKV | gookvs | Rationale |
+| Area | TiKV | gookv | Rationale |
 |------|------|--------|-----------|
 | Resource group registry | `DashMap` (concurrent sharded HashMap) | `sync.Map` | Go's built-in concurrent map; same semantics |
 | Priority scheduling | YATP `TaskPriorityProvider` trait | Interface with `PriorityOf()` method | Go interface replaces Rust trait |

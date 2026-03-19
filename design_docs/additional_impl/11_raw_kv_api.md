@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-This document describes the design for implementing the Raw KV API in gookvs. Raw KV operations bypass the MVCC/transaction layer entirely, providing direct key-value access to the underlying storage engine. This is the simplest storage interface TiKV exposes and is used by applications that do not need transactional guarantees.
+This document describes the design for implementing the Raw KV API in gookv. Raw KV operations bypass the MVCC/transaction layer entirely, providing direct key-value access to the underlying storage engine. This is the simplest storage interface TiKV exposes and is used by applications that do not need transactional guarantees.
 
 ### 1.1 Current State
 
@@ -484,7 +484,7 @@ func (s *Storage) Engine() traits.KvEngine {
 Raw keys are stored as-is, without MVCC timestamp encoding. This means:
 - Raw keys and transactional keys occupy separate namespaces (transactional keys have MVCC suffix)
 - Raw operations must not access keys written by the transactional API and vice versa
-- TiKV enforces this separation; gookvs follows the same rule
+- TiKV enforces this separation; gookv follows the same rule
 
 ### 4.2 Column Family Support
 
@@ -495,7 +495,7 @@ Raw operations support a `cf` field to target specific column families. In pract
 
 ### 4.3 TTL Support (Deferred)
 
-The protobuf messages include `ttl` fields for key expiration. TiKV implements TTL via a special value encoding (API V2 / RawKV TTL mode). This is deferred for gookvs:
+The protobuf messages include `ttl` fields for key expiration. TiKV implements TTL via a special value encoding (API V2 / RawKV TTL mode). This is deferred for gookv:
 - Phase 1 ignores TTL fields
 - Phase 2 could encode TTL in a value prefix and run a background expiration goroutine
 
@@ -587,7 +587,7 @@ The protobuf messages include `ttl` fields for key expiration. TiKV implements T
 
 ## 9. Comparison with TiKV Implementation
 
-| Aspect | TiKV | gookvs |
+| Aspect | TiKV | gookv |
 |--------|------|--------|
 | Raw KV store | `src/storage/raw/store.rs` with V1/V1Ttl/V2 variants | Single `RawStorage` type |
 | Key format | API V2 encodes keys with `r` prefix for namespace isolation | Direct keys (V1 style) |

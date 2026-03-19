@@ -1,4 +1,4 @@
-// Package pd implements a simplified Placement Driver server for gookvs.
+// Package pd implements a simplified Placement Driver server for gookv.
 // It provides TSO allocation, cluster metadata management, heartbeat processing,
 // ID allocation, and GC safe point management.
 package pd
@@ -32,7 +32,7 @@ type PDServerConfig struct {
 func DefaultPDServerConfig() PDServerConfig {
 	return PDServerConfig{
 		ListenAddr:                "0.0.0.0:2379",
-		DataDir:                   "/tmp/gookvs-pd",
+		DataDir:                   "/tmp/gookv-pd",
 		ClusterID:                 1,
 		TSOSaveInterval:           3 * time.Second,
 		TSOUpdatePhysicalInterval: 50 * time.Millisecond,
@@ -132,7 +132,7 @@ func (s *PDServer) GetMembers(ctx context.Context, req *pdpb.GetMembersRequest) 
 	return &pdpb.GetMembersResponse{
 		Header: s.header(),
 		Leader: &pdpb.Member{
-			Name:       "gookvs-pd-1",
+			Name:       "gookv-pd-1",
 			ClientUrls: []string{"http://" + s.Addr()},
 		},
 	}, nil

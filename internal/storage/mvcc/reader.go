@@ -3,9 +3,9 @@ package mvcc
 import (
 	"bytes"
 
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // MvccReader provides MVCC-aware reads across column families.

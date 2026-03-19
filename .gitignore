@@ -46,7 +46,7 @@ core.*
 *.log
 
 # Go binaries
-/gookvs-server
-/gookvs-ctl
+/gookv-server
+/gookv-ctl
 vendor/
 *.test

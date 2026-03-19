@@ -1,14 +1,14 @@
-# PRD: gookvs Design Documentation Generation
+# PRD: gookv Design Documentation Generation
 
 ## Introduction
 
-Generate comprehensive English design documents for **gookvs**, a TiKV-like distributed key-value store implemented in Go. The documents are placed under `design_docs/` and serve as the complete design specification for Claude Code agents (orchestrated by Ralph) to implement gookvs iteratively using a test-first approach.
+Generate comprehensive English design documents for **gookv**, a TiKV-like distributed key-value store implemented in Go. The documents are placed under `design_docs/` and serve as the complete design specification for Claude Code agents (orchestrated by Ralph) to implement gookv iteratively using a test-first approach.
 
-gookvs is NOT a port of TiKV. It is a new Go system that maintains **external interface compatibility** with TiKV (gRPC API, PD protocol) while using **Go-idiomatic internal design** (goroutines, channels, interfaces, Go ecosystem libraries). RocksDB is used as the storage engine.
+gookv is NOT a port of TiKV. It is a new Go system that maintains **external interface compatibility** with TiKV (gRPC API, PD protocol) while using **Go-idiomatic internal design** (goroutines, channels, interfaces, Go ecosystem libraries). RocksDB is used as the storage engine.
 
 ## Goals
 
-- Produce 9 design documents under `design_docs/`, each covering a major gookvs subsystem
+- Produce 9 design documents under `design_docs/`, each covering a major gookv subsystem
 - Reference `impl_docs/` (TiKV implementation docs) as the primary source, with TiKV source code (`src/`, `components/`) as a secondary oracle
 - Start with a 1:1 mapping to `impl_docs/` structure but diverge where Go idioms warrant it
 - Include key Go interface and struct definitions with method signatures — enough detail to write tests against, not every field
@@ -20,16 +20,16 @@ gookvs is NOT a port of TiKV. It is a new Go system that maintains **external in
 ## User Stories
 
 ### US-001: Create architecture overview document
-**Description:** As an AI agent, I want an architecture overview of gookvs so that I understand the Go-based system structure, package layout, goroutine model, and request lifecycle before implementing subsystems.
+**Description:** As an AI agent, I want an architecture overview of gookv so that I understand the Go-based system structure, package layout, goroutine model, and request lifecycle before implementing subsystems.
 
 **Acceptance Criteria:**
 - [ ] Creates `design_docs/00_architecture_overview.md`
-- [ ] Documents overall gookvs system architecture as a Go-based distributed transactional KV store
+- [ ] Documents overall gookv system architecture as a Go-based distributed transactional KV store
 - [ ] Includes component dependency graph with recommended Go package structure (`cmd/`, `pkg/`, `internal/`)
 - [ ] Documents goroutine model: which components run in which goroutines, channel-based communication patterns
 - [ ] Contains mermaid sequence diagrams tracing KV read and KV write request lifecycles (gRPC -> Raft -> storage -> response)
 - [ ] Describes cluster topology: PD-based discovery, region assignment, leader balancing
-- [ ] Explains key design decisions: where gookvs diverges from TiKV's internal design and why
+- [ ] Explains key design decisions: where gookv diverges from TiKV's internal design and why
 - [ ] Contains mermaid diagrams for: system architecture, component dependency graph, request lifecycle sequences, goroutine model
 - [ ] References `impl_docs/architecture_overview.md` as source; diverges where Go idioms warrant it
 - [ ] Provides 2-3 library options with pros/cons table for key infrastructure (gRPC framework, logging, metrics)
@@ -132,7 +132,7 @@ gookvs is NOT a port of TiKV. It is a new Go system that maintains **external in
 - [ ] References `impl_docs/resource_control_security_config.md` as source
 
 ### US-009: Create and maintain priority and scope document
-**Description:** As a user deciding implementation scope, I want a comprehensive priority ranking of all gookvs components so that I can determine what to build and in what order.
+**Description:** As a user deciding implementation scope, I want a comprehensive priority ranking of all gookv components so that I can determine what to build and in what order.
 
 **Acceptance Criteria:**
 - [ ] Creates `design_docs/08_priority_and_scope.md`
@@ -196,8 +196,8 @@ gookvs is NOT a port of TiKV. It is a new Go system that maintains **external in
 
 ## Open Questions
 
-- Should gookvs support both raftstore v1 and v2 designs, or pick one? (This affects complexity significantly)
+- Should gookv support both raftstore v1 and v2 designs, or pick one? (This affects complexity significantly)
 - Which kvproto version should be targeted for external API compatibility?
-- Should the Coprocessor V2 plugin system (WASM/native) be included in gookvs design, or is the V1 DAG executor sufficient?
+- Should the Coprocessor V2 plugin system (WASM/native) be included in gookv design, or is the V1 DAG executor sufficient?
 - How should the Go module structure handle the large number of subsystems — monorepo with `internal/` packages, or separate Go modules?
 - For the test-first approach: should design docs include a "suggested test scenarios" section per component to guide test adaptation from TiKV?

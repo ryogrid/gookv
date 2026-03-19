@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ryogrid/gookvs/internal/pd"
-	"github.com/ryogrid/gookvs/internal/server"
-	"github.com/ryogrid/gookvs/pkg/pdclient"
+	"github.com/ryogrid/gookv/internal/pd"
+	"github.com/ryogrid/gookv/internal/server"
+	"github.com/ryogrid/gookv/pkg/pdclient"
 )
 
 // TestPDClusterStoreAndRegionHeartbeat tests the full heartbeat loop:

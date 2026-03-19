@@ -8,7 +8,7 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/tikvpb"
-	"github.com/ryogrid/gookvs/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/engine/rocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -19,7 +19,7 @@ import (
 func testSetup(t *testing.T) (tikvpb.TikvClient, func()) {
 	t.Helper()
 
-	tmpDir, err := os.MkdirTemp("", "gookvs-server-test-*")
+	tmpDir, err := os.MkdirTemp("", "gookv-server-test-*")
 	require.NoError(t, err)
 
 	engine, err := rocks.Open(tmpDir)
@@ -661,7 +661,7 @@ func TestBatchCommands(t *testing.T) {
 }
 
 func TestServerStartStop(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "gookvs-lifecycle-*")
+	tmpDir, err := os.MkdirTemp("", "gookv-lifecycle-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 

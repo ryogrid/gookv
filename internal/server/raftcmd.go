@@ -2,7 +2,7 @@ package server
 
 import (
 	"github.com/pingcap/kvproto/pkg/raft_cmdpb"
-	"github.com/ryogrid/gookvs/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
 )
 
 // ModifiesToRequests converts MVCC Modify operations to raft_cmdpb.Request entries.

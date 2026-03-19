@@ -1,4 +1,4 @@
-// Package config implements the configuration system for gookvs.
+// Package config implements the configuration system for gookv.
 // It supports TOML-based configuration loading, validation, and runtime changes.
 package config
 
@@ -85,7 +85,7 @@ func (s ReadableSize) MarshalText() ([]byte, error) {
 	}
 }
 
-// Config is the root configuration struct for gookvs.
+// Config is the root configuration struct for gookv.
 type Config struct {
 	Log            LogConfig        `toml:"log"`
 	Server         ServerConfig     `toml:"server"`
@@ -183,7 +183,7 @@ func DefaultConfig() *Config {
 			GRPCMaxSendMsgSize: 16 * MB,
 		},
 		Storage: StorageConfig{
-			DataDir:              "/tmp/gookvs/data",
+			DataDir:              "/tmp/gookv/data",
 			ReserveSpace:         5 * GB,
 			BlockCacheSize:       0, // Auto-size (45% of system memory)
 			SchedulerConcurrency: 2048,

@@ -1,14 +1,14 @@
 # Transaction and MVCC
 
-This document specifies the transaction layer for gookvs, including the Percolator two-phase commit protocol, MVCC (Multi-Version Concurrency Control), lock and write types, conflict detection, concurrency control, GC, and resolved timestamps. It provides Go interface definitions and algorithms sufficient for implementing the complete transaction subsystem.
+This document specifies the transaction layer for gookv, including the Percolator two-phase commit protocol, MVCC (Multi-Version Concurrency Control), lock and write types, conflict detection, concurrency control, GC, and resolved timestamps. It provides Go interface definitions and algorithms sufficient for implementing the complete transaction subsystem.
 
-> **Reference**: [impl_docs/transaction_and_mvcc.md](../impl_docs/transaction_and_mvcc.md) — TiKV's Rust-based transaction layer that gookvs replicates in Go.
+> **Reference**: [impl_docs/transaction_and_mvcc.md](../impl_docs/transaction_and_mvcc.md) — TiKV's Rust-based transaction layer that gookv replicates in Go.
 
 ---
 
 ## 1. Overview of the Transaction Model
 
-gookvs implements the **Percolator** distributed transaction protocol (Google, 2010), adapted for a Raft-replicated, region-sharded storage engine. Key properties:
+gookv implements the **Percolator** distributed transaction protocol (Google, 2010), adapted for a Raft-replicated, region-sharded storage engine. Key properties:
 
 - **Snapshot Isolation (SI)** by default, with optional Read Committed (RC) mode
 - **Optimistic and pessimistic** transaction modes
@@ -29,7 +29,7 @@ All timestamps are 64-bit, encoding `(physical_ms << 18) | logical_counter` (see
 
 ### 1.2 Timestamp Oracle Interaction
 
-gookvs obtains timestamps from PD via a bidirectional gRPC stream:
+gookv obtains timestamps from PD via a bidirectional gRPC stream:
 
 ```go
 // TSOClient manages timestamp allocation from PD.
@@ -1226,7 +1226,7 @@ Engine (RocksDB)    Internal concurrency control       Per-CF
 
 ## 15. Design Divergences from TiKV
 
-| Aspect | TiKV (Rust) | gookvs (Go) | Rationale |
+| Aspect | TiKV (Rust) | gookv (Go) | Rationale |
 |--------|-------------|-------------|-----------|
 | **Write accumulator** | `MvccTxn` with `Vec<Modify>` | `MvccTxn` with `[]Modify` slice | Direct mapping; Go slices are equivalent |
 | **Reader cursors** | `Cursor<S::Iter>` with generics | Interface-based `engine.Iterator` | Go uses interfaces instead of generics for polymorphism |

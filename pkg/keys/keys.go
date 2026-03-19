@@ -5,7 +5,7 @@ package keys
 import (
 	"encoding/binary"
 
-	"github.com/ryogrid/gookvs/pkg/codec"
+	"github.com/ryogrid/gookv/pkg/codec"
 )
 
 const (

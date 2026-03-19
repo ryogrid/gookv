@@ -1,4 +1,4 @@
-// gookvs-ctl is the admin CLI for gookvs.
+// gookv-ctl is the admin CLI for gookv.
 // It provides commands for inspecting regions, dumping data, and manual operations.
 package main
 
@@ -12,18 +12,18 @@ import (
 	"strings"
 
 	"github.com/pingcap/kvproto/pkg/raft_serverpb"
-	"github.com/ryogrid/gookvs/internal/engine/rocks"
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/internal/storage/mvcc"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
-	"github.com/ryogrid/gookvs/pkg/keys"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/keys"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
-const usage = `gookvs-ctl - Admin CLI for gookvs
+const usage = `gookv-ctl - Admin CLI for gookv
 
 Usage:
-  gookvs-ctl <command> [options]
+  gookv-ctl <command> [options]
 
 Commands:
   scan        Scan keys in a column family

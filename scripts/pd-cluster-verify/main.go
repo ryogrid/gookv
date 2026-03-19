@@ -1,4 +1,4 @@
-// pd-cluster-verify verifies cross-node data replication in a running gookvs cluster with PD.
+// pd-cluster-verify verifies cross-node data replication in a running gookv cluster with PD.
 // It discovers the leader via PD, writes data to it, and reads from follower nodes.
 package main
 
@@ -19,7 +19,7 @@ import (
 var pdAddr = "127.0.0.1:2379"
 
 func main() {
-	fmt.Println("=== gookvs PD Cluster Verification ===")
+	fmt.Println("=== gookv PD Cluster Verification ===")
 	fmt.Println()
 
 	// Step 1: Connect to PD and verify it's healthy.

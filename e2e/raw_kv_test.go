@@ -9,11 +9,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ryogrid/gookvs/internal/engine/rocks"
-	"github.com/ryogrid/gookvs/internal/server"
+	"github.com/ryogrid/gookv/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/server"
 )
 
-// startStandaloneServer creates a standalone gookvs server (no Raft) for raw KV testing.
+// startStandaloneServer creates a standalone gookv server (no Raft) for raw KV testing.
 func startStandaloneServer(t *testing.T) (string, *server.Server) {
 	t.Helper()
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document specifies the design for implementing Raft log garbage collection (log compaction/truncation) in gookvs. The purpose of log GC is to prevent unbounded growth of the Raft log by periodically removing entries that have been applied to the state machine and are no longer needed for replication.
+This document specifies the design for implementing Raft log garbage collection (log compaction/truncation) in gookv. The purpose of log GC is to prevent unbounded growth of the Raft log by periodically removing entries that have been applied to the state machine and are no longer needed for replication.
 
 **Current state**: The tick type `PeerTickRaftLogGC` and the execution result type `ExecResultTypeCompactLog` are defined in `internal/raftstore/msg.go`, but neither is handled. The `ApplyState.TruncatedIndex` in `internal/raftstore/storage.go` is initialized at `RaftInitLogIndex` (5) and never advanced. No Raft log entries are ever deleted from the engine. Over time, this causes unbounded storage growth.
 

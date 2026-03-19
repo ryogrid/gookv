@@ -1,20 +1,20 @@
 {
-  "project": "gookvs Design Documentation",
-  "branchName": "ralph/gookvs-design-docs",
-  "description": "Generate comprehensive English design documents for gookvs, a TiKV-like distributed KVS in Go, under design_docs/ — referencing impl_docs/ and TiKV source as oracles.",
+  "project": "gookv Design Documentation",
+  "branchName": "ralph/gookv-design-docs",
+  "description": "Generate comprehensive English design documents for gookv, a TiKV-like distributed KVS in Go, under design_docs/ — referencing impl_docs/ and TiKV source as oracles.",
   "userStories": [
     {
       "id": "US-001",
       "title": "Create architecture overview document",
-      "description": "As an AI agent, I want an architecture overview of gookvs so that I understand the Go-based system structure, package layout, goroutine model, and request lifecycle before implementing subsystems.",
+      "description": "As an AI agent, I want an architecture overview of gookv so that I understand the Go-based system structure, package layout, goroutine model, and request lifecycle before implementing subsystems.",
       "acceptanceCriteria": [
         "Creates design_docs/00_architecture_overview.md",
-        "Documents overall gookvs system architecture as a Go-based distributed transactional KV store",
+        "Documents overall gookv system architecture as a Go-based distributed transactional KV store",
         "Includes component dependency graph with recommended Go package structure (cmd/, pkg/, internal/)",
         "Documents goroutine model: which components run in which goroutines, channel-based communication patterns",
         "Contains mermaid sequence diagrams tracing KV read and KV write request lifecycles (gRPC -> Raft -> storage -> response)",
         "Describes cluster topology: PD-based discovery, region assignment, leader balancing",
-        "Explains key design decisions: where gookvs diverges from TiKV's internal design and why",
+        "Explains key design decisions: where gookv diverges from TiKV's internal design and why",
         "Contains mermaid diagrams for: system architecture, component dependency graph, request lifecycle sequences, goroutine model (minimum 4 diagrams)",
         "References impl_docs/architecture_overview.md as source; diverges where Go idioms warrant it",
         "Provides 2-3 library options with pros/cons table for key infrastructure (gRPC framework, logging, metrics)"

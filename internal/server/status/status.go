@@ -1,4 +1,4 @@
-// Package status implements the HTTP status and diagnostics server for gookvs.
+// Package status implements the HTTP status and diagnostics server for gookv.
 // It provides pprof endpoints, Prometheus metrics, and config inspection.
 package status
 
@@ -147,7 +147,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	status := map[string]interface{}{
 		"status":  "ok",
-		"version": "gookvs-dev",
+		"version": "gookv-dev",
 	}
 
 	w.Header().Set("Content-Type", "application/json")

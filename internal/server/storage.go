@@ -1,4 +1,4 @@
-// Package server implements the gRPC server for gookvs, providing
+// Package server implements the gRPC server for gookv, providing
 // TiKV-compatible KV service RPCs.
 package server
 
@@ -7,13 +7,13 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/internal/storage/mvcc"
-	"github.com/ryogrid/gookvs/internal/storage/txn"
-	"github.com/ryogrid/gookvs/internal/storage/txn/concurrency"
-	"github.com/ryogrid/gookvs/internal/storage/txn/latch"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/internal/storage/txn"
+	"github.com/ryogrid/gookv/internal/storage/txn/concurrency"
+	"github.com/ryogrid/gookv/internal/storage/txn/latch"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // Storage provides the transaction-aware storage interface used by gRPC service handlers.

@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-This document describes the design for integrating gookvs with the Placement Driver (PD) server. The PD client package (`pkg/pdclient`) already provides a complete gRPC client with all 13 methods implemented, including `StoreHeartbeat`, `ReportRegionHeartbeat`, `GetTS`, `AskBatchSplit`, and `ReportBatchSplit`. However, **none of these methods are actually called** from the running server. The `--pd-endpoints` flag is accepted and stored in config but the server never instantiates a PD client.
+This document describes the design for integrating gookv with the Placement Driver (PD) server. The PD client package (`pkg/pdclient`) already provides a complete gRPC client with all 13 methods implemented, including `StoreHeartbeat`, `ReportRegionHeartbeat`, `GetTS`, `AskBatchSplit`, and `ReportBatchSplit`. However, **none of these methods are actually called** from the running server. The `--pd-endpoints` flag is accepted and stored in config but the server never instantiates a PD client.
 
 This design covers:
 
@@ -87,7 +87,7 @@ Region heartbeats are sent not only on tick but also after:
 
 ### 3.1 PDWorker
 
-A new `PDWorker` struct in `internal/server/pd_worker.go` serves as the central PD integration point. Unlike TiKV's LazyWorker pattern, gookvs uses a goroutine with a channel-based task queue (idiomatic Go).
+A new `PDWorker` struct in `internal/server/pd_worker.go` serves as the central PD integration point. Unlike TiKV's LazyWorker pattern, gookv uses a goroutine with a channel-based task queue (idiomatic Go).
 
 ```go
 // internal/server/pd_worker.go
@@ -405,7 +405,7 @@ classDiagram
 
 ### 6.1 PD Unreachable
 
-When PD is unreachable, gookvs must continue serving read/write requests using the current region configuration. Specific behaviors:
+When PD is unreachable, gookv must continue serving read/write requests using the current region configuration. Specific behaviors:
 
 | Scenario | Behavior |
 |----------|----------|
@@ -473,15 +473,15 @@ type PDConfig struct {
 
 | Test | Description |
 |------|-------------|
-| `TestPDIntegrationEndToEnd` | Start gookvs-server with `MockClient`, verify full heartbeat cycle: store heartbeat -> region heartbeat -> scheduling command processed. |
-| `TestPDDisconnectRecovery` | Start with MockClient, simulate PD disconnect, verify gookvs continues serving, verify reconnection and heartbeat resumption. |
-| `TestStoreBootstrapWithPD` | Verify that on first startup, gookvs correctly calls `Bootstrap` or `PutStore` on PD. |
+| `TestPDIntegrationEndToEnd` | Start gookv-server with `MockClient`, verify full heartbeat cycle: store heartbeat -> region heartbeat -> scheduling command processed. |
+| `TestPDDisconnectRecovery` | Start with MockClient, simulate PD disconnect, verify gookv continues serving, verify reconnection and heartbeat resumption. |
+| `TestStoreBootstrapWithPD` | Verify that on first startup, gookv correctly calls `Bootstrap` or `PutStore` on PD. |
 
 ### 8.3 Test with Real PD
 
 For manual testing and CI with a real PD server:
 1. Start a PD server (from TiKV PD release or `pd-server` binary)
-2. Start gookvs-server with `--pd-endpoints=127.0.0.1:2379`
+2. Start gookv-server with `--pd-endpoints=127.0.0.1:2379`
 3. Verify store appears in `pd-ctl store` output
 4. Verify region heartbeats appear in PD logs
 5. Issue `pd-ctl operator add transfer-leader <region_id> <store_id>` and verify leader transfer
@@ -555,7 +555,7 @@ For manual testing and CI with a real PD server:
 | Dependency | Status | Notes |
 |------------|--------|-------|
 | `pkg/pdclient` (Client interface, grpcClient, MockClient) | Complete | All 13 methods implemented |
-| `13_pd_server.md` (PD server) | External dependency | gookvs uses an external PD server (same as TiKV) |
+| `13_pd_server.md` (PD server) | External dependency | gookv uses an external PD server (same as TiKV) |
 | `04_conf_change.md` (Configuration change) | Required for Phase 4 | `ChangePeer` command processing |
 | `02_region_split.md` (Region split) | Required for Phase 4 | `SplitRegion` command processing |
 | `internal/raftstore/msg.go` (PeerTickPdHeartbeat) | Defined | Tick type exists but is never handled |

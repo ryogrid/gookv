@@ -1,14 +1,14 @@
-# gookvs
+# gookv
 
 A Go-based distributed transactional key-value store modeled after [TiKV](https://github.com/tikv/tikv). It implements the TiKV wire protocol (kvproto) and provides MVCC-based transactions using the Percolator two-phase commit protocol.
 
 <p align="center">
-  <img src="gookvs_logo.jpg" alt="gookvs logo" />
+  <img src="gookv_logo.jpg" alt="gookv logo" />
 </p>
 
 ## Project Overview
 
-gookvs reproduces the core architecture of TiKV in Go:
+gookv reproduces the core architecture of TiKV in Go:
 
 - **Codec layer** — order-preserving memcomparable key encoding
 - **Storage engine** — Pebble-backed KV engine with column family emulation
@@ -26,15 +26,15 @@ gookvs reproduces the core architecture of TiKV in Go:
 - **Configuration** — TOML config with validation, CLI flag overrides
 - **Logging** — structured logging with slow-log routing and file rotation
 - **Flow control** — EWMA-based backpressure and memory quota
-- **Admin CLI** — `gookvs-ctl` for inspecting data, MVCC info, compaction, region listing
+- **Admin CLI** — `gookv-ctl` for inspecting data, MVCC info, compaction, region listing
 
 ## Directory Structure
 
 ```
 cmd/
-  gookvs-server/          # Server binary entry point
-  gookvs-ctl/             # Admin CLI (scan, get, mvcc, dump, size, compact, region)
-  gookvs-pd/              # Placement Driver server binary
+  gookv-server/          # Server binary entry point
+  gookv-ctl/             # Admin CLI (scan, get, mvcc, dump, size, compact, region)
+  gookv-pd/              # Placement Driver server binary
 pkg/                      # Public packages (importable by external code)
   codec/                  # Memcomparable byte/number encoding
   keys/                   # User key <-> internal key encoding (DataKey, RaftLogKey, etc.)
@@ -92,7 +92,7 @@ tasks/                    # Project tracking (todo.md)
 | `gopkg.in/natefinch/lumberjack.v2` v2.2.1 | Log file rotation |
 
 Go version: 1.22.2
-Module path: `github.com/ryogrid/gookvs`
+Module path: `github.com/ryogrid/gookv`
 
 ## Building
 
@@ -101,25 +101,25 @@ Module path: `github.com/ryogrid/gookvs`
 make build
 
 # This produces:
-#   ./gookvs-server
-#   ./gookvs-ctl
-#   ./gookvs-pd
+#   ./gookv-server
+#   ./gookv-ctl
+#   ./gookv-pd
 ```
 
 ## Running the Server
 
 ```bash
 # Start with default configuration
-./gookvs-server --data-dir /tmp/gookvs-data
+./gookv-server --data-dir /tmp/gookv-data
 
 # Start with a TOML config file
-./gookvs-server --config gookvs.toml
+./gookv-server --config gookv.toml
 
 # Override specific settings via CLI flags
-./gookvs-server \
+./gookv-server \
   --addr 127.0.0.1:20160 \
   --status-addr 127.0.0.1:20180 \
-  --data-dir /var/lib/gookvs \
+  --data-dir /var/lib/gookv \
   --pd-endpoints 127.0.0.1:2379,127.0.0.1:2381
 ```
 
@@ -133,7 +133,7 @@ Shut down gracefully with `SIGINT` or `SIGTERM`.
 
 ```bash
 # Start the Placement Driver server
-./gookvs-pd --addr 0.0.0.0:2379
+./gookv-pd --addr 0.0.0.0:2379
 
 # PD provides:
 #   - TSO (timestamp oracle) allocation
@@ -144,7 +144,7 @@ Shut down gracefully with `SIGINT` or `SIGTERM`.
 
 ## Running a Cluster
 
-gookvs supports running multiple nodes as a Raft cluster on a single machine. Data written to any leader node is replicated to all other nodes via Raft consensus.
+gookv supports running multiple nodes as a Raft cluster on a single machine. Data written to any leader node is replicated to all other nodes via Raft consensus.
 
 ### Quick Start (Makefile)
 
@@ -163,11 +163,11 @@ make cluster-stop
 
 | Node | gRPC Port | Status Port | Data Directory |
 |------|-----------|-------------|----------------|
-| 1 | 20160 | 20180 | /tmp/gookvs-cluster/node1 |
-| 2 | 20161 | 20181 | /tmp/gookvs-cluster/node2 |
-| 3 | 20162 | 20182 | /tmp/gookvs-cluster/node3 |
-| 4 | 20163 | 20183 | /tmp/gookvs-cluster/node4 |
-| 5 | 20164 | 20184 | /tmp/gookvs-cluster/node5 |
+| 1 | 20160 | 20180 | /tmp/gookv-cluster/node1 |
+| 2 | 20161 | 20181 | /tmp/gookv-cluster/node2 |
+| 3 | 20162 | 20182 | /tmp/gookv-cluster/node3 |
+| 4 | 20163 | 20183 | /tmp/gookv-cluster/node4 |
+| 5 | 20164 | 20184 | /tmp/gookv-cluster/node5 |
 
 ### Manual Cluster Startup
 
@@ -175,20 +175,20 @@ make cluster-stop
 # Start 5 nodes (run each in a separate terminal or background)
 CLUSTER="1=127.0.0.1:20160,2=127.0.0.1:20161,3=127.0.0.1:20162,4=127.0.0.1:20163,5=127.0.0.1:20164"
 
-./gookvs-server --store-id 1 --addr 127.0.0.1:20160 --status-addr 127.0.0.1:20180 \
-  --data-dir /tmp/gookvs-cluster/node1 --initial-cluster $CLUSTER &
+./gookv-server --store-id 1 --addr 127.0.0.1:20160 --status-addr 127.0.0.1:20180 \
+  --data-dir /tmp/gookv-cluster/node1 --initial-cluster $CLUSTER &
 
-./gookvs-server --store-id 2 --addr 127.0.0.1:20161 --status-addr 127.0.0.1:20181 \
-  --data-dir /tmp/gookvs-cluster/node2 --initial-cluster $CLUSTER &
+./gookv-server --store-id 2 --addr 127.0.0.1:20161 --status-addr 127.0.0.1:20181 \
+  --data-dir /tmp/gookv-cluster/node2 --initial-cluster $CLUSTER &
 
-./gookvs-server --store-id 3 --addr 127.0.0.1:20162 --status-addr 127.0.0.1:20182 \
-  --data-dir /tmp/gookvs-cluster/node3 --initial-cluster $CLUSTER &
+./gookv-server --store-id 3 --addr 127.0.0.1:20162 --status-addr 127.0.0.1:20182 \
+  --data-dir /tmp/gookv-cluster/node3 --initial-cluster $CLUSTER &
 
-./gookvs-server --store-id 4 --addr 127.0.0.1:20163 --status-addr 127.0.0.1:20183 \
-  --data-dir /tmp/gookvs-cluster/node4 --initial-cluster $CLUSTER &
+./gookv-server --store-id 4 --addr 127.0.0.1:20163 --status-addr 127.0.0.1:20183 \
+  --data-dir /tmp/gookv-cluster/node4 --initial-cluster $CLUSTER &
 
-./gookvs-server --store-id 5 --addr 127.0.0.1:20164 --status-addr 127.0.0.1:20184 \
-  --data-dir /tmp/gookvs-cluster/node5 --initial-cluster $CLUSTER &
+./gookv-server --store-id 5 --addr 127.0.0.1:20164 --status-addr 127.0.0.1:20184 \
+  --data-dir /tmp/gookv-cluster/node5 --initial-cluster $CLUSTER &
 ```
 
 ### Cross-Node Verification
@@ -209,7 +209,7 @@ The `make cluster-verify` target (or `go run scripts/cluster-verify/main.go`) pe
 
 ## Running a Cluster with PD
 
-A full production-like cluster consists of a PD (Placement Driver) server for cluster coordination plus multiple gookvs-server nodes connected to it.
+A full production-like cluster consists of a PD (Placement Driver) server for cluster coordination plus multiple gookv-server nodes connected to it.
 
 ### Quick Start (Makefile)
 
@@ -239,7 +239,7 @@ make pd-cluster-stop
 
 ```bash
 # 1. Start the PD server
-./gookvs-pd --addr 127.0.0.1:2379 --cluster-id 1 --data-dir /tmp/gookvs-pd-cluster/pd &
+./gookv-pd --addr 127.0.0.1:2379 --cluster-id 1 --data-dir /tmp/gookv-pd-cluster/pd &
 
 # Wait for PD to be ready
 sleep 1
@@ -248,20 +248,20 @@ sleep 1
 CLUSTER="1=127.0.0.1:20160,2=127.0.0.1:20161,3=127.0.0.1:20162,4=127.0.0.1:20163,5=127.0.0.1:20164"
 PD="127.0.0.1:2379"
 
-./gookvs-server --store-id 1 --addr 127.0.0.1:20160 --status-addr 127.0.0.1:20180 \
-  --data-dir /tmp/gookvs-pd-cluster/node1 --pd-endpoints $PD --initial-cluster $CLUSTER &
+./gookv-server --store-id 1 --addr 127.0.0.1:20160 --status-addr 127.0.0.1:20180 \
+  --data-dir /tmp/gookv-pd-cluster/node1 --pd-endpoints $PD --initial-cluster $CLUSTER &
 
-./gookvs-server --store-id 2 --addr 127.0.0.1:20161 --status-addr 127.0.0.1:20181 \
-  --data-dir /tmp/gookvs-pd-cluster/node2 --pd-endpoints $PD --initial-cluster $CLUSTER &
+./gookv-server --store-id 2 --addr 127.0.0.1:20161 --status-addr 127.0.0.1:20181 \
+  --data-dir /tmp/gookv-pd-cluster/node2 --pd-endpoints $PD --initial-cluster $CLUSTER &
 
-./gookvs-server --store-id 3 --addr 127.0.0.1:20162 --status-addr 127.0.0.1:20182 \
-  --data-dir /tmp/gookvs-pd-cluster/node3 --pd-endpoints $PD --initial-cluster $CLUSTER &
+./gookv-server --store-id 3 --addr 127.0.0.1:20162 --status-addr 127.0.0.1:20182 \
+  --data-dir /tmp/gookv-pd-cluster/node3 --pd-endpoints $PD --initial-cluster $CLUSTER &
 
-./gookvs-server --store-id 4 --addr 127.0.0.1:20163 --status-addr 127.0.0.1:20183 \
-  --data-dir /tmp/gookvs-pd-cluster/node4 --pd-endpoints $PD --initial-cluster $CLUSTER &
+./gookv-server --store-id 4 --addr 127.0.0.1:20163 --status-addr 127.0.0.1:20183 \
+  --data-dir /tmp/gookv-pd-cluster/node4 --pd-endpoints $PD --initial-cluster $CLUSTER &
 
-./gookvs-server --store-id 5 --addr 127.0.0.1:20164 --status-addr 127.0.0.1:20184 \
-  --data-dir /tmp/gookvs-pd-cluster/node5 --pd-endpoints $PD --initial-cluster $CLUSTER &
+./gookv-server --store-id 5 --addr 127.0.0.1:20164 --status-addr 127.0.0.1:20184 \
+  --data-dir /tmp/gookv-pd-cluster/node5 --pd-endpoints $PD --initial-cluster $CLUSTER &
 ```
 
 ### Manual Verification
@@ -287,11 +287,11 @@ go run scripts/pd-cluster-verify/main.go
 
 ```bash
 # Kill all server processes
-pkill -f gookvs-server
-pkill -f gookvs-pd
+pkill -f gookv-server
+pkill -f gookv-pd
 
 # Clean up data
-rm -rf /tmp/gookvs-pd-cluster
+rm -rf /tmp/gookv-pd-cluster
 ```
 
 ### PD Cluster CLI Flags
@@ -306,25 +306,25 @@ rm -rf /tmp/gookvs-pd-cluster
 
 ```bash
 # Scan keys in the default column family
-./gookvs-ctl scan --db /tmp/gookvs-data --cf default --limit 20
+./gookv-ctl scan --db /tmp/gookv-data --cf default --limit 20
 
 # Get a single key (hex-encoded)
-./gookvs-ctl get --db /tmp/gookvs-data --cf default --key 68656c6c6f
+./gookv-ctl get --db /tmp/gookv-data --cf default --key 68656c6c6f
 
 # Show MVCC versions for a key
-./gookvs-ctl mvcc --db /tmp/gookvs-data --key 68656c6c6f
+./gookv-ctl mvcc --db /tmp/gookv-data --key 68656c6c6f
 
 # Dump raw key-value pairs (with optional --decode for human-readable output)
-./gookvs-ctl dump --db /tmp/gookvs-data --cf write --limit 50 --decode
+./gookv-ctl dump --db /tmp/gookv-data --cf write --limit 50 --decode
 
 # Show approximate data size
-./gookvs-ctl size --db /tmp/gookvs-data
+./gookv-ctl size --db /tmp/gookv-data
 
 # Trigger manual compaction
-./gookvs-ctl compact --db /tmp/gookvs-data --cf default
+./gookv-ctl compact --db /tmp/gookv-data --cf default
 
 # List regions
-./gookvs-ctl region --db /tmp/gookvs-data
+./gookv-ctl region --db /tmp/gookv-data
 ```
 
 ## Running Tests
@@ -349,7 +349,7 @@ go test ./pkg/codec/... -v -count=1
 ### Starting the Server
 
 ```bash
-./gookvs-server --data-dir /tmp/gookvs-demo --addr 127.0.0.1:20160
+./gookv-server --data-dir /tmp/gookv-demo --addr 127.0.0.1:20160
 ```
 
 ### Using grpcurl
@@ -387,7 +387,7 @@ import (
 )
 
 func main() {
-	// Connect to a running gookvs-server
+	// Connect to a running gookv-server
 	conn, err := grpc.Dial(
 		"127.0.0.1:20160",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -530,7 +530,7 @@ go tool pprof http://127.0.0.1:20180/debug/pprof/profile?seconds=10
 | IMPL-018 | internal/coprocessor (push-down execution) | Done |
 | IMPL-019 | internal/storage/txn (async commit and 1PC) | Done |
 | IMPL-020 | internal/storage/txn (pessimistic transactions) | Done |
-| IMPL-021 | cmd/gookvs-ctl (admin CLI) | Done |
+| IMPL-021 | cmd/gookv-ctl (admin CLI) | Done |
 | IMPL-022 | WriteBatch SavePoint (copy-on-savepoint) | Done |
 | IMPL-023 | Raw KV API (RawGet/Put/Delete/Scan/Batch) | Done |
 | IMPL-024 | MVCC Scanner (range queries) | Done |
@@ -550,7 +550,7 @@ go tool pprof http://127.0.0.1:20180/debug/pprof/profile?seconds=10
 
 ## Acknowledgments
 
-The architecture and implementation of gookvs were designed with reference to the [TiKV](https://github.com/tikv/tikv) source code. TiKV is licensed under the Apache License 2.0 — see [TiKV LICENSE](https://github.com/tikv/tikv/blob/de241946c52851ac996e1f1d1047a9d3c914f149/LICENSE).
+The architecture and implementation of gookv were designed with reference to the [TiKV](https://github.com/tikv/tikv) source code. TiKV is licensed under the Apache License 2.0 — see [TiKV LICENSE](https://github.com/tikv/tikv/blob/de241946c52851ac996e1f1d1047a9d3c914f149/LICENSE).
 
 ## License
 

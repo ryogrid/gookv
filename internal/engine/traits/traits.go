@@ -1,4 +1,4 @@
-// Package traits defines the storage engine interface abstractions for gookvs.
+// Package traits defines the storage engine interface abstractions for gookv.
 // These interfaces mirror TiKV's engine_traits crate, adapted to Go idioms.
 package traits
 

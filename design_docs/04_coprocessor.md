@@ -1,8 +1,8 @@
 # Coprocessor: Push-Down Computation
 
-This document specifies the coprocessor subsystem for gookvs — the mechanism by which TiDB pushes query computation down to the storage layer. It covers the request model, DAG executor pipeline, expression evaluation framework, aggregation functions, statistics collection, the plugin system, and resource enforcement, all designed with Go interfaces and concurrency patterns.
+This document specifies the coprocessor subsystem for gookv — the mechanism by which TiDB pushes query computation down to the storage layer. It covers the request model, DAG executor pipeline, expression evaluation framework, aggregation functions, statistics collection, the plugin system, and resource enforcement, all designed with Go interfaces and concurrency patterns.
 
-> **Reference**: [impl_docs/coprocessor.md](../impl_docs/coprocessor.md) — TiKV's Rust-based coprocessor that gookvs replicates in Go.
+> **Reference**: [impl_docs/coprocessor.md](../impl_docs/coprocessor.md) — TiKV's Rust-based coprocessor that gookv replicates in Go.
 
 ---
 
@@ -10,7 +10,7 @@ This document specifies the coprocessor subsystem for gookvs — the mechanism b
 
 ### 1.1 How TiDB Pushes Down Computation
 
-TiDB compiles SQL queries into physical plans. For operations executable close to the data — table scans, index scans, filtering, aggregation, top-N — TiDB serializes a sub-plan as a protobuf `DagRequest` and sends it to gookvs as a coprocessor request. gookvs executes the sub-plan against its local data and returns encoded rows, avoiding the cost of transferring raw data to TiDB for processing.
+TiDB compiles SQL queries into physical plans. For operations executable close to the data — table scans, index scans, filtering, aggregation, top-N — TiDB serializes a sub-plan as a protobuf `DagRequest` and sends it to gookv as a coprocessor request. gookv executes the sub-plan against its local data and returns encoded rows, avoiding the cost of transferring raw data to TiDB for processing.
 
 ### 1.2 Request Types
 
@@ -327,9 +327,9 @@ The `LogicalRows []int` field is a key optimization. Rather than copying survivi
 
 ### 3.5 Batch vs Row-Based Execution
 
-gookvs uses **batch execution exclusively** (no row-at-a-time path):
+gookv uses **batch execution exclusively** (no row-at-a-time path):
 
-| Aspect | Row-Based | Batch (gookvs model) |
+| Aspect | Row-Based | Batch (gookv model) |
 |--------|-----------|---------------------|
 | Granularity | One row per `Next()` call | 32–256+ rows per `NextBatch()` call |
 | Data layout | Row tuples | Column vectors (`ColumnVec`) |
@@ -527,7 +527,7 @@ func MapExprToRPNFn(sig tipb.ScalarFuncSig) (RPNFnMeta, error) {
 }
 ```
 
-**Go-specific note**: Unlike TiKV's `#[rpn_fn]` procedural macro that generates boilerplate, gookvs uses a code generation tool (`go generate`) to produce type-specialized dispatch wrappers from function signatures annotated with `//go:generate` directives. Alternatively, a simpler approach uses generic helper functions:
+**Go-specific note**: Unlike TiKV's `#[rpn_fn]` procedural macro that generates boilerplate, gookv uses a code generation tool (`go generate`) to produce type-specialized dispatch wrappers from function signatures annotated with `//go:generate` directives. Alternatively, a simpler approach uses generic helper functions:
 
 ```go
 // MakeBinaryFn creates an RPNFnMeta for a binary function with automatic
@@ -720,7 +720,7 @@ These data structures are serialized and sent back to TiDB for storage in the `m
 
 ### 7.1 Overview
 
-Coprocessor V2 provides a plugin-based extension system for custom computation on gookvs nodes. Unlike the built-in coprocessor which executes TiDB's fixed set of SQL operators, V2 allows loading Go plugins that operate on raw key-value data.
+Coprocessor V2 provides a plugin-based extension system for custom computation on gookv nodes. Unlike the built-in coprocessor which executes TiDB's fixed set of SQL operators, V2 allows loading Go plugins that operate on raw key-value data.
 
 ### 7.2 Plugin Loading
 
@@ -793,13 +793,13 @@ Coprocessor V2 uses **process-level isolation** (not OS-level sandboxing):
 
 **Limitations:**
 - Go plugins are Linux/macOS only (`plugin` package)
-- No process-level sandbox (plugins run in the gookvs process)
+- No process-level sandbox (plugins run in the gookv process)
 - No automatic CPU/memory resource limits on plugin execution
-- Plugin dependencies must be compatible with gookvs's module graph
+- Plugin dependencies must be compatible with gookv's module graph
 
 ### 7.5 Plugin Option: WASM Alternative
 
-For cross-platform plugin support and stronger isolation, gookvs may consider a WASM-based plugin system as an alternative:
+For cross-platform plugin support and stronger isolation, gookv may consider a WASM-based plugin system as an alternative:
 
 | Approach | Pros | Cons |
 |----------|------|------|
@@ -887,7 +887,7 @@ For resource group QoS:
 When `IsCacheEnabled=true` in the request, the coprocessor supports client-side cache validation:
 
 - **Cache key**: Derived from request data, key ranges, and data version
-- **`CacheIfMatchVersion`**: Client sends its cached version; if it matches the current data version, gookvs returns a cache-hit response without re-executing
+- **`CacheIfMatchVersion`**: Client sends its cached version; if it matches the current data version, gookv returns a cache-hit response without re-executing
 - **`CacheLastVersion`**: Server returns the current version so the client can cache results
 
 ```go
@@ -937,7 +937,7 @@ type Config struct {
 
 ## 11. Design Divergences from TiKV
 
-| Area | TiKV (Rust) | gookvs (Go) | Rationale |
+| Area | TiKV (Rust) | gookv (Go) | Rationale |
 |------|-------------|-------------|-----------|
 | **Code generation** | `#[rpn_fn]` procedural macro generates dispatch wrappers | `go generate` or generic helpers (`MakeBinaryFn[L,R,O]`) | Go lacks proc macros; generics (Go 1.18+) provide similar type-safe dispatch |
 | **Aggregation bridging** | `#[derive(AggrFunction)]` macro bridges trait hierarchy | Manual implementation or code generation | Two-interface pattern is idiomatic Go without needing macro magic |

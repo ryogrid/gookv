@@ -1,10 +1,10 @@
-// Package mvcc implements Multi-Version Concurrency Control for gookvs.
+// Package mvcc implements Multi-Version Concurrency Control for gookv.
 // It provides MvccTxn (write accumulator), MvccReader, PointGetter, and Scanner.
 package mvcc
 
 import (
-	"github.com/ryogrid/gookvs/pkg/codec"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/pkg/codec"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // Key represents a user key (unencoded).

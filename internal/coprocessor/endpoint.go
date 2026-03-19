@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // Request type constants matching TiKV/TiDB protobuf.

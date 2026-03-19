@@ -1,4 +1,4 @@
-# Raftstore Layer — Raft-Based Replication in gookvs
+# Raftstore Layer — Raft-Based Replication in gookv
 
 ## 1. Overview
 
@@ -7,7 +7,7 @@ The raftstore layer implements region-based Raft consensus using the etcd/raft l
 Key design decisions:
 
 - **One goroutine per region replica** — each `Peer.Run()` loop processes ticks, incoming Raft messages, client proposals, and apply results sequentially, eliminating the need for fine-grained locking within a single peer.
-- **etcd/raft as a library** — gookvs uses `raft.RawNode` directly (not a higher-level server), giving full control over when to call `Tick()`, `Step()`, `Propose()`, `Ready()`, and `Advance()`.
+- **etcd/raft as a library** — gookv uses `raft.RawNode` directly (not a higher-level server), giving full control over when to call `Tick()`, `Step()`, `Propose()`, `Ready()`, and `Advance()`.
 - **Protobuf wire-format conversion** — the `convert.go` file bridges kvproto's `eraftpb.Message` (used on the gRPC transport) and etcd's `raftpb.Message` via marshal/unmarshal, since both share the same protobuf wire format.
 
 Source files:

@@ -1,4 +1,4 @@
-// Package log implements structured logging for gookvs.
+// Package log implements structured logging for gookv.
 // It uses log/slog with a custom LogDispatcher that routes log records
 // to different outputs based on attributes (normal, slow, rocksdb, raft).
 package log

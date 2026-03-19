@@ -11,8 +11,8 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/pkg/cfnames"
 )
 
 // Column family prefix bytes. These are used to partition the single Pebble keyspace

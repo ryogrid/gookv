@@ -1,4 +1,4 @@
-module github.com/ryogrid/gookvs
+module github.com/ryogrid/gookv
 
 go 1.22.2
 

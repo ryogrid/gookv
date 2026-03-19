@@ -3,8 +3,8 @@ package txn
 import (
 	"testing"
 
-	"github.com/ryogrid/gookvs/internal/storage/mvcc"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

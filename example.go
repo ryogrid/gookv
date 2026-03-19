@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	// Connect to a running gookvs-server
+	// Connect to a running gookv-server
 	conn, err := grpc.Dial(
 		"127.0.0.1:20160",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),

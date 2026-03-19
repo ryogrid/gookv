@@ -77,7 +77,7 @@ func TestStatusEndpoint(t *testing.T) {
 	err = json.NewDecoder(resp.Body).Decode(&body)
 	require.NoError(t, err)
 	assert.Equal(t, "ok", body["status"])
-	assert.Equal(t, "gookvs-dev", body["version"])
+	assert.Equal(t, "gookv-dev", body["version"])
 }
 
 func TestConfigEndpoint(t *testing.T) {

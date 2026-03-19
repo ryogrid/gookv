@@ -6,7 +6,7 @@ Region merge is the inverse of region split: it combines two adjacent, undersize
 
 This is the most complex raftstore administrative operation. It involves coordination between two independent Raft groups (source and target), a two-phase commit protocol (PrepareMerge on source, CommitMerge on target), a rollback path for failure recovery, and careful epoch-based safety to prevent stale reads/writes during the merge window.
 
-### 1.1 Current State in gookvs
+### 1.1 Current State in gookv
 
 From `impl_doc_0318/08_not_yet_implemented.md` section 3.5 and `internal/raftstore/msg.go`:
 

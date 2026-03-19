@@ -1,14 +1,14 @@
 # Key Encoding and Data Formats
 
-This document specifies byte-level key encoding schemes and data formats for gookvs. It provides the foundation for implementing storage layers compatible with TiKV's external key format, enabling client-level wire compatibility.
+This document specifies byte-level key encoding schemes and data formats for gookv. It provides the foundation for implementing storage layers compatible with TiKV's external key format, enabling client-level wire compatibility.
 
-> **Reference**: [impl_docs/key_encoding_and_data_formats.md](../impl_docs/key_encoding_and_data_formats.md) — TiKV's Rust-based encoding specifications that gookvs replicates at the byte level.
+> **Reference**: [impl_docs/key_encoding_and_data_formats.md](../impl_docs/key_encoding_and_data_formats.md) — TiKV's Rust-based encoding specifications that gookv replicates at the byte level.
 
 ---
 
 ## 1. Key Space Organization
 
-gookvs divides its entire key space into two non-overlapping regions using a single-byte prefix, identical to TiKV:
+gookv divides its entire key space into two non-overlapping regions using a single-byte prefix, identical to TiKV:
 
 | Prefix | Byte | Range | Purpose |
 |--------|------|-------|---------|
@@ -237,7 +237,7 @@ This ordering enables efficient MVCC reads: a forward seek from `Encode(userKey)
 
 ## 5. Column Family Layouts
 
-gookvs uses four RocksDB column families, matching TiKV's layout exactly for wire compatibility.
+gookv uses four RocksDB column families, matching TiKV's layout exactly for wire compatibility.
 
 ```go
 const (
@@ -642,7 +642,7 @@ This design ensures:
 
 ### 10.1 Reuse of TiKV's Proto Definitions
 
-gookvs **reuses TiKV's `.proto` definitions** from the [kvproto](https://github.com/pingcap/kvproto) repository. This is essential for wire compatibility with TiKV clients and the PD cluster.
+gookv **reuses TiKV's `.proto` definitions** from the [kvproto](https://github.com/pingcap/kvproto) repository. This is essential for wire compatibility with TiKV clients and the PD cluster.
 
 Key proto packages used in the storage/encoding layer:
 
@@ -655,7 +655,7 @@ Key proto packages used in the storage/encoding layer:
 
 ### 10.2 Proto-to-Internal Conversion Pattern
 
-gookvs follows the same boundary as TiKV: protobuf types live at the RPC boundary, while internal types use Go-native representations for performance and ergonomics.
+gookv follows the same boundary as TiKV: protobuf types live at the RPC boundary, while internal types use Go-native representations for performance and ergonomics.
 
 ```go
 // Convert from protobuf to internal representation
@@ -681,7 +681,7 @@ func (l *Lock) ToLockInfo(key []byte) *kvrpcpb.LockInfo
 
 ## 11. RocksDB Go Binding Options
 
-gookvs requires a Go binding for RocksDB that supports column families, custom comparators, write batches, snapshots, and SST file operations.
+gookv requires a Go binding for RocksDB that supports column families, custom comparators, write batches, snapshots, and SST file operations.
 
 | Criteria | [grocksdb](https://github.com/linxGnu/grocksdb) | [gorocksdb](https://github.com/tecbot/gorocksdb) | [pebble](https://github.com/cockroachdb/pebble) |
 |----------|-----------|------------|--------|
@@ -710,7 +710,7 @@ gookvs requires a Go binding for RocksDB that supports column families, custom c
 
 ## 12. Go Codec Package Design
 
-The `pkg/codec` package provides the encoding primitives used throughout gookvs:
+The `pkg/codec` package provides the encoding primitives used throughout gookv:
 
 ```go
 // Package codec provides memcomparable encoding and number encoding functions.
@@ -753,7 +753,7 @@ func DecodeVarint(data []byte) (uint64, []byte, error)
 
 ## Design Divergences from TiKV
 
-| Aspect | TiKV (Rust) | gookvs (Go) | Rationale |
+| Aspect | TiKV (Rust) | gookv (Go) | Rationale |
 |--------|-------------|-------------|-----------|
 | **Key type** | `Key` is `Vec<u8>` wrapper with methods | `Key` is `[]byte` type alias | Go's slice semantics provide the same functionality |
 | **Encoding return style** | Returns `Result<Vec<u8>>` | Appends to `dst []byte`, returns `[]byte` | Go convention: reuse buffers to reduce GC pressure |

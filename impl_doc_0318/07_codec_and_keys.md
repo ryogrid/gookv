@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The codec and keys packages form the byte-level encoding layer of gookvs. Every key stored in the underlying engine passes through this layer, which guarantees two properties:
+The codec and keys packages form the byte-level encoding layer of gookv. Every key stored in the underlying engine passes through this layer, which guarantees two properties:
 
 1. **Byte-compatibility with TiKV** -- encoded keys and values are byte-identical to what TiKV would produce, so the wire protocol and on-disk format can interoperate.
 2. **Correct lexicographic ordering** -- all key encodings are *memcomparable*: comparing encoded byte strings with `bytes.Compare` yields the same result as comparing the original typed values with their natural ordering.
@@ -409,7 +409,7 @@ Used by:
 Used by:
 - `internal/raftstore` -- `RaftLogKey`, `RaftStateKey`, `ApplyStateKey`, `RegionStateKey` for persisting Raft state
 - `internal/server` -- `DataKey`, `OriginKey`, `IsDataKey` for request routing
-- `cmd/gookvs-ctl` -- key construction for admin CLI operations
+- `cmd/gookv-ctl` -- key construction for admin CLI operations
 
 ### `pkg/txntypes`
 

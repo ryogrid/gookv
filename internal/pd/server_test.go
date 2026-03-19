@@ -36,7 +36,7 @@ func TestGetMembers(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, resp.GetHeader())
 	assert.NotNil(t, resp.GetLeader())
-	assert.Equal(t, "gookvs-pd-1", resp.GetLeader().GetName())
+	assert.Equal(t, "gookv-pd-1", resp.GetLeader().GetName())
 }
 
 func TestBootstrapFlow(t *testing.T) {

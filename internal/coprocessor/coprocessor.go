@@ -1,4 +1,4 @@
-// Package coprocessor implements the push-down query execution framework for gookvs.
+// Package coprocessor implements the push-down query execution framework for gookv.
 // It provides a DAG executor pipeline with TableScan, Selection (filter),
 // RPN expression evaluation, and aggregation support.
 package coprocessor
@@ -12,10 +12,10 @@ import (
 	"math"
 	"time"
 
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/internal/storage/mvcc"
-	"github.com/ryogrid/gookvs/pkg/cfnames"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 var (

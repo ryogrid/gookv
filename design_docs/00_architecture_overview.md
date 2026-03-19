@@ -1,12 +1,12 @@
-# gookvs Architecture Overview
+# gookv Architecture Overview
 
-This document provides a comprehensive architecture overview of gookvs, a Go-based distributed transactional key-value store modeled after TiKV. It serves as the entry point for understanding the system design before diving into subsystem-specific documents.
+This document provides a comprehensive architecture overview of gookv, a Go-based distributed transactional key-value store modeled after TiKV. It serves as the entry point for understanding the system design before diving into subsystem-specific documents.
 
-> **Reference**: [impl_docs/architecture_overview.md](../impl_docs/architecture_overview.md) — TiKV's Rust-based architecture that gookvs draws from.
+> **Reference**: [impl_docs/architecture_overview.md](../impl_docs/architecture_overview.md) — TiKV's Rust-based architecture that gookv draws from.
 
 ## 1. System Overview
 
-gookvs is a distributed, transactional key-value database implemented in Go. It provides:
+gookv is a distributed, transactional key-value database implemented in Go. It provides:
 
 - **ACID-compliant distributed transactions** using a Percolator-based two-phase commit protocol
 - **Horizontal scalability** via automatic region-based sharding
@@ -14,28 +14,28 @@ gookvs is a distributed, transactional key-value database implemented in Go. It 
 - **Multi-Version Concurrency Control (MVCC)** for snapshot isolation reads
 - **TiKV client compatibility** — the external gRPC API is wire-compatible with TiKV
 
-gookvs is designed to be a functionally equivalent, idiomatic Go implementation of TiKV's core architecture, leveraging Go's concurrency primitives (goroutines, channels, `sync` package) in place of TiKV's Rust-specific patterns (batch-system FSMs, YATP thread pools, `crossbeam` channels).
+gookv is designed to be a functionally equivalent, idiomatic Go implementation of TiKV's core architecture, leveraging Go's concurrency primitives (goroutines, channels, `sync` package) in place of TiKV's Rust-specific patterns (batch-system FSMs, YATP thread pools, `crossbeam` channels).
 
 ```mermaid
 graph TB
-    subgraph "gookvs Cluster"
+    subgraph "gookv Cluster"
         PD["Placement Driver (PD)"]
 
-        subgraph "gookvs Node 1"
+        subgraph "gookv Node 1"
             GRPC1["gRPC Server"]
             STORAGE1["Storage / TxnScheduler"]
             RAFT1["Raft Engine"]
             ROCKS1["RocksDB"]
         end
 
-        subgraph "gookvs Node 2"
+        subgraph "gookv Node 2"
             GRPC2["gRPC Server"]
             STORAGE2["Storage / TxnScheduler"]
             RAFT2["Raft Engine"]
             ROCKS2["RocksDB"]
         end
 
-        subgraph "gookvs Node 3"
+        subgraph "gookv Node 3"
             GRPC3["gRPC Server"]
             STORAGE3["Storage / TxnScheduler"]
             RAFT3["Raft Engine"]
@@ -61,14 +61,14 @@ graph TB
 
 ### 2.1 Go Package Structure
 
-gookvs follows idiomatic Go project layout conventions:
+gookv follows idiomatic Go project layout conventions:
 
 ```
-gookvs/
+gookv/
 ├── cmd/                              # Binary entry points
-│   ├── gookvs-server/                # Main server binary
+│   ├── gookv-server/                # Main server binary
 │   │   └── main.go
-│   └── gookvs-ctl/                   # Admin/diagnostic CLI
+│   └── gookv-ctl/                   # Admin/diagnostic CLI
 │       └── main.go
 ├── pkg/                              # Public library packages (importable by external tools)
 │   ├── codec/                        # Memcomparable byte encoding, number encoding
@@ -123,7 +123,7 @@ Packages are organized in a layered dependency hierarchy (bottom-up):
 | **L10: Features** | `internal/cdc`, `internal/backup`, `internal/resource` | CDC, backup, resource control |
 | **L11: Query** | `internal/coprocessor` | Push-down query execution |
 | **L12: Server** | `internal/server` | gRPC server, HTTP status, transport |
-| **L13: Application** | `cmd/gookvs-server`, `cmd/gookvs-ctl` | Binary entry points |
+| **L13: Application** | `cmd/gookv-server`, `cmd/gookv-ctl` | Binary entry points |
 
 ```mermaid
 graph BT
@@ -138,7 +138,7 @@ graph BT
     PDCLIENT["pkg/pdclient"] --> RAFTSTORE
     TXN --> SERVER["internal/server"]
     RAFTSTORE --> SERVER
-    SERVER --> CMD["cmd/gookvs-server"]
+    SERVER --> CMD["cmd/gookv-server"]
 
     CDC["internal/cdc"] --> RAFTSTORE
     BACKUP["internal/backup"] --> ENGINE_TRAITS
@@ -151,9 +151,9 @@ graph BT
 
 ## 3. Goroutine Model
 
-gookvs replaces TiKV's dedicated thread pools and batch-system FSMs with goroutines and channels, leveraging Go's runtime scheduler for cooperative multiplexing.
+gookv replaces TiKV's dedicated thread pools and batch-system FSMs with goroutines and channels, leveraging Go's runtime scheduler for cooperative multiplexing.
 
-**Divergence from TiKV**: TiKV uses a custom batch-system with PeerFsm/StoreFsm and YATP thread pools. gookvs uses one goroutine per peer (region replica) and worker pools implemented via buffered channels. Go's goroutine scheduler provides the batching and multiplexing that TiKV implements manually.
+**Divergence from TiKV**: TiKV uses a custom batch-system with PeerFsm/StoreFsm and YATP thread pools. gookv uses one goroutine per peer (region replica) and worker pools implemented via buffered channels. Go's goroutine scheduler provides the batching and multiplexing that TiKV implements manually.
 
 ### 3.1 Goroutine Groups
 
@@ -272,10 +272,10 @@ Same flow as prewrite, but:
 
 ### 5.1 PD-Based Discovery
 
-gookvs nodes do **not** discover each other directly. All coordination flows through the **Placement Driver (PD)** — the same PD used by TiKV/TiDB:
+gookv nodes do **not** discover each other directly. All coordination flows through the **Placement Driver (PD)** — the same PD used by TiKV/TiDB:
 
-- **Initial bootstrap**: gookvs connects to PD via configured `pd_endpoints`. PD returns cluster membership, store IDs, and the initial region map.
-- **Store heartbeats**: Each gookvs node periodically reports store-level stats (capacity, usage, I/O rates, CPU) to PD.
+- **Initial bootstrap**: gookv connects to PD via configured `pd_endpoints`. PD returns cluster membership, store IDs, and the initial region map.
+- **Store heartbeats**: Each gookv node periodically reports store-level stats (capacity, usage, I/O rates, CPU) to PD.
 - **Region heartbeats**: Each region leader reports region stats (size, keys, throughput, down/pending peers) to PD.
 - **Address resolution**: A PD store address resolver maps store IDs to network addresses, with caching and auto-refresh.
 
@@ -300,13 +300,13 @@ PD embeds scheduling instructions in heartbeat responses:
 
 ### 5.4 Timestamp Oracle (TSO)
 
-PD provides a globally unique, monotonically increasing timestamp service. gookvs acquires `start_ts` and `commit_ts` from PD's TSO for transaction ordering. The PD client maintains a persistent gRPC stream for TSO requests with automatic batching and reconnection.
+PD provides a globally unique, monotonically increasing timestamp service. gookv acquires `start_ts` and `commit_ts` from PD's TSO for transaction ordering. The PD client maintains a persistent gRPC stream for TSO requests with automatic batching and reconnection.
 
-## 6. Key Design Decisions: Where gookvs Diverges from TiKV
+## 6. Key Design Decisions: Where gookv Diverges from TiKV
 
 ### 6.1 Goroutines + Channels Instead of Batch-System FSMs
 
-| Aspect | TiKV (Rust) | gookvs (Go) | Rationale |
+| Aspect | TiKV (Rust) | gookv (Go) | Rationale |
 |--------|-------------|-------------|-----------|
 | **Raft message processing** | Batch-system with PeerFsm/StoreFsm, dedicated thread pool, DashMap-based Router | One goroutine per peer, channel-based mailbox, `sync.Map`-based Router | Go's goroutine scheduler provides lightweight M:N scheduling natively; explicit FSM batching is unnecessary |
 | **Apply pipeline** | Separate Apply batch-system thread pool | Apply worker pool consuming from shared channel | Same separation of concerns, simpler implementation |
@@ -325,7 +325,7 @@ trait KvEngine: Send + Sync {
 }
 ```
 
-gookvs uses Go interfaces:
+gookv uses Go interfaces:
 ```go
 type KvEngine interface {
     NewSnapshot() Snapshot
@@ -337,14 +337,14 @@ type KvEngine interface {
 
 ### 6.3 `context.Context` for Request Lifecycle
 
-TiKV uses `Tracker` structs and manual callback chains. gookvs uses Go's `context.Context` for:
+TiKV uses `Tracker` structs and manual callback chains. gookv uses Go's `context.Context` for:
 - Deadline propagation from gRPC through the entire request path
 - Cancellation on client disconnect
 - Request-scoped values (region info, trace ID)
 
 ### 6.4 Error Handling
 
-TiKV uses Rust's `Result<T, E>` with custom error enums. gookvs uses Go's `error` interface with wrapped errors (`fmt.Errorf("...: %w", err)`) and sentinel errors for well-known conditions (e.g., `ErrKeyIsLocked`, `ErrWriteConflict`).
+TiKV uses Rust's `Result<T, E>` with custom error enums. gookv uses Go's `error` interface with wrapped errors (`fmt.Errorf("...: %w", err)`) and sentinel errors for well-known conditions (e.g., `ErrKeyIsLocked`, `ErrWriteConflict`).
 
 ## 7. Library Options for Key Infrastructure
 

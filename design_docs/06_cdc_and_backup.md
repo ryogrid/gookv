@@ -1,8 +1,8 @@
 # CDC and Backup
 
-This document specifies gookvs's Change Data Capture (CDC), full backup, log backup (PITR), and resolved timestamp subsystems. These components share a common raftstore observer pattern for capturing data changes and cooperate to provide real-time change streaming, point-in-time backup, and consistent read timestamps.
+This document specifies gookv's Change Data Capture (CDC), full backup, log backup (PITR), and resolved timestamp subsystems. These components share a common raftstore observer pattern for capturing data changes and cooperate to provide real-time change streaming, point-in-time backup, and consistent read timestamps.
 
-> **Reference**: [impl_docs/cdc_and_backup.md](../impl_docs/cdc_and_backup.md) — TiKV's Rust-based CDC, backup, and resolved timestamp subsystems that gookvs draws from.
+> **Reference**: [impl_docs/cdc_and_backup.md](../impl_docs/cdc_and_backup.md) — TiKV's Rust-based CDC, backup, and resolved timestamp subsystems that gookv draws from.
 
 **Cross-references**: [Architecture Overview](00_architecture_overview.md), [Raft and Replication](02_raft_and_replication.md), [Transaction and MVCC](03_transaction_and_mvcc.md), [gRPC API and Server](05_grpc_api_and_server.md)
 
@@ -12,7 +12,7 @@ This document specifies gookvs's Change Data Capture (CDC), full backup, log bac
 
 ### 1.1 Overview
 
-CDC captures data changes from gookvs's Raft apply path and streams them to downstream consumers (primarily TiCDC). The architecture follows a producer-consumer pattern with three layers:
+CDC captures data changes from gookv's Raft apply path and streams them to downstream consumers (primarily TiCDC). The architecture follows a producer-consumer pattern with three layers:
 
 1. **Observer Layer** (`CdcObserver`): Hooks into raftstore to capture applied commands
 2. **Delegate Layer** (`Delegate`): Per-region event processing, filtering, and old value retrieval
@@ -387,7 +387,7 @@ type RegionChangeObserver interface {
 }
 ```
 
-**Divergence from TiKV**: TiKV uses Rust traits with a `Coprocessor` supertrait. gookvs uses Go interfaces directly — composition via embedding replaces trait inheritance.
+**Divergence from TiKV**: TiKV uses Rust traits with a `Coprocessor` supertrait. gookv uses Go interfaces directly — composition via embedding replaces trait inheritance.
 
 ### 2.2 ObserveLevel
 
@@ -461,7 +461,7 @@ The `ObserveID` prevents ABA problems: if a region is deregistered and re-regist
 
 ### 3.1 Overview
 
-The full backup component exports consistent snapshots of gookvs data to external storage as SST files. It operates on a per-region basis with configurable concurrency.
+The full backup component exports consistent snapshots of gookv data to external storage as SST files. It operates on a per-region basis with configurable concurrency.
 
 **Key design point**: Full backup uses **direct engine snapshots**, NOT the raftstore observer pattern — it is fundamentally different from CDC and backup-stream.
 
@@ -654,7 +654,7 @@ func (sl *SoftLimit) Adjust() int
 
 ### 4.1 Overview
 
-The backup-stream component implements continuous log backup for Point-In-Time Recovery (PITR). It captures incremental changes from gookvs via the raftstore observer pattern and writes them to external storage, enabling restoration to any point in time.
+The backup-stream component implements continuous log backup for Point-In-Time Recovery (PITR). It captures incremental changes from gookv via the raftstore observer pattern and writes them to external storage, enabling restoration to any point in time.
 
 ```mermaid
 graph TB
@@ -861,7 +861,7 @@ type TempFilePool struct {
 
 ### 4.8 Metadata Storage (Etcd)
 
-Backup-stream persists metadata to etcd for coordination across gookvs nodes:
+Backup-stream persists metadata to etcd for coordination across gookv nodes:
 
 ```
 /tidb/br-stream/
@@ -1023,7 +1023,7 @@ func (r *Resolver) Resolve(minTS uint64, now time.Time, source TsSource) uint64 
 - Aggressive map shrinking every 10 seconds
 - Warning on shutdown if >64MB of tracked locks remain
 
-**Divergence from TiKV**: TiKV uses `BTreeMap` for O(1) min lookup. Go's standard `map` is unordered, so gookvs uses a `btree.BTreeG` (e.g., from `github.com/tidwall/btree` or `github.com/google/btree`) for sorted lock tracking.
+**Divergence from TiKV**: TiKV uses `BTreeMap` for O(1) min lookup. Go's standard `map` is unordered, so gookv uses a `btree.BTreeG` (e.g., from `github.com/tidwall/btree` or `github.com/google/btree`) for sorted lock tracking.
 
 ### 5.3 AdvanceTsWorker (Store-Level Advancement)
 
@@ -1257,7 +1257,7 @@ Full backup operates independently of CDC and resolved_ts:
 
 ## 7. Design Divergences from TiKV
 
-| Aspect | TiKV (Rust) | gookvs (Go) | Rationale |
+| Aspect | TiKV (Rust) | gookv (Go) | Rationale |
 |--------|-------------|-------------|-----------|
 | **Observer traits** | Rust traits with `Coprocessor` supertrait | Go interfaces with composition | Go interfaces are structurally typed; no trait inheritance needed |
 | **Lock-free state** | `AtomicCell<DownstreamState>` | `atomic.Int32` for state enum | Go atomics are simpler; same lock-free semantics |

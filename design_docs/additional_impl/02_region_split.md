@@ -4,7 +4,7 @@
 
 Region split divides a single Raft region into multiple regions with non-overlapping key ranges when the region size exceeds a configurable threshold. This is fundamental to horizontal scalability: without split, all data lives in one Raft group, creating a single-node bottleneck for both storage and throughput.
 
-gookvs currently defines the data structures for split (`PeerTickSplitRegionCheck`, `ExecResultTypeSplitRegion`, `SplitRegionResult` in `internal/raftstore/msg.go`) but has no handler, no size estimation, no split key calculation, no split execution, and no split proposal path. This document specifies the complete design for region split in gookvs.
+gookv currently defines the data structures for split (`PeerTickSplitRegionCheck`, `ExecResultTypeSplitRegion`, `SplitRegionResult` in `internal/raftstore/msg.go`) but has no handler, no size estimation, no split key calculation, no split execution, and no split proposal path. This document specifies the complete design for region split in gookv.
 
 **Scope**: This document covers size-based automatic split and admin-triggered manual split. Table-boundary-aware split (`SplitRegionOnTable`) is deferred to a follow-up.
 

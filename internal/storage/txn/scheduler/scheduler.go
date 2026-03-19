@@ -1,4 +1,4 @@
-// Package scheduler implements the TxnScheduler command dispatcher for gookvs.
+// Package scheduler implements the TxnScheduler command dispatcher for gookv.
 // It provides a worker pool with latch-based key serialization for transaction
 // command execution, decoupling gRPC request handling from MVCC operations.
 package scheduler
@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/internal/storage/mvcc"
-	"github.com/ryogrid/gookvs/internal/storage/txn/concurrency"
-	"github.com/ryogrid/gookvs/internal/storage/txn/latch"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/internal/storage/txn/concurrency"
+	"github.com/ryogrid/gookv/internal/storage/txn/latch"
 )
 
 // ErrSchedTooBusy is returned when the scheduler cannot accept more commands.

@@ -1,4 +1,4 @@
-// Package transport implements the inter-node Raft message transport for gookvs.
+// Package transport implements the inter-node Raft message transport for gookv.
 // It provides connection pooling, message batching, and snapshot transfer via gRPC.
 package transport
 
@@ -16,7 +16,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 )
 
-// RaftClient manages gRPC connections to other gookvs nodes for Raft message transport.
+// RaftClient manages gRPC connections to other gookv nodes for Raft message transport.
 type RaftClient struct {
 	mu          sync.RWMutex
 	connections map[uint64]*connPool // storeID -> connection pool

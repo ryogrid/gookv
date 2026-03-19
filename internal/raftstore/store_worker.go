@@ -3,8 +3,8 @@ package raftstore
 import (
 	"fmt"
 
-	"github.com/ryogrid/gookvs/pkg/cfnames"
-	"github.com/ryogrid/gookvs/pkg/keys"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/keys"
 )
 
 // CleanupRegionData deletes all Raft-related data for a region from the engine.

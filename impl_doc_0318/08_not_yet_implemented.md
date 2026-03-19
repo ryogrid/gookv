@@ -1,8 +1,8 @@
-# Unimplemented, Stubbed, and Incomplete Features in gookvs
+# Unimplemented, Stubbed, and Incomplete Features in gookv
 
 ## 1. Overview
 
-This document provides a comprehensive inventory of features defined in the gookvs codebase that are not yet fully implemented. Each item is verified against the Go source code and cross-referenced with `tasks/no-implement.md`.
+This document provides a comprehensive inventory of features defined in the gookv codebase that are not yet fully implemented. Each item is verified against the Go source code and cross-referenced with `tasks/no-implement.md`.
 
 ## 2. Methodology
 
@@ -73,8 +73,8 @@ This document provides a comprehensive inventory of features defined in the gook
 - **Feature**: Periodic region heartbeat reporting to Placement Driver
 - **Location**: `internal/raftstore/msg.go` (line 51)
 - **Status**: Data structures only
-- **What's Missing**: `PeerTickPdHeartbeat` tick type is defined but never handled. No periodic timer fires this tick. No code in the peer or coordinator calls `pdclient.ReportRegionHeartbeat()`. The PD client interface and gRPC client implementation exist (`pkg/pdclient/client.go`) but are not wired into the server startup path (`cmd/gookvs-server/main.go` does not create a PD client).
-- **Evidence**: `PeerTickPdHeartbeat` is only defined in `msg.go` line 51. The `main.go` for gookvs-server accepts `--pd-endpoints` but never creates a `pdclient.Client` or starts a heartbeat loop.
+- **What's Missing**: `PeerTickPdHeartbeat` tick type is defined but never handled. No periodic timer fires this tick. No code in the peer or coordinator calls `pdclient.ReportRegionHeartbeat()`. The PD client interface and gRPC client implementation exist (`pkg/pdclient/client.go`) but are not wired into the server startup path (`cmd/gookv-server/main.go` does not create a PD client).
+- **Evidence**: `PeerTickPdHeartbeat` is only defined in `msg.go` line 51. The `main.go` for gookv-server accepts `--pd-endpoints` but never creates a `pdclient.Client` or starts a heartbeat loop.
 
 ### 3.7 Transaction -- TxnScheduler / Command Dispatcher
 
@@ -129,7 +129,7 @@ This document provides a comprehensive inventory of features defined in the gook
 ### 3.12 CLI -- `region` Command
 
 - **Feature**: Region metadata inspection command
-- **Location**: `cmd/gookvs-ctl/main.go` (line 29, lines 48-67)
+- **Location**: `cmd/gookv-ctl/main.go` (line 29, lines 48-67)
 - **Status**: Not implemented
 - **What's Missing**: The `region` command is listed in the usage string but there is no `cmdRegion()` function. The `main()` switch and `RunCommand()` switch do not have a case for "region". Attempting to use the command results in "Unknown command: region".
 - **Evidence**: The usage string includes `region      Inspect region metadata` but neither `main()` nor `RunCommand()` handle this command. No `cmdRegion` function exists.
@@ -137,7 +137,7 @@ This document provides a comprehensive inventory of features defined in the gook
 ### 3.13 CLI -- `dump` (SST File Parsing)
 
 - **Feature**: Dump SST file contents with structured parsing
-- **Location**: `cmd/gookvs-ctl/main.go` (lines 251-276)
+- **Location**: `cmd/gookv-ctl/main.go` (lines 251-276)
 - **Status**: Partial
 - **What's Missing**: `cmdDump()` only iterates raw key-value pairs from a column family using a standard engine iterator, printing hex-encoded keys and values. It does not parse SST files directly, does not support SST-specific metadata, and does not decode MVCC key structure or write records.
 - **Evidence**: `cmdDump()` uses `eng.NewIterator(*cf, traits.IterOptions{})` and outputs raw hex -- no SST file path argument, no SST parsing library usage.
@@ -145,7 +145,7 @@ This document provides a comprehensive inventory of features defined in the gook
 ### 3.14 CLI -- `compact` (Actual Compaction)
 
 - **Feature**: Trigger manual Pebble/RocksDB compaction
-- **Location**: `cmd/gookvs-ctl/main.go` (lines 305-325)
+- **Location**: `cmd/gookv-ctl/main.go` (lines 305-325)
 - **Status**: Partial (misleading)
 - **What's Missing**: `cmdCompact()` calls `eng.SyncWAL()` which maps to Pebble's `Flush()`. This only flushes the WAL/memtable, not a full compaction. No call to Pebble's `Compact()` or similar range compaction API. The success message "Compaction triggered successfully" is misleading.
 - **Evidence**:
@@ -210,9 +210,9 @@ This document provides a comprehensive inventory of features defined in the gook
 | 3.9 | Pessimistic Lock / ResolveLock RPCs | `internal/server/server.go` | Logic exists, not exposed | gRPC endpoint methods |
 | 3.10 | Async Commit / 1PC RPCs | `internal/server/server.go` | Logic exists, not integrated | Prewrite path selection |
 | 3.11 | WriteBatch.RollbackToSavePoint | `internal/engine/rocks/engine.go` | Non-functional stub | Actual rollback (Pebble limitation) |
-| 3.12 | CLI `region` command | `cmd/gookvs-ctl/main.go` | Not implemented | Entire command |
-| 3.13 | CLI `dump` (SST parsing) | `cmd/gookvs-ctl/main.go` | Partial | SST file parsing, MVCC key decoding |
-| 3.14 | CLI `compact` | `cmd/gookvs-ctl/main.go` | Partial (misleading) | Actual Pebble compaction call |
+| 3.12 | CLI `region` command | `cmd/gookv-ctl/main.go` | Not implemented | Entire command |
+| 3.13 | CLI `dump` (SST parsing) | `cmd/gookv-ctl/main.go` | Partial | SST file parsing, MVCC key decoding |
+| 3.14 | CLI `compact` | `cmd/gookv-ctl/main.go` | Partial (misleading) | Actual Pebble compaction call |
 | 3.15 | Coprocessor RPC | `internal/coprocessor/coprocessor.go` | Local framework only | gRPC endpoint, proto decoding, Raft integration |
 | 3.16 | GC Worker | N/A | Not implemented | Entire subsystem |
 | 3.17 | Raw KV API | `internal/server/server.go` | Not implemented | All Raw* RPC endpoints |
@@ -293,7 +293,7 @@ graph TB
         Endpoint[Endpoint Integration]:::stub
     end
 
-    subgraph "CLI (gookvs-ctl)"
+    subgraph "CLI (gookv-ctl)"
         ScanCmd[scan]:::done
         GetCmd[get]:::done
         MvccCmd[mvcc]:::done

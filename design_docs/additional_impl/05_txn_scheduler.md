@@ -18,7 +18,7 @@ This design decouples request admission from execution, enables backpressure via
 
 TiKV's `TxnScheduler` (in `src/storage/txn/scheduler.rs`) follows this architecture:
 
-| Component | TiKV (Rust) | gookvs Target (Go) |
+| Component | TiKV (Rust) | gookv Target (Go) |
 |---|---|---|
 | Scheduler struct | `TxnScheduler<E, L>` wrapping `Arc<TxnSchedulerInner<L>>` | `TxnScheduler` struct |
 | Command ID generator | `AtomicU64` (`id_alloc`) | `atomic.Uint64` |

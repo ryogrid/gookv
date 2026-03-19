@@ -1,14 +1,14 @@
 # Raft and Replication
 
-This document specifies the Raft consensus, region management, and replication layer for gookvs. It covers the Go Raft library selection, region abstraction, region lifecycle (creation, split, merge), channel-based message dispatch (replacing TiKV's batch-system), snapshot mechanics, and safety invariants.
+This document specifies the Raft consensus, region management, and replication layer for gookv. It covers the Go Raft library selection, region abstraction, region lifecycle (creation, split, merge), channel-based message dispatch (replacing TiKV's batch-system), snapshot mechanics, and safety invariants.
 
-> **Reference**: [impl_docs/raft_and_replication.md](../impl_docs/raft_and_replication.md) — TiKV's Rust-based raftstore that gookvs draws from, adapted to Go's concurrency model.
+> **Reference**: [impl_docs/raft_and_replication.md](../impl_docs/raft_and_replication.md) — TiKV's Rust-based raftstore that gookv draws from, adapted to Go's concurrency model.
 
 ---
 
 ## 1. Go Raft Library Selection
 
-gookvs wraps an external Raft library for core consensus — it does **not** reimplement the Raft algorithm. The library must provide: leader election, log replication, membership changes (including joint consensus), snapshotting, and a poll-based `Ready` API.
+gookv wraps an external Raft library for core consensus — it does **not** reimplement the Raft algorithm. The library must provide: leader election, log replication, membership changes (including joint consensus), snapshotting, and a poll-based `Ready` API.
 
 ### 1.1 Library Options
 
@@ -18,7 +18,7 @@ gookvs wraps an external Raft library for core consensus — it does **not** rei
 | **hashicorp/raft** | Higher-level API with built-in transport, snapshots, and log storage; widely used (Consul, Nomad, Vault); good documentation | Opinionated architecture (owns goroutines, transport, storage); `Future`-based API doesn't map to TiKV's `Ready` pattern; no joint consensus support; harder to implement region-per-group model |
 | **dragonboat** (`github.com/lni/dragonboat`) | Multi-group Raft out of the box; high performance; built-in snapshot streaming and log storage | Opinionated runtime (owns goroutine scheduling); less control over per-region lifecycle; smaller community; harder to customize for TiKV-compatible semantics |
 
-**Recommendation**: **etcd/raft** — its poll-based `Ready` API is structurally identical to raft-rs (which TiKV uses), enabling a near 1:1 mapping of the raftstore integration logic. The lack of built-in transport is actually an advantage: gookvs needs custom region-aware message routing that no library provides out of the box.
+**Recommendation**: **etcd/raft** — its poll-based `Ready` API is structurally identical to raft-rs (which TiKV uses), enabling a near 1:1 mapping of the raftstore integration logic. The lack of built-in transport is actually an advantage: gookv needs custom region-aware message routing that no library provides out of the box.
 
 ### 1.2 Key Types from etcd/raft
 
@@ -26,7 +26,7 @@ gookvs wraps an external Raft library for core consensus — it does **not** rei
 |------|---------|
 | `raft.RawNode` | Main Raft state machine; accepts proposals, steps messages, produces `Ready` |
 | `raft.Ready` | Bundle of pending state changes: entries, committed entries, messages, snapshots, hard/soft state |
-| `raft.Storage` (interface) | gookvs implements this to provide persistent log access |
+| `raft.Storage` (interface) | gookv implements this to provide persistent log access |
 | `raftpb.Message` | Raft protocol messages (MsgApp, MsgVote, MsgHeartbeat, etc.) |
 | `raftpb.Entry` | Log entry: `(Term, Index, Type, Data)` |
 | `raftpb.HardState` | Persistent Raft state: `(Term, Vote, Commit)` |
@@ -76,11 +76,11 @@ func (p *Peer) run(ctx context.Context) {
 }
 ```
 
-**Divergence from TiKV**: TiKV drives `RawNode` from a batch-system poll handler that processes multiple peers per thread. gookvs runs one goroutine per peer, with the Go runtime scheduler providing the multiplexing that TiKV implements manually via its batch-system.
+**Divergence from TiKV**: TiKV drives `RawNode` from a batch-system poll handler that processes multiple peers per thread. gookv runs one goroutine per peer, with the Go runtime scheduler providing the multiplexing that TiKV implements manually via its batch-system.
 
 ### 1.4 Storage Interface Implementation
 
-gookvs implements `raft.Storage` via a `PeerStorage` struct:
+gookv implements `raft.Storage` via a `PeerStorage` struct:
 
 ```go
 // PeerStorage implements raft.Storage for a single region.
@@ -291,7 +291,7 @@ stateDiagram-v2
 
 ### 3.1 Initial Bootstrap
 
-When a gookvs cluster starts fresh:
+When a gookv cluster starts fresh:
 
 1. First node initializes with a single region covering the entire key space `["", "")` (region 1)
 2. PD assigns `region_id=1` and peer IDs
@@ -429,7 +429,7 @@ Regions are destroyed in these scenarios:
 
 ## 4. Channel-Based Message Dispatch
 
-**Divergence from TiKV**: TiKV uses a custom batch-system (`components/batch-system/`) with `DashMap`-based Router, PeerFsm/StoreFsm, and dedicated poll threads. gookvs replaces this with one goroutine per peer and Go channels for message routing. Go's runtime scheduler provides the batching and multiplexing that TiKV implements manually.
+**Divergence from TiKV**: TiKV uses a custom batch-system (`components/batch-system/`) with `DashMap`-based Router, PeerFsm/StoreFsm, and dedicated poll threads. gookv replaces this with one goroutine per peer and Go channels for message routing. Go's runtime scheduler provides the batching and multiplexing that TiKV implements manually.
 
 ```mermaid
 graph TB
@@ -490,7 +490,7 @@ func (r *Router) Register(regionID uint64, ch chan PeerMsg)
 func (r *Router) Unregister(regionID uint64)
 ```
 
-**Divergence from TiKV**: TiKV's Router uses `DashMap` (concurrent hashmap) with `BasicMailbox` per peer FSM and atomic `FsmState` (IDLE/NOTIFIED/DROP) for scheduling. gookvs uses `sync.Map` with buffered channels — Go's channel send/receive provides the equivalent notification/scheduling semantics natively.
+**Divergence from TiKV**: TiKV's Router uses `DashMap` (concurrent hashmap) with `BasicMailbox` per peer FSM and atomic `FsmState` (IDLE/NOTIFIED/DROP) for scheduling. gookv uses `sync.Map` with buffered channels — Go's channel send/receive provides the equivalent notification/scheduling semantics natively.
 
 ### 4.2 Message Types
 
@@ -863,7 +863,7 @@ type CmdEpochChecker struct {
 
 ## 7. Configuration Changes
 
-gookvs supports both simple and joint-consensus configuration changes (both supported by etcd/raft):
+gookv supports both simple and joint-consensus configuration changes (both supported by etcd/raft):
 
 ### 7.1 Simple Conf-Change (single peer add/remove)
 
@@ -949,7 +949,7 @@ Hibernation is a key optimization for clusters with many regions but uneven writ
 
 ## 10. Design Divergences from TiKV
 
-| Aspect | TiKV (Rust) | gookvs (Go) | Rationale |
+| Aspect | TiKV (Rust) | gookv (Go) | Rationale |
 |--------|-------------|-------------|-----------|
 | **Raft library** | raft-rs (forked, Rust) | etcd/raft (Go) | Same poll-based `Ready` API; native Go ecosystem |
 | **Message dispatch** | Batch-system with PeerFsm/StoreFsm, DashMap Router, dedicated poll threads | One goroutine per peer, channel mailbox, `sync.Map` Router | Go's goroutine scheduler provides lightweight M:N scheduling natively |

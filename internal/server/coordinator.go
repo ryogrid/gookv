@@ -12,11 +12,11 @@ import (
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 
-	"github.com/ryogrid/gookvs/internal/engine/traits"
-	"github.com/ryogrid/gookvs/internal/raftstore"
-	"github.com/ryogrid/gookvs/internal/raftstore/router"
-	"github.com/ryogrid/gookvs/internal/server/transport"
-	"github.com/ryogrid/gookvs/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/internal/raftstore"
+	"github.com/ryogrid/gookv/internal/raftstore/router"
+	"github.com/ryogrid/gookv/internal/server/transport"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
 )
 
 // StoreCoordinator manages the lifecycle of Raft peers for a single store.

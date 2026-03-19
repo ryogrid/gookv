@@ -1,10 +1,10 @@
-// Package proto documents the protobuf dependencies for gookvs.
+// Package proto documents the protobuf dependencies for gookv.
 //
-// gookvs reuses TiKV's kvproto definitions from github.com/pingcap/kvproto.
+// gookv reuses TiKV's kvproto definitions from github.com/pingcap/kvproto.
 // The .proto source files in this directory are kept for reference only.
 // All Go code is imported from the kvproto module's pre-generated packages.
 //
-// Key proto packages used by gookvs:
+// Key proto packages used by gookv:
 //
 //   - kvrpcpb:          KV RPC protocol (Mutation, Op, LockInfo, etc.)
 //   - metapb:           Cluster metadata (Region, Peer, RegionEpoch)

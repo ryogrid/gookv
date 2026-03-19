@@ -1,4 +1,4 @@
-// gookvs-server is the main entry point for the gookvs distributed KV store.
+// gookv-server is the main entry point for the gookv distributed KV store.
 // It starts the gRPC server, status HTTP server, and all supporting components.
 package main
 
@@ -17,14 +17,14 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"go.etcd.io/etcd/raft/v3"
 
-	"github.com/ryogrid/gookvs/internal/config"
-	"github.com/ryogrid/gookvs/internal/engine/rocks"
-	"github.com/ryogrid/gookvs/internal/raftstore"
-	raftrouter "github.com/ryogrid/gookvs/internal/raftstore/router"
-	"github.com/ryogrid/gookvs/internal/server"
-	"github.com/ryogrid/gookvs/internal/server/transport"
-	statusserver "github.com/ryogrid/gookvs/internal/server/status"
-	"github.com/ryogrid/gookvs/pkg/pdclient"
+	"github.com/ryogrid/gookv/internal/config"
+	"github.com/ryogrid/gookv/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/raftstore"
+	raftrouter "github.com/ryogrid/gookv/internal/raftstore/router"
+	"github.com/ryogrid/gookv/internal/server"
+	"github.com/ryogrid/gookv/internal/server/transport"
+	statusserver "github.com/ryogrid/gookv/internal/server/status"
+	"github.com/ryogrid/gookv/pkg/pdclient"
 )
 
 func main() {
@@ -68,7 +68,7 @@ func main() {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
 
-	fmt.Printf("gookvs-server starting\n")
+	fmt.Printf("gookv-server starting\n")
 	fmt.Printf("  gRPC addr:   %s\n", cfg.Server.Addr)
 	fmt.Printf("  status addr: %s\n", cfg.Server.StatusAddr)
 	fmt.Printf("  data dir:    %s\n", cfg.Storage.DataDir)
@@ -219,7 +219,7 @@ func main() {
 	}
 	_ = statusSrv.Stop()
 	srv.Stop()
-	fmt.Println("gookvs-server stopped")
+	fmt.Println("gookv-server stopped")
 }
 
 func splitEndpoints(s string) []string {

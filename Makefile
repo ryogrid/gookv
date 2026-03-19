@@ -1,10 +1,10 @@
 .PHONY: test build vet proto test-e2e cluster-start cluster-stop cluster-verify pd-cluster-start pd-cluster-stop pd-cluster-verify
 
-CLUSTER_DIR = /tmp/gookvs-cluster
+CLUSTER_DIR = /tmp/gookv-cluster
 CLUSTER_NODES = 5
 CLUSTER_TOPOLOGY = 1=127.0.0.1:20160,2=127.0.0.1:20161,3=127.0.0.1:20162,4=127.0.0.1:20163,5=127.0.0.1:20164
 
-PD_CLUSTER_DIR = /tmp/gookvs-pd-cluster
+PD_CLUSTER_DIR = /tmp/gookv-pd-cluster
 PD_ADDR = 127.0.0.1:2379
 
 test:
@@ -14,18 +14,18 @@ test-e2e:
 	go test ./e2e/... -v -count=1 -timeout 120s
 
 build:
-	go build -o gookvs-server ./cmd/gookvs-server
-	go build -o gookvs-ctl ./cmd/gookvs-ctl
-	go build -o gookvs-pd ./cmd/gookvs-pd
+	go build -o gookv-server ./cmd/gookv-server
+	go build -o gookv-ctl ./cmd/gookv-ctl
+	go build -o gookv-pd ./cmd/gookv-pd
 
 vet:
 	go vet ./...
 
 proto:
-	@echo "Proto generation is not needed: gookvs uses pre-generated Go code from github.com/pingcap/kvproto"
+	@echo "Proto generation is not needed: gookv uses pre-generated Go code from github.com/pingcap/kvproto"
 
 cluster-start: build
-	@echo "Starting $(CLUSTER_NODES)-node gookvs cluster..."
+	@echo "Starting $(CLUSTER_NODES)-node gookv cluster..."
 	@mkdir -p $(CLUSTER_DIR)
 	@for i in $$(seq 1 $(CLUSTER_NODES)); do \
 		GRPC_PORT=$$((20159 + $$i)); \
@@ -34,7 +34,7 @@ cluster-start: build
 		PID_FILE=$(CLUSTER_DIR)/node$$i.pid; \
 		LOG_FILE=$(CLUSTER_DIR)/node$$i.log; \
 		mkdir -p $$DATA_DIR; \
-		./gookvs-server \
+		./gookv-server \
 			--store-id $$i \
 			--addr 127.0.0.1:$$GRPC_PORT \
 			--status-addr 127.0.0.1:$$STATUS_PORT \
@@ -47,7 +47,7 @@ cluster-start: build
 	@echo "Cluster started. Use 'make cluster-stop' to shut down."
 
 cluster-stop:
-	@echo "Stopping gookvs cluster..."
+	@echo "Stopping gookv cluster..."
 	@for i in $$(seq 1 $(CLUSTER_NODES)); do \
 		PID_FILE=$(CLUSTER_DIR)/node$$i.pid; \
 		if [ -f $$PID_FILE ]; then \
@@ -69,9 +69,9 @@ cluster-verify:
 	@go run scripts/cluster-verify/main.go
 
 pd-cluster-start: build
-	@echo "Starting PD + $(CLUSTER_NODES)-node gookvs cluster..."
+	@echo "Starting PD + $(CLUSTER_NODES)-node gookv cluster..."
 	@mkdir -p $(PD_CLUSTER_DIR)/pd
-	@./gookvs-pd \
+	@./gookv-pd \
 		--addr $(PD_ADDR) \
 		--cluster-id 1 \
 		--data-dir $(PD_CLUSTER_DIR)/pd \
@@ -86,7 +86,7 @@ pd-cluster-start: build
 		PID_FILE=$(PD_CLUSTER_DIR)/node$$i.pid; \
 		LOG_FILE=$(PD_CLUSTER_DIR)/node$$i.log; \
 		mkdir -p $$DATA_DIR; \
-		./gookvs-server \
+		./gookv-server \
 			--store-id $$i \
 			--addr 127.0.0.1:$$GRPC_PORT \
 			--status-addr 127.0.0.1:$$STATUS_PORT \

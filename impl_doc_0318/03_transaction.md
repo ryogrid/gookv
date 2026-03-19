@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The gookvs transaction layer implements Percolator-style two-phase commit (2PC) with multi-version concurrency control (MVCC). The design stores multiple versions of each key across three column families -- CF_DEFAULT (large values), CF_LOCK (active transaction locks), and CF_WRITE (commit/rollback metadata) -- and uses timestamp-based visibility to provide snapshot isolation and read-committed isolation levels.
+The gookv transaction layer implements Percolator-style two-phase commit (2PC) with multi-version concurrency control (MVCC). The design stores multiple versions of each key across three column families -- CF_DEFAULT (large values), CF_LOCK (active transaction locks), and CF_WRITE (commit/rollback metadata) -- and uses timestamp-based visibility to provide snapshot isolation and read-committed isolation levels.
 
 The layer is organized into the following components:
 

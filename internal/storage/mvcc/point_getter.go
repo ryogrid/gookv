@@ -3,7 +3,7 @@ package mvcc
 import (
 	"errors"
 
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // IsolationLevel defines the transaction isolation level.

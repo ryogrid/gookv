@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ryogrid/gookvs/internal/pd"
-	"github.com/ryogrid/gookvs/pkg/pdclient"
+	"github.com/ryogrid/gookv/internal/pd"
+	"github.com/ryogrid/gookv/pkg/pdclient"
 )
 
 // startPDServer creates and starts a PD server on a random port, returning the server and its address.

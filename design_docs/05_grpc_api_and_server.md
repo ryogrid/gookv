@@ -1,8 +1,8 @@
 # gRPC API and Server
 
-This document specifies gookvs's gRPC server layer: all services and RPCs, request routing to internal subsystems, flow control and backpressure mechanisms, connection management, the HTTP status server, the PD client protocol, and inter-node Raft message transport.
+This document specifies gookv's gRPC server layer: all services and RPCs, request routing to internal subsystems, flow control and backpressure mechanisms, connection management, the HTTP status server, the PD client protocol, and inter-node Raft message transport.
 
-> **Reference**: [impl_docs/grpc_api_and_server.md](../impl_docs/grpc_api_and_server.md) — TiKV's Rust-based server layer that gookvs draws from.
+> **Reference**: [impl_docs/grpc_api_and_server.md](../impl_docs/grpc_api_and_server.md) — TiKV's Rust-based server layer that gookv draws from.
 
 **Cross-references**: [Architecture Overview](00_architecture_overview.md), [Raft and Replication](02_raft_and_replication.md), [Transaction and MVCC](03_transaction_and_mvcc.md), [Coprocessor](04_coprocessor.md)
 
@@ -10,7 +10,7 @@ This document specifies gookvs's gRPC server layer: all services and RPCs, reque
 
 ## 1. gRPC Services Overview
 
-gookvs exposes three gRPC services on a single `grpc.Server` instance, wire-compatible with TiKV's external API:
+gookv exposes three gRPC services on a single `grpc.Server` instance, wire-compatible with TiKV's external API:
 
 | Service | Package | Purpose |
 |---------|---------|---------|
@@ -22,7 +22,7 @@ All RPCs validate the cluster ID from request context before processing. Mismatc
 
 ```mermaid
 graph TB
-    subgraph "gookvs gRPC Server"
+    subgraph "gookv gRPC Server"
         GRPC["grpc.Server<br/>(grpc-go)"]
 
         subgraph "TikvService (~70 RPCs)"
@@ -53,7 +53,7 @@ The TikvService contains ~70 RPCs organized into categories. Three dispatch patt
 
 ### 2.1 Dispatch Patterns
 
-gookvs uses three dispatch helper functions (replacing TiKV's macro-based dispatch):
+gookv uses three dispatch helper functions (replacing TiKV's macro-based dispatch):
 
 | Dispatch Pattern | Go Implementation | Used By |
 |------------------|-------------------|---------|
@@ -61,7 +61,7 @@ gookvs uses three dispatch helper functions (replacing TiKV's macro-based dispat
 | **handleTxnCommand** | Converts gRPC request to `TypedCommand`, routes through `Storage.SchedTxnCommand()` | `KvPrewrite`, `KvCommit`, `KvCleanup`, etc. |
 | **handleBatchCmd** | Routes sub-commands within `BatchCommands` streaming RPC | All sub-request types |
 
-**Divergence from TiKV**: TiKV uses Rust macros (`handle_request!`, `txn_command_future!`, `handle_cmd!`) for dispatch code generation. gookvs uses regular Go helper functions with generics where appropriate, since Go lacks procedural macros.
+**Divergence from TiKV**: TiKV uses Rust macros (`handle_request!`, `txn_command_future!`, `handle_cmd!`) for dispatch code generation. gookv uses regular Go helper functions with generics where appropriate, since Go lacks procedural macros.
 
 ### 2.2 KV Transactional RPCs
 
@@ -144,7 +144,7 @@ Raw KV operations bypass the transaction layer, operating directly on the storag
 |-----|-------------|
 | `BatchCommands` | Multiplexed bidirectional stream carrying sub-requests |
 
-`BatchCommands` is the primary transport for TiDB→gookvs communication. It carries a stream of `BatchCommandsRequest` messages, each containing multiple sub-requests. A `ReqBatcher` aggregates compatible get/raw-get sub-requests to reduce per-request overhead.
+`BatchCommands` is the primary transport for TiDB→gookv communication. It carries a stream of `BatchCommandsRequest` messages, each containing multiple sub-requests. A `ReqBatcher` aggregates compatible get/raw-get sub-requests to reduce per-request overhead.
 
 ### 2.11 Cluster and Health RPCs
 
@@ -266,7 +266,7 @@ Coprocessor requests share the read pool with KV reads and undergo the same busy
 
 ## 4. Flow Control and Backpressure
 
-gookvs implements multi-layered overload protection, translating TiKV's mechanisms to Go-idiomatic patterns.
+gookv implements multi-layered overload protection, translating TiKV's mechanisms to Go-idiomatic patterns.
 
 ### 4.1 Read Pool Busy Threshold
 
@@ -506,7 +506,7 @@ Certificate hot-reload is implemented by periodically checking file modification
 
 ### 6.1 Interceptor Stack
 
-gookvs uses grpc-go's interceptor chain for cross-cutting concerns:
+gookv uses grpc-go's interceptor chain for cross-cutting concerns:
 
 ```go
 func buildServerOptions(cfg ServerConfig, sm *SecurityManager) []grpc.ServerOption {
@@ -562,9 +562,9 @@ func quotaLimiterInterceptor(ql *QuotaLimiter) grpc.UnaryServerInterceptor
 
 | Option | Pros | Cons | Recommendation |
 |--------|------|------|----------------|
-| **grpc-go native interceptors** | Built-in, zero dependency; `ChainUnaryInterceptor`/`ChainStreamInterceptor` support ordering; type-safe | Limited to unary/stream distinction; no per-method filtering without manual check | **Recommended** — sufficient for gookvs's needs |
-| **go-grpc-middleware (grpc-ecosystem)** | Rich library of pre-built interceptors (logging, recovery, auth, retry); `selector` for per-method filtering; community maintained | External dependency; some interceptors may not match gookvs's exact needs | Good for rapid prototyping; consider for logging/recovery interceptors |
-| **connect-go interceptors** | Unified HTTP + gRPC middleware; simpler API; works with standard `net/http` middleware | Requires connect-go framework; not wire-compatible with grpc-go services without adapter | Not recommended — gookvs uses grpc-go |
+| **grpc-go native interceptors** | Built-in, zero dependency; `ChainUnaryInterceptor`/`ChainStreamInterceptor` support ordering; type-safe | Limited to unary/stream distinction; no per-method filtering without manual check | **Recommended** — sufficient for gookv's needs |
+| **go-grpc-middleware (grpc-ecosystem)** | Rich library of pre-built interceptors (logging, recovery, auth, retry); `selector` for per-method filtering; community maintained | External dependency; some interceptors may not match gookv's exact needs | Good for rapid prototyping; consider for logging/recovery interceptors |
+| **connect-go interceptors** | Unified HTTP + gRPC middleware; simpler API; works with standard `net/http` middleware | Requires connect-go framework; not wire-compatible with grpc-go services without adapter | Not recommended — gookv uses grpc-go |
 
 **Decision**: Use **grpc-go native interceptors** for core concerns (cluster ID, metrics, quota). Optionally adopt **go-grpc-middleware** for recovery (panic handling) and structured logging interceptors to avoid reimplementing well-solved patterns.
 
@@ -572,7 +572,7 @@ func quotaLimiterInterceptor(ql *QuotaLimiter) grpc.UnaryServerInterceptor
 
 ## 7. Status Server (HTTP)
 
-gookvs runs a separate HTTP server alongside gRPC for metrics, profiling, and administration:
+gookv runs a separate HTTP server alongside gRPC for metrics, profiling, and administration:
 
 ```go
 // StatusServer provides HTTP endpoints for observability and admin.
@@ -584,7 +584,7 @@ type StatusServer struct {
 }
 ```
 
-**Divergence from TiKV**: TiKV uses Hyper (Rust HTTP). gookvs uses Go's `net/http` stdlib, which is simpler and sufficient. Default listen address: `:10080`.
+**Divergence from TiKV**: TiKV uses Hyper (Rust HTTP). gookv uses Go's `net/http` stdlib, which is simpler and sufficient. Default listen address: `:10080`.
 
 ### 7.1 Key Endpoints
 
@@ -888,7 +888,7 @@ type PDConfig struct {
 
 ## 11. Design Divergences from TiKV
 
-| Aspect | TiKV (Rust) | gookvs (Go) | Rationale |
+| Aspect | TiKV (Rust) | gookv (Go) | Rationale |
 |--------|-------------|-------------|-----------|
 | **Dispatch macros** | `handle_request!`, `txn_command_future!`, `handle_cmd!` Rust macros | `handleReadRequest()`, `handleTxnCommand()`, `handleBatchCmd()` helper functions | Go lacks procedural macros; functions with generics suffice |
 | **gRPC framework** | grpcio (C-core wrapper) | grpc-go (pure Go) | Wire-compatible; grpc-go is the standard Go gRPC implementation |

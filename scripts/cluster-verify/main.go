@@ -1,4 +1,4 @@
-// cluster-verify.go verifies cross-node data replication in a running gookvs cluster.
+// cluster-verify.go verifies cross-node data replication in a running gookv cluster.
 // Usage: go run scripts/cluster-verify.go
 //
 // It writes data to the leader node and reads it back from a different node
@@ -36,7 +36,7 @@ var statusAddrs = []string{
 }
 
 func main() {
-	fmt.Println("=== gookvs Cluster Verification ===")
+	fmt.Println("=== gookv Cluster Verification ===")
 	fmt.Println()
 
 	// Step 1: Health check all nodes.

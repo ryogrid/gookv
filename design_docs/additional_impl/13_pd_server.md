@@ -1,8 +1,8 @@
-# 13 PD Server: Embedded Placement Driver for gookvs
+# 13 PD Server: Embedded Placement Driver for gookv
 
 ## 1. Overview
 
-gookvs currently depends on an external PD server (the same PD used by TiKV/TiDB) for cluster coordination. This document designs a self-contained PD server implementation that can run either as a **separate binary** (`cmd/gookvs-pd/main.go`) or in **embedded mode** within `gookvs-server`. The PD server is the cluster brain responsible for:
+gookv currently depends on an external PD server (the same PD used by TiKV/TiDB) for cluster coordination. This document designs a self-contained PD server implementation that can run either as a **separate binary** (`cmd/gookv-pd/main.go`) or in **embedded mode** within `gookv-server`. The PD server is the cluster brain responsible for:
 
 - **TSO (Timestamp Oracle)**: globally unique, monotonically increasing timestamps for MVCC transactions
 - **Cluster metadata storage**: store and region registries with persistence
@@ -76,13 +76,13 @@ In the TiDB ecosystem, PD is a separate Go project (`github.com/tikv/pd`) that:
 - Runs scheduling algorithms that analyze heartbeat data and generate operators (AddPeer, TransferLeader, etc.).
 - Provides a TSO service that allocates timestamps using `physical (wall clock ms) << 18 | logical (counter)`.
 
-### 2.3 Simplifications for gookvs
+### 2.3 Simplifications for gookv
 
-gookvs does not need the full complexity of TiDB PD. Key simplifications:
+gookv does not need the full complexity of TiDB PD. Key simplifications:
 
-| TiDB PD | gookvs PD |
+| TiDB PD | gookv PD |
 |---|---|
-| etcd-based 3/5-node HA | Single-node PD (sufficient for gookvs scope) |
+| etcd-based 3/5-node HA | Single-node PD (sufficient for gookv scope) |
 | etcd key-value metadata store | Embedded Pebble (already a dependency) for persistence |
 | Complex scheduling with 20+ scheduler types | Simple balancing: region count balance + split coordination |
 | Dashboard, TSO microservice, keyspace management | None |
@@ -105,7 +105,7 @@ internal/pd/
     gc.go              -- GC safe point management
     config.go          -- PDServerConfig
 
-cmd/gookvs-pd/
+cmd/gookv-pd/
     main.go            -- Standalone PD binary entry point
 ```
 
@@ -356,7 +356,7 @@ Simple manager that tracks the global GC safe point. `UpdateGCSafePoint` only mo
 
 ```mermaid
 sequenceDiagram
-    participant Client as gookvs-server<br/>(pdclient)
+    participant Client as gookv-server<br/>(pdclient)
     participant GRPC as gRPC Stream
     participant TSO as TSOAllocator
     participant Disk as Pebble<br/>(pd/tso/max_physical)
@@ -385,7 +385,7 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant Store as gookvs-server
+    participant Store as gookv-server
     participant PD as PD Server
     participant Meta as MetadataStore
     participant Disk as Pebble
@@ -572,7 +572,7 @@ classDiagram
 
 ### 6.1 GetMembers
 
-Returns the PD server's identity so clients can discover the cluster ID. Since gookvs PD runs as a single node, the response contains one member.
+Returns the PD server's identity so clients can discover the cluster ID. Since gookv PD runs as a single node, the response contains one member.
 
 ```go
 func (s *PDServer) GetMembers(ctx context.Context, req *pdpb.GetMembersRequest) (*pdpb.GetMembersResponse, error) {
@@ -776,7 +776,7 @@ Region heartbeats carry a `RegionEpoch` (conf_ver + version). The heartbeat proc
 3. **`internal/pd/id_alloc.go`**: Implement `IDAllocator` with batch pre-allocation and persistence.
 4. **`internal/pd/tso.go`**: Implement `TSOAllocator` with persistence, clock backward protection, and background physical clock advancement.
 5. **`internal/pd/server.go`**: Implement `PDServer` with gRPC registration and lifecycle. Implement `GetMembers`, `Tso`, `Bootstrap`, `IsBootstrapped`, `AllocID`, `GetStore`, `PutStore`, `GetRegion`, `GetRegionByID`.
-6. **`cmd/gookvs-pd/main.go`**: Standalone binary with flags: `--listen-addr`, `--data-dir`, `--cluster-id`.
+6. **`cmd/gookv-pd/main.go`**: Standalone binary with flags: `--listen-addr`, `--data-dir`, `--cluster-id`.
 7. **Tests**: Unit tests for each component + integration test connecting `grpcClient` to the server.
 
 ### Phase 2: Heartbeats and Scheduling (P0)
@@ -793,9 +793,9 @@ Region heartbeats carry a `RegionEpoch` (conf_ver + version). The heartbeat proc
 14. **RPC handlers**: Implement `GetGCSafePoint`, `UpdateGCSafePoint`, `GetAllStores`.
 15. **Tests**: Split flow end-to-end, GC safe point.
 
-### Phase 4: Integration with gookvs-server (P0)
+### Phase 4: Integration with gookv-server (P0)
 
-16. **Embedded mode**: Add `--embedded-pd` flag to `cmd/gookvs-server/main.go` that starts a PD server in-process.
+16. **Embedded mode**: Add `--embedded-pd` flag to `cmd/gookv-server/main.go` that starts a PD server in-process.
 17. **Wire PD client**: Instantiate `pdclient.Client` in `main.go` using `--pd-endpoints`, replacing the static `--initial-cluster` approach.
 18. **Heartbeat loops**: Wire `StoreHeartbeat` and `ReportRegionHeartbeat` calls from the store coordinator.
 19. **Store address resolver**: Implement `PDStoreAddrResolver` that calls `PD.GetStore` to resolve store IDs to addresses.
@@ -827,18 +827,18 @@ The `RegionTree` can be implemented with a sorted slice of regions and binary se
 
 ## 11. Embedded Mode vs. Standalone Mode
 
-### Standalone Mode (`cmd/gookvs-pd/main.go`)
+### Standalone Mode (`cmd/gookv-pd/main.go`)
 
 - PD runs as a separate process.
-- Multiple gookvs-server instances connect to it via `--pd-endpoints`.
+- Multiple gookv-server instances connect to it via `--pd-endpoints`.
 - Matches the TiKV production deployment model.
 - Suitable for multi-node clusters.
 
-### Embedded Mode (`--embedded-pd` flag in gookvs-server)
+### Embedded Mode (`--embedded-pd` flag in gookv-server)
 
-- PD runs inside the gookvs-server process on a separate goroutine and port.
+- PD runs inside the gookv-server process on a separate goroutine and port.
 - Simplifies single-node development and testing.
-- The gookvs-server creates a `pdclient.Client` pointing to `localhost:{embedded-pd-port}`.
+- The gookv-server creates a `pdclient.Client` pointing to `localhost:{embedded-pd-port}`.
 - Useful for integration tests and local development.
 
 Both modes use the same `internal/pd` package; only the startup path differs.

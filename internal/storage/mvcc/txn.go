@@ -1,8 +1,8 @@
 package mvcc
 
 import (
-	"github.com/ryogrid/gookvs/pkg/cfnames"
-	"github.com/ryogrid/gookvs/pkg/txntypes"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
 // ModifyType represents the type of a CF modification.

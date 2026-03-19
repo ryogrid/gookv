@@ -242,7 +242,7 @@ stateDiagram-v2
 
 ## 5. Raftstore Integration Context
 
-The primary consumer of save points in gookvs will be the raftstore apply loop. The pattern mirrors TiKV's raftstore-v2:
+The primary consumer of save points in gookv will be the raftstore apply loop. The pattern mirrors TiKV's raftstore-v2:
 
 ```
 for each raft entry in committed_entries:

@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-This document covers three improvements to the `gookvs-ctl` admin CLI (`cmd/gookvs-ctl/main.go`):
+This document covers three improvements to the `gookv-ctl` admin CLI (`cmd/gookv-ctl/main.go`):
 
 1. **`region` command**: Implement the currently-listed-but-missing region metadata inspection command.
 2. **`dump` command enhancement**: Add MVCC key decoding and Write/Lock record parsing to the existing raw hex dump.
@@ -38,7 +38,7 @@ The value is a protobuf-encoded `RegionLocalState` message containing:
 
 ```
 Usage:
-  gookvs-ctl region [options]
+  gookv-ctl region [options]
 
 Flags:
   --db <path>      Path to data directory (required)
@@ -145,7 +145,7 @@ Transform the raw hex dump into a structured output that decodes MVCC keys, Writ
 
 ```
 Usage:
-  gookvs-ctl dump [options]
+  gookv-ctl dump [options]
 
 Flags:
   --db <path>      Path to data directory (required)
@@ -251,7 +251,7 @@ Pebble v1.1.x provides `db.Compact(start, end []byte, parallelize bool) error` w
 
 ```
 Usage:
-  gookvs-ctl compact [options]
+  gookv-ctl compact [options]
 
 Flags:
   --db <path>      Path to data directory (required)
@@ -400,10 +400,10 @@ case "region":
 ### 5.2 Updated Usage String
 
 ```go
-const usage = `gookvs-ctl - Admin CLI for gookvs
+const usage = `gookv-ctl - Admin CLI for gookv
 
 Usage:
-  gookvs-ctl <command> [options]
+  gookv-ctl <command> [options]
 
 Commands:
   scan        Scan keys in a column family
@@ -424,7 +424,7 @@ Global Options:
 
 ```mermaid
 graph LR
-    subgraph "gookvs-ctl Commands"
+    subgraph "gookv-ctl Commands"
         scan[scan]
         get[get]
         mvcc[mvcc]
@@ -476,7 +476,7 @@ graph LR
 
 | File | Changes |
 |------|---------|
-| `cmd/gookvs-ctl/main.go` | Add `cmdRegion()` function; update `main()` and `RunCommand()` switch; enhance `cmdDump()` with `--decode` flag; rewrite `cmdCompact()` with real compaction; add `openDBRocks()` helper |
+| `cmd/gookv-ctl/main.go` | Add `cmdRegion()` function; update `main()` and `RunCommand()` switch; enhance `cmdDump()` with `--decode` flag; rewrite `cmdCompact()` with real compaction; add `openDBRocks()` helper |
 | `internal/engine/rocks/engine.go` | Add `Compact()`, `CompactCF()`, `CompactAll()` methods on `Engine` |
 | `pkg/keys/keys.go` | No changes needed (key construction/parsing functions already exist) |
 | `internal/storage/mvcc/key.go` | No changes needed (DecodeKey, DecodeLockKey already exist) |

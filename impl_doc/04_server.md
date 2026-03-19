@@ -32,7 +32,9 @@ type Server struct {
     cfg         ServerConfig
     grpcServer  *grpc.Server
     storage     *Storage
+    rawStorage  *RawStorage           // raw KV operations (bypasses MVCC)
     coordinator *StoreCoordinator
+    gcWorker    *gc.GCWorker          // background GC of old MVCC versions
     listener    net.Listener
     ctx         context.Context
     cancel      context.CancelFunc
@@ -91,6 +93,12 @@ type Storage struct {
 | `BatchRollback(keys, startTS)` | Rollback locks |
 | `Cleanup(key, startTS)` | Single-key lock cleanup |
 | `CheckTxnStatus(primaryKey, startTS)` | Transaction status inquiry |
+| `PessimisticLock(keys, primary, startTS, forUpdateTS, lockTTL)` | Acquire pessimistic locks; returns errors per key |
+| `PessimisticLockModifies(keys, primary, startTS, forUpdateTS, lockTTL)` | Returns `[]mvcc.Modify` and errors per key (for Raft proposal) |
+| `PessimisticRollbackKeys(keys, startTS, forUpdateTS)` | Release pessimistic locks; returns errors per key |
+| `TxnHeartBeat(primaryKey, startTS, adviseLockTTL)` | Refresh lock TTL; returns updated TTL |
+| `ResolveLock(startTS, commitTS, keys)` | Commit or rollback all locks for a transaction |
+| `ResolveLockModifies(startTS, commitTS, keys)` | Returns `[]mvcc.Modify` for resolve (for Raft proposal) |
 | `ApplyModifies(modifies)` | Write `[]mvcc.Modify` to engine atomically |
 
 ### 2.4 StoreCoordinator (`internal/server/coordinator.go`)
@@ -154,12 +162,12 @@ The `Tikv` service declares the full TiKV-compatible API. Below is the implement
 | `KvBatchRollback` | `BatchRollbackRequest` / `BatchRollbackResponse` | Yes |
 | `KvCleanup` | `CleanupRequest` / `CleanupResponse` | Yes |
 | `KvCheckTxnStatus` | `CheckTxnStatusRequest` / `CheckTxnStatusResponse` | Yes |
-| `KvPessimisticLock` | `PessimisticLockRequest` / `PessimisticLockResponse` | No (unimplemented stub) |
-| `KVPessimisticRollback` | `PessimisticRollbackRequest` / `PessimisticRollbackResponse` | No (unimplemented stub) |
-| `KvTxnHeartBeat` | `TxnHeartBeatRequest` / `TxnHeartBeatResponse` | No (unimplemented stub) |
+| `KvPessimisticLock` | `PessimisticLockRequest` / `PessimisticLockResponse` | Yes (dual-mode: cluster proposes via Raft, standalone applies locally) |
+| `KVPessimisticRollback` | `PessimisticRollbackRequest` / `PessimisticRollbackResponse` | Yes |
+| `KvTxnHeartBeat` | `TxnHeartBeatRequest` / `TxnHeartBeatResponse` | Yes |
 | `KvCheckSecondaryLocks` | `CheckSecondaryLocksRequest` / `CheckSecondaryLocksResponse` | No (unimplemented stub) |
 | `KvScanLock` | `ScanLockRequest` / `ScanLockResponse` | No (unimplemented stub) |
-| `KvResolveLock` | `ResolveLockRequest` / `ResolveLockResponse` | No (unimplemented stub) |
+| `KvResolveLock` | `ResolveLockRequest` / `ResolveLockResponse` | Yes (dual-mode: cluster proposes via Raft, standalone applies locally) |
 | `KvGC` | `GCRequest` / `GCResponse` | No (unimplemented stub) |
 | `KvDeleteRange` | `DeleteRangeRequest` / `DeleteRangeResponse` | No (unimplemented stub) |
 
@@ -167,11 +175,14 @@ The `Tikv` service declares the full TiKV-compatible API. Below is the implement
 
 | RPC | Implemented |
 |---|---|
-| `RawGet`, `RawPut`, `RawDelete`, `RawScan` | No (unimplemented stubs) |
-| `RawBatchGet`, `RawBatchPut`, `RawBatchDelete` | No (unimplemented stubs) |
+| `RawGet`, `RawPut`, `RawDelete`, `RawScan` | Yes |
+| `RawBatchGet`, `RawBatchPut`, `RawBatchDelete` | Yes |
+| `RawDeleteRange` | Yes |
 | `RawBatchScan`, `RawGetKeyTTL`, `RawCompareAndSwap`, `RawChecksum` | No (unimplemented stubs) |
 
-All Raw RPCs fall through to the `UnimplementedTikvServer` default, which returns an `Unimplemented` gRPC status.
+All implemented Raw RPCs delegate to the `RawStorage` layer (see Section 5.6). Single-key operations (`RawGet`, `RawPut`, `RawDelete`, `RawScan`) and batch operations (`RawBatchGet`, `RawBatchPut`, `RawBatchDelete`) follow the same pattern: the handler extracts key/value/CF parameters from the request and calls the corresponding `RawStorage` method. `RawDeleteRange` deletes all keys in a given range.
+
+Write operations (`RawPut`, `RawDelete`, `RawBatchPut`, `RawBatchDelete`, `RawDeleteRange`) support the dual-mode pattern: in cluster mode the handler obtains `[]engine.Modify` from `RawStorage` (via `PutModify`/`DeleteModify`) and proposes them through Raft; in standalone mode the writes are applied directly.
 
 ### 3.3 Raft RPCs
 
@@ -197,7 +208,9 @@ All Raw RPCs fall through to the `UnimplementedTikvServer` default, which return
 | `ReadIndex` | No |
 | `MvccGetByKey` | No |
 | `MvccGetByStartTs` | No |
-| `Coprocessor`, `CoprocessorStream`, `BatchCoprocessor` | No |
+| `Coprocessor` | Yes (delegates to `coprocessor.Endpoint.Handle`) |
+| `CoprocessorStream` | Yes (streaming variant with callback) |
+| `BatchCoprocessor` | No |
 
 ---
 
@@ -287,6 +300,46 @@ Does not acquire latches (read-only on lock state). Creates a snapshot and reade
 - Locked (with lock info including TTL, primary, startTS).
 - Committed (with commitTS).
 - Rolled back (both LockTtl and CommitVersion are zero).
+
+### 5.5 Pessimistic Lock and Resolve Lock Methods
+
+The following methods follow the same latch-acquire / snapshot / MvccTxn pattern as `Prewrite` and `Commit`:
+
+- **PessimisticLock** -- acquires pessimistic locks for the given keys. Creates an `MvccTxn` at `startTS`, calls `txn.PessimisticLock` for each key with `forUpdateTS` and `lockTTL`, then applies the resulting modifications directly.
+- **PessimisticLockModifies** -- same logic but returns `[]mvcc.Modify` without writing, for use with `ProposeModifies` in cluster mode.
+- **PessimisticRollbackKeys** -- releases pessimistic locks for the given keys at `(startTS, forUpdateTS)`. Applies directly.
+- **TxnHeartBeat** -- refreshes the TTL of the lock on `primaryKey` at `startTS` to at least `adviseLockTTL`. Returns the resulting TTL. Does not use latches.
+- **ResolveLock** -- commits or rolls back all locks belonging to a transaction (`startTS`). If `commitTS > 0` the locks are committed; otherwise they are rolled back. Applies directly.
+- **ResolveLockModifies** -- same logic but returns `[]mvcc.Modify` for Raft proposal.
+
+### 5.6 RawStorage (`internal/server/raw_storage.go`)
+
+`RawStorage` provides non-transactional key-value operations that bypass the MVCC layer entirely.
+
+```go
+type RawStorage struct {
+    engine traits.KvEngine
+}
+```
+
+**CF resolution**: an empty column-family string is mapped to `CF_DEFAULT`.
+
+**Methods**:
+
+| Method | Description |
+|---|---|
+| `Get(cf, key)` | Point read from the specified column family |
+| `Put(cf, key, value)` | Write a key-value pair directly to the engine |
+| `Delete(cf, key)` | Delete a single key |
+| `BatchGet(cf, keys)` | Multi-key read; returns values indexed by key |
+| `BatchPut(cf, pairs)` | Multi-key write via `WriteBatch` |
+| `BatchDelete(cf, keys)` | Multi-key delete via `WriteBatch` |
+| `Scan(cf, startKey, endKey, limit)` | Range scan returning key-value pairs |
+| `DeleteRange(cf, startKey, endKey)` | Delete all keys in a range via `WriteBatch` |
+| `PutModify(cf, key, value)` | Returns an `engine.Modify` (Put) for use with Raft proposals |
+| `DeleteModify(cf, key)` | Returns an `engine.Modify` (Delete) for use with Raft proposals |
+
+`PutModify` and `DeleteModify` do not write to the engine themselves. They return `engine.Modify` structs that the gRPC handler collects and passes to `coordinator.ProposeModifies` in cluster mode.
 
 ---
 
@@ -511,7 +564,9 @@ classDiagram
         -cfg ServerConfig
         -grpcServer *grpc.Server
         -storage *Storage
+        -rawStorage *RawStorage
         -coordinator *StoreCoordinator
+        -gcWorker *gc.GCWorker
         -listener net.Listener
         -ctx context.Context
         -cancel context.CancelFunc
@@ -533,6 +588,20 @@ classDiagram
         +KvBatchRollback(ctx, req) resp, err
         +KvCleanup(ctx, req) resp, err
         +KvCheckTxnStatus(ctx, req) resp, err
+        +KvPessimisticLock(ctx, req) resp, err
+        +KVPessimisticRollback(ctx, req) resp, err
+        +KvTxnHeartBeat(ctx, req) resp, err
+        +KvResolveLock(ctx, req) resp, err
+        +RawGet(ctx, req) resp, err
+        +RawPut(ctx, req) resp, err
+        +RawDelete(ctx, req) resp, err
+        +RawScan(ctx, req) resp, err
+        +RawBatchGet(ctx, req) resp, err
+        +RawBatchPut(ctx, req) resp, err
+        +RawBatchDelete(ctx, req) resp, err
+        +RawDeleteRange(ctx, req) resp, err
+        +Coprocessor(ctx, req) resp, err
+        +CoprocessorStream(req, stream) error
         +BatchCommands(stream) error
         +Raft(stream) error
         +BatchRaft(stream) error
@@ -553,7 +622,27 @@ classDiagram
         +BatchRollback(keys, startTS) err
         +Cleanup(key, startTS) commitTS, err
         +CheckTxnStatus(key, startTS) status, err
+        +PessimisticLock(keys, ...) errs
+        +PessimisticLockModifies(keys, ...) modifies, errs
+        +PessimisticRollbackKeys(keys, ...) errs
+        +TxnHeartBeat(key, startTS, ttl) ttl, err
+        +ResolveLock(startTS, commitTS, keys) err
+        +ResolveLockModifies(startTS, commitTS, keys) modifies, err
         +ApplyModifies(modifies) err
+    }
+
+    class RawStorage {
+        -engine traits.KvEngine
+        +Get(cf, key) value, err
+        +Put(cf, key, value) err
+        +Delete(cf, key) err
+        +BatchGet(cf, keys) map, err
+        +BatchPut(cf, pairs) err
+        +BatchDelete(cf, keys) err
+        +Scan(cf, start, end, limit) pairs, err
+        +DeleteRange(cf, start, end) err
+        +PutModify(cf, key, value) Modify
+        +DeleteModify(cf, key) Modify
     }
 
     class StoreCoordinator {
@@ -583,8 +672,10 @@ classDiagram
 
     Server "1" *-- "1" tikvService : registers
     Server "1" *-- "1" Storage : owns
+    Server "1" *-- "1" RawStorage : owns
     Server "1" o-- "0..1" StoreCoordinator : optional
     tikvService --> Server : back-pointer
+    tikvService --> RawStorage : raw KV ops
     StoreCoordinator --> Storage : calls ApplyModifies
     StoreCoordinator --> RaftClient : sends Raft messages
     StoreCoordinator --> "router.Router" : dispatches peer messages

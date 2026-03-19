@@ -142,8 +142,13 @@ This command inspects the multi-version concurrency control state for a single u
 | `--db` | string | (required) | Path to data directory |
 | `--cf` | string | `"default"` | Column family name |
 | `--limit` | int | `50` | Maximum entries to dump |
+| `--decode` | bool | `false` | Decode MVCC keys and values |
 
 Iterates from the beginning of the specified column family and prints each key-value pair as tab-separated hex strings. Useful for low-level debugging.
+
+When `--decode` is set, the output includes decoded MVCC information:
+- **Write CF** (`dumpWriteCF`): Decodes user key, commit timestamp, write type (Put/Delete/Lock/Rollback), and start timestamp from each entry.
+- **Lock CF** (`dumpLockCF`): Decodes user key and lock details (type, primary key, start timestamp, TTL) from each entry.
 
 #### 3.3.5 `size` -- Approximate data size per column family
 
@@ -167,7 +172,17 @@ Calls `eng.SyncWAL()` on the opened engine. Despite its name, this does **not** 
 
 #### 3.3.7 `region` -- Region metadata inspection
 
-Listed in the usage text but **not implemented**. The switch statement in `main()` does not have a `"region"` case, so invoking it falls through to the "Unknown command" error path.
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--db` | string | (required) | Path to data directory |
+| `--id` | uint64 | `0` | Look up a specific region by ID |
+| `--all` | bool | `false` | List all regions |
+| `--limit` | int | `100` | Maximum number of regions to display |
+
+Reads region metadata from the `CF_RAFT` column family:
+- **`--id <N>`**: Looks up the region state key (`keys.RegionStateKey(N)`) and prints the region's metadata (ID, start key, end key, peers, epoch).
+- **`--all`**: Iterates all keys in `CF_RAFT`, filters for region state keys using `isRegionStateKey()`, and prints each region's metadata via `printRegionState()`. Stops after `--limit` regions.
+- With no flags, prints usage information.
 
 ### 3.4 Utility Functions
 
@@ -278,5 +293,6 @@ flowchart TD
 | CLI: `dump` | Implemented | Raw hex key-value dump |
 | CLI: `size` | Implemented | Per-CF key count and byte size |
 | CLI: `compact` | Partial | Only calls `SyncWAL()`; does not trigger actual LSM compaction |
-| CLI: `region` | Not implemented | Listed in usage text but has no handler; falls through to error |
+| CLI: `region` | Implemented | Region metadata inspection with `--id`, `--all`, `--limit` flags |
+| CLI: `dump --decode` | Implemented | MVCC key/value decoding for write and lock CFs |
 | PD client library | Implemented | Full gRPC client + mock for testing |

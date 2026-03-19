@@ -286,18 +286,26 @@ Wraps `*pebble.Snapshot`. `Get` follows the same pattern as `Engine.Get` (prefix
 
 ```go
 type writeBatch struct {
+    db         *pebble.DB            // needed for NewBatch() during rollback
     batch      *pebble.Batch
     count      int
     dataSize   int
-    savePoints []int
+    savePoints []savePointState
     mu         sync.Mutex
+}
+
+type savePointState struct {
+    repr     []byte  // serialized batch state via Batch.Repr()
+    count    int     // operation count at save point
+    dataSize int     // data size at save point
 }
 ```
 
 - All mutation methods (`Put`, `Delete`, `DeleteRange`) acquire `mu`, delegate to the underlying `pebble.Batch` with prefixed keys, and increment `count` / `dataSize`.
 - `Clear()` calls `batch.Reset()` and zeroes the counters.
-- `SetSavePoint()` pushes the current `count` onto the `savePoints` slice.
-- **`RollbackToSavePoint()` limitation**: Pebble batches do not support native save-point rollback. The current implementation merely pops the last save point from the slice and returns `nil`. It does **not** undo any operations added since the save point was set. This is a known limitation documented in the source.
+- `SetSavePoint()` captures the current batch state by calling `batch.Repr()` to serialize the batch contents, along with `count` and `dataSize`, into a `savePointState` pushed onto the `savePoints` slice.
+- `RollbackToSavePoint()` restores the batch to the last save point: it pops the `savePointState`, creates a new `pebble.Batch` via `db.NewBatch()`, calls `newBatch.SetRepr(sp.repr)` to restore the serialized state, closes the old batch, and restores `count`/`dataSize`. This provides true rollback semantics.
+- `PopSavePoint()` discards the last save point without rolling back — used when the caller decides to keep the operations added since the save point.
 - `Commit()` calls `batch.Commit(pebble.Sync)` for durable, synchronous application of all buffered mutations.
 
 ### 3.5 Iterator Implementation
@@ -465,12 +473,6 @@ All individual mutations in the batch are applied atomically. The commit is sync
 | `Iterator.SeekForPrev` | Workaround using `SeekGE` + `Prev` to emulate "last key <= target" |
 | `GetProperty` | Returns Pebble metrics as a formatted string |
 | `Close` | Delegates to `pebble.DB.Close()` |
-
-### Limited / Non-Functional
-
-| Method | Status | Reason |
-|--------|--------|--------|
-| `WriteBatch.RollbackToSavePoint` | **Non-functional** | Pebble batches do not support native save-point rollback. The implementation pops the save point from the stack but does not undo any operations added since the save point was set. |
 
 ### Notable Implementation Details
 

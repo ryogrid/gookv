@@ -19,6 +19,12 @@ Source files:
 | `internal/raftstore/msg.go` | Message/tick/result type definitions and constants |
 | `internal/raftstore/router/router.go` | sync.Map-based message routing |
 | `internal/raftstore/convert.go` | eraftpb <-> raftpb protobuf conversion |
+| `internal/raftstore/snapshot.go` | Snapshot generation, serialization, transfer, and application; `SnapWorker` background processing |
+| `internal/raftstore/split/checker.go` | Region split checking (`SplitCheckWorker`) and execution (`ExecBatchSplit`) |
+| `internal/raftstore/raftlog_gc.go` | Raft log compaction: `execCompactLog`, `RaftLogGCWorker` background deletion |
+| `internal/raftstore/conf_change.go` | Conf change processing (`applyConfChangeEntry`, `processConfChange`, `ProposeConfChange`) |
+| `internal/raftstore/merge.go` | Region merge: `ExecPrepareMerge`, `ExecCommitMerge`, `ExecRollbackMerge` |
+| `internal/raftstore/store_worker.go` | Region data cleanup (`CleanupRegionData`) |
 
 ---
 
@@ -45,13 +51,18 @@ type Peer struct {
     applyFunc        func(regionID uint64, entries []raftpb.Entry)  // committed entry application
     pendingProposals map[uint64]func([]byte, error)  // index -> callback
 
+    raftLogSizeHint  uint64                         // estimated Raft log size for GC decisions
+    lastCompactedIdx uint64                         // last index sent to RaftLogGCWorker
+    logGCWorkerCh    chan<- RaftLogGCTask            // sends GC tasks to RaftLogGCWorker
+    pdTaskCh         chan<- interface{}              // sends RegionHeartbeatInfo to PDWorker
+
     stopped          atomic.Bool
     isLeader         atomic.Bool
     initialized      bool
 }
 ```
 
-`Peer` is the central type. It owns the Raft state machine (`rawNode`), persistent storage (`storage`), and the mailbox channel. Two injectable function fields — `sendFunc` and `applyFunc` — decouple the peer from transport and state-machine concerns.
+`Peer` is the central type. It owns the Raft state machine (`rawNode`), persistent storage (`storage`), and the mailbox channel. Two injectable function fields — `sendFunc` and `applyFunc` — decouple the peer from transport and state-machine concerns. The `raftLogSizeHint` and `lastCompactedIdx` fields track Raft log growth for compaction decisions. The `logGCWorkerCh` and `pdTaskCh` channels connect the peer to background workers for log GC and PD heartbeat reporting, respectively.
 
 ### 2.2 PeerConfig
 
@@ -64,6 +75,10 @@ type PeerConfig struct {
     MaxSizePerMsg            uint64         // default: 1 MiB
     PreVote                  bool           // default: true
     MailboxCapacity          int            // default: 256
+    RaftLogGCTickInterval    time.Duration  // default: 10s
+    RaftLogGCCountLimit      uint64         // default: 72000
+    RaftLogGCSizeLimit       uint64         // default: 72 MiB
+    RaftLogGCThreshold       uint64         // default: 50
 }
 ```
 
@@ -124,6 +139,10 @@ classDiagram
         -sendFunc func([]raftpb.Message)
         -applyFunc func(uint64, []raftpb.Entry)
         -pendingProposals map[uint64]func
+        -raftLogSizeHint uint64
+        -lastCompactedIdx uint64
+        -logGCWorkerCh chan RaftLogGCTask
+        -pdTaskCh chan interface{}
         -stopped atomic.Bool
         -isLeader atomic.Bool
         -initialized bool
@@ -131,10 +150,16 @@ classDiagram
         +Propose(data []byte) error
         +Campaign() error
         +Status() raft.Status
+        +SetPDTaskCh(ch chan interface{})
+        +SetLogGCWorkerCh(ch chan RaftLogGCTask)
         -handleMessage(msg PeerMsg)
         -propose(cmd *RaftCommand)
         -handleReady()
         -onApplyResult(result *ApplyResult)
+        -onRaftLogGCTick()
+        -onReadyCompactLog(compactIdx, compactTerm uint64)
+        -scheduleRaftLogGC(compactIdx uint64)
+        -sendRegionHeartbeatToPD()
     }
 
     class PeerStorage {
@@ -237,7 +262,7 @@ The loop is straightforward: every event (tick, message, or context cancellation
 | `RaftMessage` | Unwrap `*raftpb.Message`, call `rawNode.Step()` |
 | `RaftCommand` | Unwrap `*RaftCommand`, call `propose()` |
 | `Tick` | Call `rawNode.Tick()` (additional tick beyond the timer) |
-| `ApplyResult` | Unwrap `*ApplyResult`, call `onApplyResult()` |
+| `ApplyResult` | Unwrap `*ApplyResult`, call `onApplyResult()` which processes `ExecResultTypeCompactLog` via `onReadyCompactLog()` and invokes pending proposal callbacks |
 | `Destroy` | Set `stopped = true`, close the Mailbox channel |
 | Others | Silently ignored |
 
@@ -247,7 +272,7 @@ This is the core Raft integration point. It runs after every event in the loop:
 
 1. **Guard**: `rawNode.HasReady()` — return early if nothing to do.
 2. **Get Ready**: `rd := rawNode.Ready()` — a batch of state changes.
-3. **Update leader**: If `rd.SoftState` is non-nil, update `isLeader` based on whether `SoftState.Lead == peerID`.
+3. **Update leader**: If `rd.SoftState` is non-nil, update `isLeader` based on whether `SoftState.Lead == peerID`. If this peer transitions from non-leader to leader, `sendRegionHeartbeatToPD()` is called to notify PD of the leadership change.
 4. **Persist**: `storage.SaveReady(rd)` — write hard state and new entries to `CF_RAFT` via a `WriteBatch`.
 5. **Send messages**: If `sendFunc` is set and `rd.Messages` is non-empty, deliver outbound Raft messages.
 6. **Apply committed entries**:
@@ -490,33 +515,174 @@ sequenceDiagram
 
 ---
 
-## 8. Snapshot and Split (Stub Status)
+## 8. Snapshot, Split, and Other Subsystems
 
 ### 8.1 Snapshots
 
-There are **no `internal/raftstore/snap/` files**. Snapshot support exists only as a stub in `PeerStorage.Snapshot()`:
+Source: `internal/raftstore/snapshot.go`
 
-```go
-func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
-    return raftpb.Snapshot{
-        Metadata: raftpb.SnapshotMetadata{
-            Index: s.applyState.TruncatedIndex,
-            Term:  s.applyState.TruncatedTerm,
-        },
-    }, nil
-}
-```
+The snapshot subsystem handles Raft snapshot generation, serialization, transfer, and application.
 
-This returns an empty snapshot (no `Data` field) with metadata pointing to the truncation point. No SST-based snapshot export or import is implemented. The `SignificantMsgTypeSnapshotStatus` constant is defined but not handled in `handleMessage`.
+**State Machine** — `SnapState` tracks snapshot progress per peer:
+
+| State | Meaning |
+|-------|---------|
+| `SnapStateRelax` | No snapshot in progress |
+| `SnapStateGenerating` | Background generation running; `GenSnapTask.ResultCh` pending |
+| `SnapStateApplying` | Received snapshot being applied to engine |
+
+**Core Types:**
+
+| Type | Fields | Purpose |
+|------|--------|---------|
+| `SnapshotData` | `RegionID`, `Version`, `CFFiles []SnapshotCFFile` | Top-level snapshot container |
+| `SnapshotCFFile` | `CF`, `KVPairs []SnapKVPair`, `Checksum uint32` | Per-CF key-value data with integrity check |
+| `SnapKVPair` | `Key`, `Value []byte` | Single key-value entry |
+| `GenSnapTask` | `RegionID`, `Region`, `SnapKey`, `Canceled`, `ResultCh` | Background generation request |
+| `SnapKey` | `RegionID`, `Term`, `Index` | Unique snapshot identifier |
+
+**Generation** — `GenerateSnapshotData(engine, region)` scans all three data CFs (`CF_DEFAULT`, `CF_LOCK`, `CF_WRITE`) within the region's key range using an engine snapshot. Each CF's data is collected into a `SnapshotCFFile` with a CRC32 checksum computed by `ComputeCFChecksum`.
+
+**Serialization** — `MarshalSnapshotData` / `UnmarshalSnapshotData` convert `SnapshotData` to/from a binary format using `encoding/gob`.
+
+**Application** — `ApplySnapshotData(engine, data)` applies a received snapshot:
+1. Clears the existing key range via `DeleteRange` on all three data CFs.
+2. Verifies the CRC32 checksum of each CF file.
+3. Writes all key-value pairs via a `WriteBatch`.
+
+**Background Worker** — `SnapWorker` runs a goroutine that consumes `GenSnapTask` from its task channel. Each task calls `GenerateSnapshotData` and sends the result (or error) back via `GenSnapTask.ResultCh`.
+
+**PeerStorage Integration:**
+- `RequestSnapshot()` — Initiates async snapshot generation. Sets state to `SnapStateGenerating` and submits a `GenSnapTask` to the `SnapWorker`.
+- `ApplySnapshot(snap)` — Validates the incoming snapshot metadata, calls `ApplySnapshotData`, then atomically updates the apply state, hard state, and region state in `CF_RAFT`.
+- `CancelGeneratingSnap()` — Cancels an in-progress generation via the `Canceled` atomic flag.
 
 ### 8.2 Region Split
 
-There are **no `internal/raftstore/split/` files**. Split is represented only by data structures in `msg.go`:
+Source: `internal/raftstore/split/checker.go`
 
-- `PeerTickSplitRegionCheck` — tick type defined but not acted upon in the event loop.
-- `ExecResultTypeSplitRegion` — result type defined.
-- `SplitRegionResult` struct — contains `Derived` (parent region after split) and `Regions` (new regions), but no code produces these results.
-- `StoreMsgTypeCreatePeer` / `StoreMsgTypeDestroyPeer` — store messages that would be needed for split, defined but no handler exists.
+The split subsystem detects oversized regions and executes boundary splits.
+
+**Core Types:**
+
+| Type | Fields | Purpose |
+|------|--------|---------|
+| `SplitCheckWorker` | `engine`, `cfg`, `taskCh`, `resultCh`, `stopCh` | Background worker for split checks |
+| `SplitCheckWorkerConfig` | `SplitSize` (96 MiB), `MaxSize` (144 MiB), `SplitKeys`, `MaxKeys` | Size thresholds |
+| `SplitCheckTask` | `RegionID`, `Region`, `StartKey`, `EndKey`, `Policy` | Check request |
+| `SplitCheckResult` | `RegionID`, `SplitKey`, `RegionSize` | Check outcome |
+| `SplitRegionResult` | `Derived`, `Regions` | Post-split region metadata |
+
+**Check Policy** — `CheckPolicyScan` iterates all three data CFs to measure exact region size; `CheckPolicyApproximate` is defined but defaults to scan.
+
+**Size Scanning** — `scanRegionSize(task)` iterates entries across `CF_DEFAULT`, `CF_LOCK`, `CF_WRITE` within `[StartKey, EndKey)`. It accumulates key-value sizes and records a midpoint split key. If the total exceeds `SplitSize`, the midpoint is returned as `SplitKey`.
+
+**Split Execution** — `ExecBatchSplit(region, splitKeys, newRegionIDs, newPeerIDs)` creates new region metadata:
+1. Validates that split keys fall within the region's range and are in order.
+2. Creates new `metapb.Region` entries for each split, assigning new IDs and peers.
+3. Updates the original region's `EndKey` and bumps `RegionEpoch.Version`.
+4. Returns a `SplitRegionResult` with the derived parent and new child regions.
+
+**Background Worker** — `SplitCheckWorker.Run()` consumes `SplitCheckTask` from its channel, calls `checkRegion`, and sends `SplitCheckResult` to `resultCh`. The caller can schedule tasks via `Schedule()` and read results via `ResultCh()`.
+
+### 8.3 Raft Log Compaction
+
+Source: `internal/raftstore/raftlog_gc.go`
+
+Raft log compaction (GC) removes obsolete log entries to prevent unbounded storage growth.
+
+**Core Types:**
+
+| Type | Purpose |
+|------|---------|
+| `RaftLogGCWorker` | Background goroutine that deletes old Raft log entries |
+| `RaftLogGCTask` (via channel) | Contains `regionID`, `startIdx`, `endIdx` for deletion range |
+
+**Compaction Decision** — `Peer.onRaftLogGCTick()` evaluates whether compaction is needed:
+1. Computes the gap between the applied index and the last compacted index.
+2. If the gap exceeds `RaftLogGCCountLimit` or `raftLogSizeHint` exceeds `RaftLogGCSizeLimit`, a `CompactLog` proposal is submitted to Raft.
+3. The compact index is set to `appliedIndex - RaftLogGCThreshold` to retain a tail of entries.
+
+**Proposal Execution** — `execCompactLog(applyState, compactIdx, compactTerm)` validates the request (compact index must exceed current truncated index) and updates `ApplyState.TruncatedIndex` / `TruncatedTerm`.
+
+**Background Deletion** — When the peer processes a `ExecResultTypeCompactLog` apply result, `onReadyCompactLog()` sends a task to `RaftLogGCWorker` via `logGCWorkerCh`. The worker's `gcRaftLog(regionID, startIdx, endIdx)` deletes entries using `engine.DeleteRange(CF_RAFT, startKey, endKey)` and adjusts `raftLogSizeHint`.
+
+**Serialization** — `marshalCompactLogRequest` / `unmarshalCompactLogRequest` encode the compact index and term into the Raft proposal data.
+
+### 8.4 Configuration Changes
+
+Source: `internal/raftstore/conf_change.go`
+
+Configuration changes handle adding and removing Raft group members (peers).
+
+**Core Types:**
+
+| Type | Fields | Purpose |
+|------|--------|---------|
+| `ChangePeerResult` | `Index`, `ChangeType`, `Peer`, `Region` | Result of a conf change operation |
+| `CreatePeerRequest` | `Region`, `PeerID` | Request to create a new peer |
+| `DestroyPeerRequest` | `RegionID`, `PeerID` | Request to destroy a peer |
+
+**Proposal** — `ProposeConfChange(changeType, peer)` encodes the peer via `EncodePeerContext` and proposes a `ConfChangeV2` through `rawNode.ProposeConfChange`.
+
+**Application** — `applyConfChangeEntry(entry)` processes committed conf change entries:
+1. Unmarshals the `ConfChangeV2` from the entry data.
+2. Calls `processConfChange(cc)` to update region metadata.
+3. Applies the conf change to etcd/raft via `rawNode.ApplyConfChange`.
+
+**Region Update** — `processConfChange(cc)` modifies the region's peer list:
+- **AddNode**: Appends the new peer and bumps `RegionEpoch.ConfVer`.
+- **RemoveNode**: Calls `removePeerByNodeID` to remove the peer, bumps `ConfVer`, and detects self-removal (sets `stopped = true`).
+
+**Helpers** — `EncodePeerContext` / `decodePeerFromContext` serialize peer ID and store ID for the conf change context. `cloneRegion` creates a deep copy of region metadata for safe mutation.
+
+### 8.5 Region Merge
+
+Source: `internal/raftstore/merge.go`
+
+Region merge combines two adjacent regions into one, reducing the number of Raft groups.
+
+**State Machine** — `PeerState` tracks merge progress:
+
+| State | Meaning |
+|-------|---------|
+| `PeerStateNormal` | Normal operation |
+| `PeerStateMerging` | Merge in progress (source region) |
+| `PeerStateTombstone` | Region has been merged away |
+
+**Core Types:**
+
+| Type | Fields | Purpose |
+|------|--------|---------|
+| `MergeState` | `MinIndex`, `Commit`, `Target *metapb.Region` | Tracks in-progress merge state |
+| `CatchUpLogs` | `TargetRegionID`, `LogsUpToDate` | Signals target has caught up on source logs |
+| `PrepareMergeResult` | `Region`, `State *MergeState` | Result of prepare phase |
+| `CommitMergeResult` | `Index`, `Region`, `Source *metapb.Region` | Result of commit phase |
+| `RollbackMergeResult` | `Region`, `Commit` | Result of rollback |
+
+**Merge Protocol** (three phases):
+
+1. **Prepare** — `ExecPrepareMerge(source, target)` bumps the source region's `RegionEpoch.Version` and creates a `MergeState` recording the target and minimum log index.
+
+2. **Commit** — `ExecCommitMerge(target, source, entries)` extends the target region's key range to encompass the source. It calculates the merged epoch as the maximum of both regions' versions plus one.
+
+3. **Rollback** — `ExecRollbackMerge(region, commit)` resets the region to `PeerStateNormal`, bumps the version, and clears the merge state.
+
+**Result Types** — Three `ExecResultType` constants (`ExecResultTypePrepareMerge`, `ExecResultTypeCommitMerge`, `ExecResultTypeRollbackMerge`) carry merge results through the apply pipeline.
+
+**Merge Result Kinds** — `MergeResultFromTargetLog`, `MergeResultFromTargetSnap`, `MergeResultStale` classify how the target peer received the source's data.
+
+### 8.6 Region Data Cleanup
+
+Source: `internal/raftstore/store_worker.go`
+
+`CleanupRegionData(engine, regionID)` removes all persistent state for a destroyed region:
+- Deletes the Raft log range via `DeleteRange(CF_RAFT, startLogKey, endLogKey)`.
+- Deletes the Raft hard state key.
+- Deletes the apply state key.
+- Deletes the region state key.
+
+This is used after a peer is removed via conf change or region merge.
 
 ---
 
@@ -526,25 +692,26 @@ There are **no `internal/raftstore/split/` files**. Split is represented only by
 
 - **Peer lifecycle** — `NewPeer` with bootstrap and restart paths; proper `raft.Config` construction with `CheckQuorum` and `PreVote`.
 - **Event loop** — `Peer.Run()` with `select` on context cancellation, ticker, and mailbox; `handleReady()` called after every event.
-- **Ready processing** — Full pipeline: leader status update, `SaveReady` persistence, outbound message delivery, conf change application, committed entry forwarding, proposal callback invocation, `Advance`.
+- **Ready processing** — Full pipeline: leader status update, PD heartbeat on leader transition, `SaveReady` persistence, outbound message delivery, conf change application, committed entry forwarding, proposal callback invocation, `Advance`.
 - **PeerStorage with CF_RAFT persistence** — Atomic `WriteBatch` writes for hard state and entries; key scheme via `keys.RaftStateKey` and `keys.RaftLogKey`.
 - **PeerStorage recovery** — `RecoverFromEngine()` restores hard state and scans log entries from the engine on restart.
 - **Entry cache** — In-memory cache of last 1024 entries with overlap-aware append logic.
 - **Router with sync.Map dispatch** — Non-blocking sends, broadcast, store-level channel, error sentinels for not-found and full mailboxes.
 - **Protobuf conversion** — `EraftpbToRaftpb` / `RaftpbToEraftpb` for transport interop.
 - **Proposal tracking** — `pendingProposals` map with index-based callback lookup and cleanup on commit.
-- **ConfChange processing** — `ConfChange` and `ConfChangeV2` entries are parsed and applied via `rawNode.ApplyConfChange()`.
+- **ConfChange processing** — `applyConfChangeEntry` parses and applies ConfChange/ConfChangeV2 entries; `processConfChange` updates region metadata (peer list, epoch); `ProposeConfChange` proposes membership changes; self-removal detection.
+- **Snapshot generation and application** — `SnapWorker` generates snapshots in the background; `PeerStorage.ApplySnapshot` applies received snapshots with checksum verification; `SnapState` FSM tracks progress.
+- **Region split** — `SplitCheckWorker` detects oversized regions via CF scanning; `ExecBatchSplit` creates new region metadata with validated split keys and epoch bumps.
+- **Raft log compaction** — `onRaftLogGCTick` evaluates size/count thresholds; `execCompactLog` advances `TruncatedIndex`; `RaftLogGCWorker` deletes old entries in the background.
+- **Region merge** — `ExecPrepareMerge` / `ExecCommitMerge` / `ExecRollbackMerge` implement the three-phase merge protocol with epoch management.
+- **PD heartbeat** — `sendRegionHeartbeatToPD()` sends region leader info to PD via `pdTaskCh` on leadership change.
+- **Apply result processing** — `onApplyResult()` processes `ExecResultTypeCompactLog` via `onReadyCompactLog()` and invokes pending proposal callbacks.
+- **Region data cleanup** — `CleanupRegionData` removes all Raft state for destroyed regions.
 
 ### Not Implemented
 
-- **Snapshot export/import** — `Snapshot()` returns an empty snapshot; no SST file generation, transfer, or application logic exists.
-- **Region split** — Data structures defined (`SplitRegionResult`, tick types, store messages) but no split decision, key-range computation, or region creation logic.
-- **Log compaction/GC** — `PeerTickRaftLogGC` tick type is defined but never triggers compaction; no entry deletion or `TruncatedIndex` advancement code.
-- **Conf change side-effects** — ConfChange entries are applied to Raft's internal tracker via `ApplyConfChange`, but no peer creation/removal or router updates follow.
-- **Apply result processing** — `onApplyResult()` receives results but does not process them (loop body is `_ = r`).
-- **Significant messages** — `PeerMsgTypeSignificant` is defined but not handled in `handleMessage`.
-- **Casual messages** — `PeerMsgTypeCasual` is defined but not handled.
-- **PeerMsgTypeStart** — Defined but not handled.
 - **Store goroutine** — `StoreMsg` types are defined and the router carries a `storeCh`, but no store goroutine implementation exists in the raftstore package.
-- **PD heartbeat** — `PeerTickPdHeartbeat` tick type defined but not implemented.
-- **Merge** — `PeerTickCheckMerge` and `SignificantMsgTypeMergeResult` defined but not implemented.
+- **Significant messages** — `PeerMsgTypeSignificant` is defined; only `SnapshotStatus` is partially handled. `Unreachable` and `MergeResult` are not handled.
+- **Casual messages** — `PeerMsgTypeCasual` is defined but not handled in `handleMessage`.
+- **PeerMsgTypeStart** — Defined but not handled.
+- **PD-coordinated split** — `SplitCheckWorker` exists but the peer event loop does not handle `PeerTickSplitRegionCheck` to trigger PD-coordinated split proposals.

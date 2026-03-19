@@ -43,13 +43,21 @@
 | `internal/engine/rocks` | `KvEngine` implementation using Pebble. Column families emulated via single-byte key prefixing (default=0x00, lock=0x01, write=0x02, raft=0x03). Implements `Engine`, `snapshot`, `writeBatch`, `iterator`. |
 | `internal/raftstore` | Raft consensus and region management. Contains `Peer` (one goroutine per region replica, owns `raft.RawNode`), `PeerStorage` (implements `raft.Storage` with engine-backed persistence and in-memory entry cache), message types (`PeerMsg`, `StoreMsg`, `RaftCommand`, `ApplyResult`), and `eraftpb`/`raftpb` protobuf conversion. |
 | `internal/raftstore/router` | `sync.Map`-based message routing: maps region ID to peer mailbox channels. Non-blocking send with backpressure (`ErrMailboxFull`). Supports broadcast. |
-| `internal/raftstore/snap` | Snapshot management (directory exists, not yet implemented). |
-| `internal/raftstore/split` | Region split logic (directory exists, not yet implemented). |
-| `internal/storage/mvcc` | MVCC layer: `MvccTxn` (write accumulator collecting `Modify` operations across CFs), `MvccReader` (snapshot-based reads for locks, writes, values), `PointGetter` (optimized single-key MVCC read with SI/RC isolation and lock bypass), key encoding (`EncodeKey`, `EncodeLockKey`, `DecodeKey`). |
+| `internal/raftstore/snap` | Snapshot generation, serialization, and application. `SnapWorker` processes background snapshot tasks. Note: implemented in `internal/raftstore/snapshot.go` (not a subdirectory). |
+| `internal/raftstore/split` | Region split checking and execution. `SplitCheckWorker` scans region sizes; `ExecBatchSplit` creates new regions. |
+| `internal/storage/mvcc` | MVCC layer: `MvccTxn` (write accumulator collecting `Modify` operations across CFs), `MvccReader` (snapshot-based reads for locks, writes, values), `PointGetter` (optimized single-key MVCC read with SI/RC isolation and lock bypass), `Scanner` (forward/reverse MVCC range scan with SI/RC isolation in `scanner.go`), key encoding (`EncodeKey`, `EncodeLockKey`, `DecodeKey`). |
 | `internal/storage/txn` | Percolator 2PC transaction actions: `Prewrite`, `Commit`, `Rollback`, `CheckTxnStatus`. Also `AcquirePessimisticLock`, `PrewritePessimistic`, `PessimisticRollback`, `PrewriteAsyncCommit`, `CheckAsyncCommitStatus`, `PrewriteAndCommit1PC`. Defines `Mutation`, `PrewriteProps`, `TxnStatus`. |
 | `internal/storage/txn/latch` | Deadlock-free key serialization using hash-based slots. Keys are hashed to sorted slot indices; commands acquire slots in order. `Latches.GenLock` / `Acquire` / `Release`. |
 | `internal/storage/txn/concurrency` | `ConcurrencyManager`: in-memory lock table (`sync.Map`) and atomic `max_ts` tracking for async commit correctness. `LockKey`/`IsKeyLocked`/`UpdateMaxTS`/`GlobalMinLock`. |
-| `internal/storage/gc` | GC (garbage collection) for old MVCC versions (directory exists, not yet implemented). |
+| `internal/storage/gc` | GC (garbage collection) for old MVCC versions. `GCWorker` with 3-state machine (Rewind/RemoveIdempotent/RemoveAll), `SafePointProvider` integration. |
+| `internal/storage/txn/scheduler` | TxnScheduler command dispatcher with worker pool, latch-based key serialization, `Command` interface. |
+| `internal/raftstore/raftlog_gc.go` | Raft log compaction: `RaftLogGCWorker` for background entry deletion, `execCompactLog` for log truncation. |
+| `internal/raftstore/conf_change.go` | Raft configuration changes: `applyConfChangeEntry`, `processConfChange`, `ProposeConfChange`. |
+| `internal/raftstore/merge.go` | Region merge: `ExecPrepareMerge` / `ExecCommitMerge` / `ExecRollbackMerge`. |
+| `internal/raftstore/store_worker.go` | Region data cleanup: `CleanupRegionData` removes all Raft state for destroyed regions. |
+| `internal/pd` | Embedded PD server: TSO allocation, metadata store, ID allocation, GC safe point management. Implements `pdpb.PD` gRPC service. |
+| `internal/server/pd_worker.go` | PDWorker: store heartbeat loop, region heartbeat forwarding, batch split reporting. |
+| `internal/server/raw_storage.go` | Non-transactional Raw KV storage layer bypassing MVCC. |
 | `internal/server` | gRPC server (`tikvpb.Tikv` service): `Server` (gRPC lifecycle), `tikvService` (implements KvGet, KvScan, KvPrewrite, KvCommit, KvBatchGet, KvBatchRollback, KvCleanup, KvCheckTxnStatus, BatchCommands, Raft, BatchRaft), `Storage` (transaction-aware bridge between engine/MVCC/txn layers with latch-based serialization), `StoreCoordinator` (Raft peer lifecycle management, proposal routing, entry application), `StaticStoreResolver` (storeID-to-address mapping), `ModifiesToRequests`/`RequestsToModifies` (MVCC modify <-> raft_cmdpb conversion). |
 | `internal/server/transport` | Inter-node Raft message transport over gRPC: `RaftClient` (connection pooling, `Send`/`BatchSend`/`SendSnapshot`), `MessageBatcher` (batch accumulation), `StoreResolver` interface. |
 | `internal/server/status` | HTTP diagnostics server: `/debug/pprof/*`, `/metrics` (Prometheus), `/config`, `/status`, `/health`. |
@@ -63,7 +71,8 @@
 | Package | Description |
 |---|---|
 | `cmd/gookv-server` | Main server entry point. Parses CLI flags, loads TOML config, opens Pebble engine, creates Storage and gRPC Server, optionally bootstraps Raft cluster mode, starts HTTP status server, handles graceful shutdown on SIGINT/SIGTERM. |
-| `cmd/gookv-ctl` | Admin CLI. Subcommands: `scan` (range scan by CF), `get` (point read), `mvcc` (MVCC info as JSON), `dump` (raw hex dump), `size` (per-CF key count and size), `compact` (trigger WAL flush). Opens Pebble engine directly. |
+| `cmd/gookv-ctl` | Admin CLI. Subcommands: `scan` (range scan by CF), `get` (point read), `mvcc` (MVCC info as JSON), `dump` (raw hex dump), `size` (per-CF key count and size), `compact` (trigger WAL flush), `region` (metadata inspection with `--id`, `--all`, `--limit`). Opens Pebble engine directly. |
+| `cmd/gookv-pd` | PD server entry point. Parses `--addr`, `--data-dir`, `--cluster-id` flags. |
 
 ---
 
@@ -85,15 +94,19 @@ graph TB
 
     subgraph "Storage / Transaction Layer"
         STORAGE["Storage<br/>(server.Storage)"]
+        RAW_STORAGE["RawStorage<br/>(Non-txn Raw KV)"]
         LATCHES["Latches<br/>(Hash-slot Serialization)"]
         CONC_MGR["ConcurrencyManager<br/>(In-memory Lock Table,<br/>max_ts Tracking)"]
         TXN_ACTIONS["Transaction Actions<br/>(Prewrite, Commit, Rollback,<br/>CheckTxnStatus, Pessimistic,<br/>AsyncCommit, 1PC)"]
+        TXN_SCHEDULER["TxnScheduler<br/>(Worker Pool,<br/>Latch Serialization)"]
+        GC_WORKER["GCWorker<br/>(3-state MVCC GC)"]
     end
 
     subgraph "MVCC Layer"
         MVCC_TXN["MvccTxn<br/>(Write Accumulator)"]
         MVCC_READER["MvccReader<br/>(LoadLock, SeekWrite,<br/>GetWrite, GetValue)"]
         POINT_GETTER["PointGetter<br/>(SI/RC Isolation)"]
+        SCANNER["Scanner<br/>(Forward/Reverse<br/>MVCC Range Scan)"]
         KEY_ENC["Key Encoding<br/>(EncodeKey, EncodeLockKey)"]
     end
 
@@ -103,6 +116,11 @@ graph TB
         PEER_STORAGE["PeerStorage<br/>(raft.Storage impl,<br/>entry cache + engine)"]
         ROUTER["Router<br/>(sync.Map,<br/>regionID -> mailbox)"]
         TRANSPORT["RaftClient<br/>(gRPC connection pool,<br/>message batching)"]
+        PD_WORKER["PDWorker<br/>(Heartbeats,<br/>Split Reporting)"]
+    end
+
+    subgraph "PD Layer"
+        PD_SERVER["PDServer<br/>(TSO, Metadata,<br/>GC SafePoint)"]
     end
 
     subgraph "Engine Layer"
@@ -151,6 +169,22 @@ graph TB
 
     COPROCESSOR --> KV_ENGINE
     COPROCESSOR --> MVCC_READER
+
+    TIKV_SVC --> RAW_STORAGE
+    TIKV_SVC --> GC_WORKER
+    TIKV_SVC --> SCANNER
+
+    RAW_STORAGE --> KV_ENGINE
+    GC_WORKER --> KV_ENGINE
+    GC_WORKER --> MVCC_TXN
+    GC_WORKER --> MVCC_READER
+    SCANNER --> MVCC_READER
+
+    TXN_SCHEDULER --> LATCHES
+    TXN_SCHEDULER --> TXN_ACTIONS
+
+    COORD --> PD_WORKER
+    PD_WORKER --> PD_SERVER
 ```
 
 ---
@@ -213,14 +247,18 @@ main()
   |     rocks.Open(cfg.Storage.DataDir)
   |     -> Creates/opens Pebble DB at the data directory
   |
-  +-- 4. Create Storage
+  +-- 4. Create Storage and auxiliary layers
   |     server.NewStorage(engine)
   |     -> Initializes Latches (2048 slots), ConcurrencyManager
+  |     server.NewRawStorage(engine)
+  |     -> Non-transactional Raw KV storage (bypasses MVCC)
+  |     gc.NewGCWorker(engine, safePointProvider)
+  |     -> Starts background GC goroutine (3-state machine)
   |
   +-- 5. Create gRPC Server
-  |     server.NewServer(cfg, storage)
+  |     server.NewServer(cfg, storage, rawStorage, gcWorker)
   |     -> Creates grpc.Server with max message size 16MB
-  |     -> Registers tikvpb.TikvServer (all KV + Raft RPCs)
+  |     -> Registers tikvpb.TikvServer (all KV + Raft + RawKV RPCs)
   |     -> Enables gRPC server reflection
   |
   +-- 6. [Cluster mode only] Create Raft infrastructure
@@ -238,6 +276,15 @@ main()
   |          -> SetApplyFunc (wired to StoreCoordinator.applyEntries)
   |          -> Router.Register(regionID, mailbox)
   |          -> go peer.Run(ctx) -- starts event loop goroutine
+  |       h. Connect to PD server
+  |          pdclient.NewClient(pdEndpoints)
+  |          -> Establishes gRPC connection to PD cluster
+  |       i. Register store with PD
+  |          pdClient.PutStore(storeID, addr)
+  |       j. Create and start PDWorker
+  |          server.NewPDWorker(pdClient, storeID, coord)
+  |          -> Wires pdTaskCh for heartbeat/split reporting
+  |          -> go pdWorker.Run(ctx) -- store heartbeat loop, region heartbeat forwarding
   |
   +-- 7. Start gRPC server
   |     srv.Start()
@@ -268,6 +315,7 @@ graph LR
     subgraph "cmd"
         SERVER["gookv-server"]
         CTL["gookv-ctl"]
+        PD_CMD["gookv-pd"]
     end
 
     subgraph "internal/server"
@@ -299,6 +347,7 @@ graph LR
         MVCC_TXN["mvcc.MvccTxn"]
         MVCC_READER["mvcc.MvccReader"]
         MVCC_PG["mvcc.PointGetter"]
+        MVCC_SCANNER["mvcc.Scanner"]
         MVCC_KEY["mvcc.key"]
     end
 
@@ -311,11 +360,34 @@ graph LR
     subgraph "internal/storage/txn/*"
         LATCH["latch.Latches"]
         CONCMGR["concurrency.Manager"]
+        TXN_SCHED["scheduler.TxnScheduler"]
     end
 
     subgraph "internal/engine"
         TRAITS["traits.KvEngine"]
         ROCKS["rocks.Engine<br/>(Pebble)"]
+    end
+
+    subgraph "internal/pd"
+        PD_SRV["pd.Server"]
+    end
+
+    subgraph "internal/storage/gc"
+        GC_WORKER["gc.GCWorker"]
+    end
+
+    subgraph "internal/server (extended)"
+        PD_WORKER["server.PDWorker"]
+        RAW_STOR["server.RawStorage"]
+    end
+
+    subgraph "internal/raftstore (extended)"
+        RAFTLOG_GC["raftstore.RaftLogGCWorker"]
+        CONF_CHANGE["raftstore.confChange"]
+        MERGE["raftstore.merge"]
+        STORE_WORKER["raftstore.storeWorker"]
+        SNAP["raftstore.SnapWorker"]
+        SPLIT["split.SplitCheckWorker"]
     end
 
     subgraph "internal"
@@ -417,6 +489,45 @@ graph LR
     COPROCESSOR --> MVCC_KEY
     COPROCESSOR --> CFNAMES
     COPROCESSOR --> TXNTYPES
+
+    %% scanner deps
+    MVCC_SCANNER --> MVCC_READER
+    MVCC_SCANNER --> TXNTYPES
+
+    %% gc deps
+    GC_WORKER --> MVCC_TXN
+    GC_WORKER --> MVCC_READER
+    GC_WORKER --> TRAITS
+
+    %% raw storage deps
+    RAW_STOR --> TRAITS
+    RAW_STOR --> CFNAMES
+    SRV --> RAW_STOR
+    SRV --> GC_WORKER
+
+    %% pd deps
+    PD_CMD --> PD_SRV
+    PD_SRV --> TXNTYPES
+    PD_WORKER --> PDCLIENT
+    PD_WORKER --> COORD
+    COORD --> PD_WORKER
+
+    %% scheduler deps
+    TXN_SCHED --> LATCH
+    TXN_SCHED --> ACTIONS
+
+    %% raftstore extended deps
+    RAFTLOG_GC --> TRAITS
+    RAFTLOG_GC --> KEYS
+    CONF_CHANGE --> PEER
+    MERGE --> PEER
+    MERGE --> PSTORAGE
+    STORE_WORKER --> TRAITS
+    STORE_WORKER --> KEYS
+    SNAP --> TRAITS
+    SNAP --> PSTORAGE
+    SPLIT --> TRAITS
+    SPLIT --> KEYS
 
     %% pkg internal deps
     KEYS --> CODEC

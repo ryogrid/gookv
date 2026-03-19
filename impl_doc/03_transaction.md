@@ -16,7 +16,7 @@ The layer is organized into the following components:
 - **Latches** (`internal/storage/txn/latch/latch.go`): Hash-based slot array providing deadlock-free command serialization.
 - **Concurrency Manager** (`internal/storage/txn/concurrency/manager.go`): Tracks max_ts (atomically) and an in-memory lock table (sync.Map) for async commit correctness.
 
-There is no Scanner implementation yet; `internal/storage/mvcc/` contains only PointGetter for single-key reads.
+In addition to PointGetter for single-key reads, the package now includes a full **Scanner** (`internal/storage/mvcc/scanner.go`) for MVCC-aware range scans. A **GC Worker** (`internal/storage/gc/gc.go`) reclaims stale MVCC versions below a safe point, and a **TxnScheduler** (`internal/storage/txn/scheduler/scheduler.go`) dispatches transaction commands through a worker pool with latch-based key serialization.
 
 ### Column Families
 
@@ -241,7 +241,268 @@ type PointGetter struct {
 
 ## 6. Scanner
 
-No Scanner implementation exists yet. The `internal/storage/mvcc/` package contains only `PointGetter` for single-key reads. There is no `scanner.go` or equivalent file. Range scans are not yet supported at the MVCC layer.
+**File:** `internal/storage/mvcc/scanner.go`
+
+`Scanner` performs MVCC-aware range scans with persistent cursor state, supporting both forward and backward iteration with SI and RC isolation levels.
+
+### ScannerConfig
+
+```go
+type ScannerConfig struct {
+    Snapshot       traits.Snapshot
+    ReadTS         txntypes.TimeStamp
+    Desc           bool               // true for backward scan
+    IsolationLevel IsolationLevel
+    KeyOnly        bool               // skip value loading
+    LowerBound     Key
+    UpperBound     Key
+    BypassLocks    map[txntypes.TimeStamp]bool
+}
+```
+
+`BypassLocks` allows specific lock timestamps to be skipped (e.g., the transaction's own locks), matching the same concept used by `PointGetter`.
+
+### ScanStatistics
+
+```go
+type ScanStatistics struct {
+    ScannedKeys   int64
+    ProcessedKeys int64
+    ScannedLocks  int64
+    DefaultReads  int64
+    OverSeekBound int64
+}
+```
+
+Counters are accumulated during scanning. `TakeStatistics()` returns the accumulated values and resets all counters to zero.
+
+### Scanner Struct
+
+```go
+type Scanner struct {
+    cfg           ScannerConfig
+    writeCursor   traits.Iterator   // always created
+    lockCursor    traits.Iterator   // nil under RC isolation
+    defaultCursor traits.Iterator   // lazily created on first large-value read
+    isStarted     bool
+    stats         ScanStatistics
+}
+```
+
+`NewScanner(cfg)` creates iterators on CF_WRITE and (for SI) CF_LOCK with bounds derived from `LowerBound`/`UpperBound`. The default CF iterator is not created upfront; it is lazily initialized the first time `loadValueFromDefault` is called. The caller must call `Close()` when done to release all iterator resources.
+
+### Next() Algorithm
+
+`Next()` returns the next visible key-value pair, or `(nil, nil, nil)` when the scan is exhausted.
+
+1. **Initial seek:** On the first call, the write cursor and lock cursor are positioned at the first (forward) or last (backward) entry within bounds.
+
+2. **Current user key selection:** At each iteration, the scanner extracts the user key from both the write and lock cursors. For forward scans, the minimum user key is chosen; for backward scans, the maximum. This determines which cursor(s) have data for the current key.
+
+3. **Bound check:** The selected user key is checked against `UpperBound` (forward) or `LowerBound` (backward). If out of range, the scan terminates.
+
+4. **Lock handling (SI only):** If the lock cursor has an entry for the current user key, `handleLock` checks for conflicts. Pessimistic locks are skipped. If a non-pessimistic lock exists with `StartTS <= ReadTS` and is not in `BypassLocks`, the scanner returns `ErrKeyIsLocked`. After checking, the lock cursor is advanced past this key.
+
+5. **Write handling:** If the write cursor has an entry for the current user key, `handleWrite` searches for the latest visible version.
+
+6. **Skip keys with no visible data:** If only a lock exists (no write) or `handleWrite` finds no visible version (deleted or no version at `ReadTS`), the loop continues to the next user key.
+
+### handleWrite
+
+`handleWrite(userKey)` finds the latest data-changing write record with `commitTS <= ReadTS`:
+
+1. For backward scans, the write cursor is first repositioned with `Seek(EncodeKey(userKey, ReadTS))` since the natural backward position may be at an older version.
+
+2. `moveWriteCursorToTS` advances through write entries with `commitTS > ReadTS`, using linear iteration up to `SeekBound` attempts before falling back to `Seek`.
+
+3. The method iterates write records for the user key and dispatches by write type:
+   - **Put:** If `KeyOnly` is false, retrieves the value. Short values (inlined in the write record) are returned directly. Large values are fetched via `loadValueFromDefault`. Returns `(value, true, nil)`.
+   - **Delete:** The key is considered deleted at this version. Returns `(nil, false, nil)`.
+   - **Lock / Rollback:** Non-data-changing records are skipped. If `LastChange.EstimatedVersions >= SeekBound` and the `LastChange.TS` is non-zero, the cursor jumps directly to that timestamp (same optimization as `MvccReader.GetWrite`). Otherwise, `Next()` advances to the next version.
+
+4. After processing, `moveWriteCursorToNextUserKey` advances the write cursor past all remaining versions of the current user key.
+
+### Forward / Backward Scan Support
+
+Forward and backward scans share the same `Next()` loop but differ in cursor movement:
+
+- **Forward:** Cursors advance with `Next()`. `moveWriteCursorToNextUserKey` calls `Next()` up to `SeekBound` times, then falls back to `Seek` with a key one byte past the current user key.
+- **Backward:** Cursors advance with `Prev()`. After the forward version lookup within a user key, `repositionForBackward` seeks to the first entry of the current user key (highest `commitTS`) and then calls `Prev()` to position before all versions of that key.
+
+### Lazy Default CF Cursor
+
+`loadValueFromDefault(userKey, startTS)` creates the default CF iterator on first use via `ensureDefaultCursor()`. It seeks to `EncodeKey(userKey, startTS)` and verifies the found key matches exactly. Each call increments `DefaultReads` in `ScanStatistics`.
+
+---
+
+## 6.5. GC Worker
+
+**File:** `internal/storage/gc/gc.go`
+
+The GC subsystem reclaims stale MVCC versions below a safe point, removing obsolete write records from CF_WRITE and large values from CF_DEFAULT.
+
+### GC() Function
+
+```go
+func GC(txn *MvccTxn, reader *MvccReader, key Key, safePoint TimeStamp) (*GCInfo, error)
+```
+
+Performs garbage collection on a single key using a 3-state machine that scans CF_WRITE from newest to oldest:
+
+1. **gcStateRewind:** Skips all write records with `commitTS > safePoint`. These versions are still live and must be preserved.
+
+2. **gcStateRemoveIdempotent:** Entered when the first write record at or below the safe point is reached. Lock and Rollback records are deleted immediately (they carry no user-visible data). The first Put or Delete record is kept as the latest visible version below the safe point, and the state transitions to `gcStateRemoveAll`.
+
+3. **gcStateRemoveAll:** All remaining older versions are deleted. For Put records with large values (no `ShortValue`), the corresponding CF_DEFAULT entry is also deleted via `txn.DeleteValue(key, write.StartTS)`.
+
+Returns a `GCInfo` with `FoundVersions`, `DeletedVersions`, and `IsCompleted`.
+
+### GCConfig
+
+```go
+type GCConfig struct {
+    PollSafePointInterval time.Duration   // default: 10s
+    MaxWriteBytesPerSec   int64           // default: 0 (unlimited)
+    MaxTxnWriteSize       int             // default: 32 KB
+    BatchKeys             int             // default: 512
+}
+```
+
+`DefaultGCConfig()` returns a config with the defaults listed above. `MaxTxnWriteSize` controls when accumulated modifications are flushed to the engine during a GC pass.
+
+### GCTask and GCWorkerStats
+
+```go
+type GCTask struct {
+    SafePoint txntypes.TimeStamp
+    StartKey  []byte
+    EndKey    []byte
+    Callback  func(error)
+}
+
+type GCWorkerStats struct {
+    KeysScanned     int64
+    VersionsDeleted int64
+}
+```
+
+`GCTask` represents a unit of GC work scoped to a key range. The `Callback` is invoked with the result of the task.
+
+### GCWorker
+
+```go
+type GCWorker struct {
+    engine          traits.KvEngine
+    taskCh          chan GCTask         // buffered, capacity 64
+    config          *GCConfig
+    keysScanned     atomic.Int64
+    versionsDeleted atomic.Int64
+    stopCh          chan struct{}
+    wg              sync.WaitGroup
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `NewGCWorker(engine, config)` | Creates a new worker. If `config` is nil, uses `DefaultGCConfig()`. |
+| `Start()` | Launches the background goroutine that processes tasks from `taskCh`. |
+| `Stop()` | Closes `stopCh` and waits for the goroutine to exit. |
+| `Schedule(task)` | Non-blocking enqueue. Returns `ErrGCTaskQueueFull` if the channel is full. |
+| `Stats()` | Returns a snapshot of `GCWorkerStats` (atomic loads). |
+
+### processTask
+
+`processTask` takes a snapshot of the engine, creates an `MvccReader`, and scans CF_WRITE within the task's `[StartKey, EndKey)` range. It deduplicates by user key (tracking `lastUserKey`) so that each key is GC'd exactly once on first encounter. For each unique user key, it calls `GC(txn, reader, key, safePoint)` to collect modifications. When `txn.WriteSize` exceeds `MaxTxnWriteSize`, the accumulated modifications are flushed atomically via `applyModifies`, which creates a `WriteBatch`, applies all puts and deletes, and calls `Commit()`.
+
+### SafePointProvider
+
+```go
+type SafePointProvider interface {
+    GetGCSafePoint(ctx context.Context) (txntypes.TimeStamp, error)
+}
+```
+
+Abstracts the retrieval of the GC safe point (typically from PD). A `MockSafePointProvider` is provided for testing, with `SetSafePoint(ts)` and an `atomic.Uint64` backing store.
+
+---
+
+## 6.6. TxnScheduler
+
+**File:** `internal/storage/txn/scheduler/scheduler.go`
+
+The TxnScheduler dispatches transaction commands to a worker pool with latch-based key serialization, decoupling gRPC request handling from MVCC operations.
+
+### Command Interface
+
+```go
+type Command interface {
+    Kind() CommandKind
+    Keys() [][]byte
+    Execute(ctx CommandContext) (*CommandResult, error)
+}
+```
+
+Each command declares the keys it touches (for latch acquisition) and implements `Execute`, which receives a `CommandContext` containing the `KvEngine` and `ConcurrencyManager`.
+
+### CommandKind Constants
+
+```go
+const (
+    CmdPrewrite CommandKind = iota
+    CmdCommit
+    CmdBatchRollback
+    CmdCleanup
+    CmdCheckTxnStatus
+    CmdPessimisticLock
+    CmdPessimisticRollback
+    CmdResolveLock
+    CmdTxnHeartBeat
+)
+```
+
+### Config
+
+```go
+type Config struct {
+    SchedulerConcurrency  int             // latch slot count (default: 2048)
+    WorkerCount           int             // goroutine pool size (default: runtime.NumCPU())
+    PendingWriteThreshold int64           // default: 100 MB
+    Engine                traits.KvEngine
+    ConcurrencyManager    *concurrency.Manager
+}
+```
+
+### TxnScheduler Struct
+
+```go
+type TxnScheduler struct {
+    latches               *latch.Latches
+    taskSlots             []taskSlot          // 4096 slots
+    idAlloc               atomic.Uint64
+    taskCh                chan scheduledTask   // buffered, capacity WorkerCount*4
+    runningWriteBytes     atomic.Int64
+    pendingWriteThreshold int64
+    engine                traits.KvEngine
+    concMgr               *concurrency.Manager
+    ctx                   context.Context
+    cancel                context.CancelFunc
+}
+```
+
+The scheduler maintains 4096 task slots (hash-indexed by command ID) for tracking in-flight commands, and a fixed-size worker pool consuming from `taskCh`.
+
+### RunCommand / RunCommandSync
+
+| Method | Description |
+|--------|-------------|
+| `RunCommand(cmd, callback)` | Submits a command for asynchronous execution. Allocates a command ID, creates a `latch.Lock` from the command's keys, stores the task context in a slot, and attempts to acquire latches. If latches are acquired immediately, the task is dispatched to the worker channel. If not, the task waits in its slot until woken. The callback is invoked exactly once. |
+| `RunCommandSync(cmd)` | Blocking wrapper around `RunCommand`. Creates a buffered channel, submits the command with a callback that sends the result, and blocks on the channel. Returns `(*CommandResult, error)`. |
+| `Stop()` | Cancels the context, closes `taskCh`, and waits for all workers to finish via `workerWg.Wait()`. |
+| `WaitIdle(timeout)` | Polls all task slots until none have pending tasks, or the timeout expires. Returns `true` if idle. Intended for testing. |
+
+### Latch Wakeup Chain
+
+When a command finishes, `finishCommand` invokes the callback, then calls `latches.Release(lock, cmdID)`. Release returns a list of command IDs that were blocked waiting for the released latches. For each woken ID, `tryToWakeUp` looks up the task context in its slot and re-attempts latch acquisition via `latches.Acquire`. If all latches are now held, the task is dispatched to the worker channel. This chain continues until no more commands can make progress, providing fair and deadlock-free command serialization.
 
 ---
 
@@ -662,6 +923,7 @@ graph TB
         TxnAcc[txn.go<br/>MvccTxn<br/>Modify accumulator]
         MReader[reader.go<br/>MvccReader<br/>LoadLock / SeekWrite / GetWrite<br/>GetTxnCommitRecord / GetValue]
         PG[point_getter.go<br/>PointGetter<br/>SI / RC isolation]
+        Scan[scanner.go<br/>Scanner<br/>Forward / Backward range scans]
     end
 
     subgraph "internal/storage/txn"
@@ -678,6 +940,14 @@ graph TB
         ConcMgr[manager.go<br/>Manager<br/>maxTS / lockTable]
     end
 
+    subgraph "internal/storage/txn/scheduler"
+        Sched[scheduler.go<br/>TxnScheduler<br/>RunCommand / RunCommandSync]
+    end
+
+    subgraph "internal/storage/gc"
+        GCW[gc.go<br/>GCWorker / GC<br/>3-state version reclamation]
+    end
+
     subgraph "internal/engine"
         Snap[traits.Snapshot]
     end
@@ -691,9 +961,19 @@ graph TB
     Pessim --> MReader
 
     PG --> MReader
+    Scan --> Snap
+    Scan --> KeyEnc
     MReader --> Snap
     MReader --> KeyEnc
     TxnAcc --> KeyEnc
+
+    GCW --> TxnAcc
+    GCW --> MReader
+    GCW --> Snap
+
+    Sched --> Latch
+    Sched --> ConcMgr
+    Sched --> Snap
 
     KeyEnc --> TS
     TxnAcc --> LockT
@@ -702,6 +982,9 @@ graph TB
     MReader --> LockT
     MReader --> WriteT
     MReader --> CF
+    Scan --> LockT
+    Scan --> WriteT
+    Scan --> CF
 
     Actions --> LockT
     Actions --> WriteT
@@ -710,6 +993,7 @@ graph TB
     Pessim --> LockT
 
     Latch -.->|serializes| Actions
+    Sched -.->|dispatches| Actions
     ConcMgr -.->|maxTS for| Async
 ```
 

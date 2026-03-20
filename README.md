@@ -18,9 +18,9 @@ gookv reproduces the core architecture of TiKV in Go:
 - **Raw KV API** — non-transactional get/put/delete/scan/batch operations with TTL, compare-and-swap, and checksum support
 - **Client library** — multi-region client (`pkg/client`) with automatic region routing, PD-backed store discovery, connection pooling, and retry logic
 - **Raft consensus** — etcd/raft integration with region-based routing and inter-node transport
-- **Raft lifecycle** — log compaction, snapshot generation/application, configuration changes (AddNode/RemoveNode)
+- **Raft lifecycle** — log compaction, snapshot generation/transfer/application, configuration changes (AddNode/RemoveNode), store worker for dynamic peer creation
 - **Region management** — region split (PD-coordinated, size-based with midpoint key), region merge (prepare/commit/rollback)
-- **Placement Driver (PD)** — TSO allocation, cluster metadata, store/region heartbeats, split scheduling, multi-endpoint failover with retry
+- **Placement Driver (PD)** — TSO allocation, cluster metadata, store/region heartbeats, split scheduling, replica repair and leader balance scheduling, GC safe point centralization, multi-endpoint failover with retry
 - **Coprocessor** — push-down execution with RPN expressions, table scan, selection, aggregation
 - **gRPC server** — TiKV-compatible RPC interface via `pingcap/kvproto`
 - **HTTP status server** — pprof, Prometheus metrics, health checks
@@ -376,12 +376,12 @@ grpcurl -plaintext 127.0.0.1:20160 list
 #     KvBatchRollback, KvCleanup, KvCheckTxnStatus,
 #     KvCheckSecondaryLocks, KvScanLock,
 #     KvPessimisticLock, KVPessimisticRollback,
-#     KvTxnHeartBeat, KvResolveLock, KvGC
+#     KvTxnHeartBeat, KvResolveLock, KvGC, KvDeleteRange
 #   Raw KV: RawGet, RawPut, RawDelete, RawScan,
 #     RawBatchGet, RawBatchPut, RawBatchDelete, RawDeleteRange,
 #     RawBatchScan, RawGetKeyTTL, RawCompareAndSwap, RawChecksum
 #   Coprocessor: Coprocessor, CoprocessorStream
-#   Raft: Raft, BatchRaft
+#   Raft: Raft, BatchRaft, Snapshot
 #   Batch: BatchCommands (bidirectional streaming)
 ```
 
@@ -564,7 +564,8 @@ go tool pprof http://127.0.0.1:20180/debug/pprof/profile?seconds=10
 │  Txn: KvGet, KvScan, KvPrewrite, KvCommit, Pessimistic, Resolve,    │
 │       KvCheckSecondaryLocks, KvScanLock                              │
 │  Raw: RawGet, RawPut, RawDelete, RawScan, Batch*, TTL, CAS, Cksum   │
-│  Coprocessor, BatchCommands, Raft, BatchRaft, KvGC                   │
+│  Coprocessor, BatchCommands, Raft, BatchRaft, Snapshot, KvGC,         │
+│  KvDeleteRange                                                        │
 │  Region validation: validateRegionContext (leader, epoch, key range) │
 ├───────────────────┬──────────────────────────────────────────────────┤
 │  HTTP Status      │            Flow Control                          │
@@ -581,18 +582,20 @@ go tool pprof http://127.0.0.1:20180/debug/pprof/profile?seconds=10
 │   commit/1PC │  - Selection   │  - Router + Transport                │
 │ - Pessimistic│  - Aggregation │  - StoreCoordinator                  │
 │ - Scheduler  │                │  - Raft log compaction               │
-├──────────────┤                │  - Snapshot gen/apply                │
-│    MVCC      │                │  - Conf change (Add/Remove)          │
-│ - MvccReader │                │  - Region split (PD-coordinated)     │
-│ - PointGetter│                │  - Region merge                      │
-│ - MvccTxn    │                │    (prepare/commit/rollback)         │
-│ - Scanner    │                │                                      │
+├──────────────┤                │  - Snapshot gen/transfer/apply       │
+│    MVCC      │                │  - Store worker (dynamic peers)      │
+│ - MvccReader │                │  - Conf change (Add/Remove)          │
+│ - PointGetter│                │  - Region split (PD-coordinated)     │
+│ - MvccTxn    │                │  - Region merge                      │
+│ - Scanner    │                │    (prepare/commit/rollback)         │
 ├──────────────┤                ├──────────────────────────────────────┤
 │   GC Worker  │                │       Placement Driver (PD)          │
 │ - 3-state GC │                │  - TSO allocator                     │
 │ - KvGC RPC   │                │  - Metadata store                    │
 │              │                │  - Heartbeat processing              │
 │              │                │  - Split scheduling                  │
+│              │                │  - Scheduling (replica/leader)       │
+│              │                │  - GC safe point                     │
 │              │                │  - Multi-endpoint failover           │
 ├──────────────┴────────────────┴──────────────────────────────────────┤
 │                    Engine (traits.KvEngine)                           │
@@ -655,6 +658,12 @@ go tool pprof http://127.0.0.1:20180/debug/pprof/profile?seconds=10
 | IMPL-046 | Codec fuzz tests (6 fuzz targets) | Done |
 | IMPL-047 | CLI improvements (compact with full LSM compaction, dump --sst for SST parsing) | Done |
 | IMPL-048 | Client library for multi-region routing (pkg/client) | Done |
+| IMPL-049 | Snapshot transfer (end-to-end streaming via gRPC) | Done |
+| IMPL-050 | Store worker goroutine (dynamic peer creation/destruction) | Done |
+| IMPL-051 | Significant messages (Unreachable, SnapshotStatus, MergeResult) | Done |
+| IMPL-052 | GC safe point PD centralization (pdclient methods, KvGC integration) | Done |
+| IMPL-053 | KvDeleteRange (ModifyTypeDeleteRange, gRPC handler, Raft serialization) | Done |
+| IMPL-054 | PD scheduling (Scheduler, replica repair, leader balance, PDWorker delivery) | Done |
 
 ## Known Limitations
 
@@ -665,9 +674,6 @@ The following features are intentionally deferred or not yet fully connected. Se
 | RPC | Status | Notes |
 |-----|--------|-------|
 | `BatchCoprocessor` | Stub | Only single-region `Coprocessor` and `CoprocessorStream` are implemented. Multi-region dispatch is not wired. |
-| `KvGC` | Stub | GC is performed by the internal `GCWorker`; the gRPC endpoint is not connected. |
-| `KvDeleteRange` | Stub | Raw KV `RawDeleteRange` works; the transactional variant is not implemented. |
-| `Snapshot` (Raft) | Stub | Raft snapshots are generated and applied internally, but the gRPC streaming `Snapshot` RPC for snapshot transfer is not wired. |
 
 ### Client Library (`pkg/client`)
 
@@ -680,16 +686,12 @@ The following features are intentionally deferred or not yet fully connected. Se
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| GC safe point via PD | Partially connected | `GetGCSafePoint` / `UpdateGCSafePoint` are implemented on PDServer but not exposed in `pdclient.Client`. The GC worker uses in-process safe point tracking. |
-| Scheduling commands | Not implemented | `RegionHeartbeat` on PDServer always returns an empty response. Leader transfer, peer rebalancing, and merge scheduling are not implemented server-side. |
 | Periodic PD leader refresh | Not implemented | `Config.UpdateInterval` is defined but not consumed. The client relies on connection-time endpoint discovery and error-driven reconnection. |
 
 ### Raftstore
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Store goroutine | Not implemented | `StoreMsg` types and `storeCh` are defined, but no store-level goroutine processes them. |
-| Significant messages | Partial | Only `SnapshotStatus` is handled. `Unreachable` and `MergeResult` are defined but not processed. |
 | Casual / Start messages | Not implemented | `PeerMsgTypeCasual` and `PeerMsgTypeStart` are defined but ignored in `handleMessage`. |
 
 ## Acknowledgments

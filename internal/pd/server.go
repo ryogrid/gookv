@@ -47,10 +47,11 @@ type PDServer struct {
 	cfg       PDServerConfig
 	clusterID uint64
 
-	tso     *TSOAllocator
-	meta    *MetadataStore
-	idAlloc *IDAllocator
-	gcMgr   *GCSafePointManager
+	tso       *TSOAllocator
+	meta      *MetadataStore
+	idAlloc   *IDAllocator
+	gcMgr     *GCSafePointManager
+	scheduler *Scheduler
 
 	grpcServer *grpc.Server
 	listener   net.Listener
@@ -71,6 +72,8 @@ func NewPDServer(cfg PDServerConfig) (*PDServer, error) {
 
 	grpcSrv := grpc.NewServer()
 
+	scheduler := NewScheduler(meta, idAlloc, cfg.MaxPeerCount)
+
 	s := &PDServer{
 		cfg:        cfg,
 		clusterID:  cfg.ClusterID,
@@ -78,6 +81,7 @@ func NewPDServer(cfg PDServerConfig) (*PDServer, error) {
 		meta:       meta,
 		idAlloc:    idAlloc,
 		gcMgr:      gcMgr,
+		scheduler:  scheduler,
 		grpcServer: grpcSrv,
 		ctx:        ctx,
 		cancel:     cancel,
@@ -230,6 +234,7 @@ func (s *PDServer) GetAllStores(ctx context.Context, req *pdpb.GetAllStoresReque
 
 func (s *PDServer) StoreHeartbeat(ctx context.Context, req *pdpb.StoreHeartbeatRequest) (*pdpb.StoreHeartbeatResponse, error) {
 	if stats := req.GetStats(); stats != nil {
+		// UpdateStoreStats also records the heartbeat timestamp for liveness.
 		s.meta.UpdateStoreStats(stats.GetStoreId(), stats)
 	}
 	return &pdpb.StoreHeartbeatResponse{Header: s.header()}, nil
@@ -251,8 +256,23 @@ func (s *PDServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 			s.meta.PutRegion(region, leader)
 		}
 
-		// Send empty response (no scheduling commands for now).
 		resp := &pdpb.RegionHeartbeatResponse{Header: s.header()}
+
+		// Run scheduler to produce commands.
+		if region != nil && leader != nil && s.scheduler != nil {
+			if cmd := s.scheduler.Schedule(region.GetId(), region, leader); cmd != nil {
+				if cmd.TransferLeader != nil {
+					resp.TransferLeader = cmd.TransferLeader
+				}
+				if cmd.ChangePeer != nil {
+					resp.ChangePeer = cmd.ChangePeer
+				}
+				if cmd.Merge != nil {
+					resp.Merge = cmd.Merge
+				}
+			}
+		}
+
 		if err := stream.Send(resp); err != nil {
 			return err
 		}
@@ -352,15 +372,22 @@ type MetadataStore struct {
 	regions      map[uint64]*metapb.Region
 	leaders      map[uint64]*metapb.Peer
 	storeStats   map[uint64]*pdpb.StoreStats
+
+	// Store liveness tracking.
+	storeLastHeartbeat map[uint64]time.Time
 }
+
+// StoreDownDuration is how long without a heartbeat before a store is considered dead.
+const StoreDownDuration = 30 * time.Second
 
 func NewMetadataStore(clusterID uint64) *MetadataStore {
 	return &MetadataStore{
-		clusterID:  clusterID,
-		stores:     make(map[uint64]*metapb.Store),
-		regions:    make(map[uint64]*metapb.Region),
-		leaders:    make(map[uint64]*metapb.Peer),
-		storeStats: make(map[uint64]*pdpb.StoreStats),
+		clusterID:          clusterID,
+		stores:             make(map[uint64]*metapb.Store),
+		regions:            make(map[uint64]*metapb.Region),
+		leaders:            make(map[uint64]*metapb.Peer),
+		storeStats:         make(map[uint64]*pdpb.StoreStats),
+		storeLastHeartbeat: make(map[uint64]time.Time),
 	}
 }
 
@@ -405,6 +432,55 @@ func (m *MetadataStore) UpdateStoreStats(storeID uint64, stats *pdpb.StoreStats)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.storeStats[storeID] = stats
+	m.storeLastHeartbeat[storeID] = time.Now()
+}
+
+// IsStoreAlive returns whether a store has sent a heartbeat within StoreDownDuration.
+func (m *MetadataStore) IsStoreAlive(storeID uint64) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	t, ok := m.storeLastHeartbeat[storeID]
+	if !ok {
+		return false
+	}
+	return time.Since(t) < StoreDownDuration
+}
+
+// GetDeadStores returns store IDs that have not heartbeated within StoreDownDuration.
+func (m *MetadataStore) GetDeadStores() []uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var dead []uint64
+	for id, t := range m.storeLastHeartbeat {
+		if time.Since(t) >= StoreDownDuration {
+			dead = append(dead, id)
+		}
+	}
+	return dead
+}
+
+// GetLeaderCountPerStore returns the number of region leaders per store.
+func (m *MetadataStore) GetLeaderCountPerStore() map[uint64]int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	counts := make(map[uint64]int)
+	for _, leader := range m.leaders {
+		if leader != nil {
+			counts[leader.GetStoreId()]++
+		}
+	}
+	return counts
+}
+
+// GetAllRegions returns all regions.
+func (m *MetadataStore) GetAllRegions() map[uint64]*metapb.Region {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[uint64]*metapb.Region, len(m.regions))
+	for k, v := range m.regions {
+		result[k] = v
+	}
+	return result
 }
 
 func (m *MetadataStore) PutRegion(region *metapb.Region, leader *metapb.Peer) {

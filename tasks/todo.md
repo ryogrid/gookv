@@ -234,6 +234,15 @@
 ### Phase 7 (Priority 7) - COMPLETE
 - [x] task-15-region-merge: PrepareMerge, CommitMerge, RollbackMerge, CatchUpLogs, MergeState (10 tests)
 
+### Phase 8 (lack-features-3) - COMPLETE
+- [x] Item 1: Raft Snapshot gRPC streaming transfer — PeerStorage.Snapshot() wired to SnapWorker, rd.Snapshot handling in handleReady(), MsgSnap detection in sendRaftMessage(), tikvService.Snapshot() gRPC handler, HandleSnapshotMessage in StoreCoordinator
+- [x] Item 2: Store goroutine completion — HandleRaftMessage falls back to storeCh for unknown regions, RunStoreWorker started in main.go, logging in maybeCreatePeerForMessage
+- [x] Item 3: Significant messages — PeerMsgTypeSignificant handler (Unreachable, SnapshotStatus, MergeResult), reportUnreachable/reportSnapshotStatus in coordinator
+- [x] Item 4: GC safe point PD centralization — GetGCSafePoint/UpdateGCSafePoint in Client interface, grpcClient/MockClient impl, PDSafePointProvider, KvGC updates PD safe point
+- [x] Item 5: KvDeleteRange RPC — ModifyTypeDeleteRange + EndKey field, ApplyModifies support, KvDeleteRange handler, raftcmd serialization
+- [x] Item 6: PD scheduling commands — Store liveness detection, Scheduler (replica repair + leader balance), RegionHeartbeat returns commands, PDWorker processes responses, Peer handles TransferLeader/ChangePeer/Merge via PeerMsgTypeSchedule
+
 ## Summary
 All 21 IMPL user stories complete. Total new tests: 179 across 8 new packages.
 All 15 additional implementation tasks complete with ~165 new tests.
+Phase 8 (lack-features-3): 6 features implemented, all tests pass.

@@ -220,7 +220,8 @@ func TestMockClientHeartbeat(t *testing.T) {
 		Region: region,
 		Leader: leader,
 	}
-	require.NoError(t, c.ReportRegionHeartbeat(ctx, req))
+	_, err := c.ReportRegionHeartbeat(ctx, req)
+	require.NoError(t, err)
 
 	// Region should be registered.
 	gotRegion, gotLeader, err := c.GetRegionByID(ctx, 1)

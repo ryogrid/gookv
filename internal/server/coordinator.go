@@ -40,6 +40,11 @@ type StoreCoordinator struct {
 	splitCheckWorker *split.SplitCheckWorker
 	pdClient         pdclient.Client
 
+	// Snapshot generation worker.
+	snapWorker  *raftstore.SnapWorker
+	snapTaskCh  chan raftstore.GenSnapTask
+	snapStopCh  chan struct{}
+
 	peers   map[uint64]*raftstore.Peer
 	cancels map[uint64]context.CancelFunc
 	dones   map[uint64]chan struct{}
@@ -60,18 +65,27 @@ type StoreCoordinatorConfig struct {
 
 // NewStoreCoordinator creates a new StoreCoordinator.
 func NewStoreCoordinator(cfg StoreCoordinatorConfig) *StoreCoordinator {
+	// Create snapshot worker channel and worker.
+	snapTaskCh := make(chan raftstore.GenSnapTask, 64)
+	snapStopCh := make(chan struct{})
+	snapWorker := raftstore.NewSnapWorker(cfg.Engine, snapTaskCh, snapStopCh)
+	go snapWorker.Run()
+
 	sc := &StoreCoordinator{
-		storeID:  cfg.StoreID,
-		engine:   cfg.Engine,
-		storage:  cfg.Storage,
-		router:   cfg.Router,
-		client:   cfg.Client,
-		cfg:      cfg.PeerCfg,
-		pdTaskCh: cfg.PDTaskCh,
-		pdClient: cfg.PDClient,
-		peers:    make(map[uint64]*raftstore.Peer),
-		cancels:  make(map[uint64]context.CancelFunc),
-		dones:    make(map[uint64]chan struct{}),
+		storeID:    cfg.StoreID,
+		engine:     cfg.Engine,
+		storage:    cfg.Storage,
+		router:     cfg.Router,
+		client:     cfg.Client,
+		cfg:        cfg.PeerCfg,
+		pdTaskCh:   cfg.PDTaskCh,
+		pdClient:   cfg.PDClient,
+		snapWorker: snapWorker,
+		snapTaskCh: snapTaskCh,
+		snapStopCh: snapStopCh,
+		peers:      make(map[uint64]*raftstore.Peer),
+		cancels:    make(map[uint64]context.CancelFunc),
+		dones:      make(map[uint64]chan struct{}),
 	}
 
 	// Create and start the split check worker if PD client is available.
@@ -136,6 +150,11 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 	// Wire split check channel for PD-coordinated splits.
 	if sc.splitCheckWorker != nil {
 		peer.SetSplitCheckCh(sc.splitCheckWorker.TaskCh())
+	}
+
+	// Wire snapshot task channel for async snapshot generation.
+	if sc.snapTaskCh != nil {
+		peer.SetSnapTaskCh(sc.snapTaskCh)
 	}
 
 	// Register with router.
@@ -233,6 +252,8 @@ func (sc *StoreCoordinator) ProposeModifies(regionID uint64, modifies []mvcc.Mod
 }
 
 // HandleRaftMessage dispatches an incoming RaftMessage to the appropriate peer.
+// If the region is not known, the message is routed to the store worker for
+// potential dynamic peer creation.
 func (sc *StoreCoordinator) HandleRaftMessage(msg *raft_serverpb.RaftMessage) error {
 	regionID := msg.GetRegionId()
 
@@ -246,7 +267,16 @@ func (sc *StoreCoordinator) HandleRaftMessage(msg *raft_serverpb.RaftMessage) er
 		Data: &raftMsg,
 	}
 
-	return sc.router.Send(regionID, peerMsg)
+	err = sc.router.Send(regionID, peerMsg)
+	if err == router.ErrRegionNotFound {
+		// Route to store worker for potential peer creation.
+		storeMsg := raftstore.StoreMsg{
+			Type: raftstore.StoreMsgTypeRaftMessage,
+			Data: msg,
+		}
+		return sc.router.SendStore(storeMsg)
+	}
+	return err
 }
 
 // GetPeer returns the Peer for the given region, or nil.
@@ -263,6 +293,11 @@ func (sc *StoreCoordinator) Stop() {
 		sc.splitCheckWorker.Stop()
 	}
 
+	// Stop the snapshot worker.
+	if sc.snapStopCh != nil {
+		close(sc.snapStopCh)
+	}
+
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
@@ -274,6 +309,11 @@ func (sc *StoreCoordinator) Stop() {
 	sc.peers = make(map[uint64]*raftstore.Peer)
 	sc.cancels = make(map[uint64]context.CancelFunc)
 	sc.dones = make(map[uint64]chan struct{})
+}
+
+// Router returns the router for message routing.
+func (sc *StoreCoordinator) Router() *router.Router {
+	return sc.router
 }
 
 // RegionCount returns the number of active regions.
@@ -352,6 +392,11 @@ func (sc *StoreCoordinator) CreatePeer(req *raftstore.CreatePeerRequest) error {
 		peer.SetSplitCheckCh(sc.splitCheckWorker.TaskCh())
 	}
 
+	// Wire snapshot task channel for async snapshot generation.
+	if sc.snapTaskCh != nil {
+		peer.SetSnapTaskCh(sc.snapTaskCh)
+	}
+
 	if err := sc.router.Register(regionID, peer.Mailbox); err != nil {
 		return err
 	}
@@ -407,6 +452,11 @@ func (sc *StoreCoordinator) maybeCreatePeerForMessage(msg *raft_serverpb.RaftMes
 	if sc.router.HasRegion(regionID) {
 		return
 	}
+
+	slog.Info("creating peer for unknown region",
+		"region_id", regionID,
+		"from_store", msg.GetFromPeer().GetStoreId(),
+		"to_peer", msg.GetToPeer().GetId())
 
 	region := &metapb.Region{
 		Id: regionID,
@@ -543,6 +593,7 @@ func (sc *StoreCoordinator) ResolveRegionForKey(key []byte) uint64 {
 }
 
 // sendRaftMessage converts and sends a single raftpb.Message via gRPC transport.
+// For MsgSnap messages, uses streaming SendSnapshot instead of regular Send.
 func (sc *StoreCoordinator) sendRaftMessage(regionID uint64, region *metapb.Region, fromPeerID uint64, msg *raftpb.Message) {
 	var toStoreID uint64
 	for _, p := range region.GetPeers() {
@@ -567,5 +618,73 @@ func (sc *StoreCoordinator) sendRaftMessage(regionID uint64, region *metapb.Regi
 		Message:  eMsg,
 	}
 
-	_ = sc.client.Send(toStoreID, raftMessage)
+	if msg.Type == raftpb.MsgSnap {
+		snapData := msg.Snapshot.Data
+		go func() {
+			if err := sc.client.SendSnapshot(toStoreID, raftMessage, snapData); err != nil {
+				slog.Warn("snapshot send failed", "to_store", toStoreID, "region", regionID, "err", err)
+				sc.reportSnapshotStatus(regionID, msg.To, raft.SnapshotFailure)
+			} else {
+				sc.reportSnapshotStatus(regionID, msg.To, raft.SnapshotFinish)
+			}
+		}()
+		return
+	}
+
+	if err := sc.client.Send(toStoreID, raftMessage); err != nil {
+		slog.Warn("raft send failed", "to_store", toStoreID, "err", err)
+		sc.reportUnreachable(regionID, msg.To)
+	}
+}
+
+// reportSnapshotStatus sends a snapshot status report back to the source peer.
+func (sc *StoreCoordinator) reportSnapshotStatus(regionID uint64, toPeerID uint64, status raft.SnapshotStatus) {
+	peerMsg := raftstore.PeerMsg{
+		Type: raftstore.PeerMsgTypeSignificant,
+		Data: &raftstore.SignificantMsg{
+			Type:     raftstore.SignificantMsgTypeSnapshotStatus,
+			RegionID: regionID,
+			ToPeerID: toPeerID,
+			Status:   status,
+		},
+	}
+	_ = sc.router.Send(regionID, peerMsg) // Best-effort
+}
+
+// reportUnreachable notifies a peer that a target is unreachable.
+func (sc *StoreCoordinator) reportUnreachable(regionID uint64, toPeerID uint64) {
+	peerMsg := raftstore.PeerMsg{
+		Type: raftstore.PeerMsgTypeSignificant,
+		Data: &raftstore.SignificantMsg{
+			Type:     raftstore.SignificantMsgTypeUnreachable,
+			RegionID: regionID,
+			ToPeerID: toPeerID,
+		},
+	}
+	_ = sc.router.Send(regionID, peerMsg) // Best-effort
+}
+
+// HandleSnapshotMessage processes an incoming snapshot received via gRPC streaming.
+func (sc *StoreCoordinator) HandleSnapshotMessage(msg *raft_serverpb.RaftMessage, data []byte) error {
+	regionID := msg.GetRegionId()
+
+	raftMsg, err := raftstore.EraftpbToRaftpb(msg.GetMessage())
+	if err != nil {
+		return err
+	}
+
+	// Attach snapshot data to the raft message.
+	raftMsg.Snapshot.Data = data
+
+	peerMsg := raftstore.PeerMsg{
+		Type: raftstore.PeerMsgTypeRaftMessage,
+		Data: &raftMsg,
+	}
+
+	// If region doesn't exist locally, try to create it.
+	if !sc.router.HasRegion(regionID) {
+		sc.maybeCreatePeerForMessage(msg)
+	}
+
+	return sc.router.Send(regionID, peerMsg)
 }

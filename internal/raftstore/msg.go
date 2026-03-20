@@ -5,6 +5,7 @@ package raftstore
 
 import (
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/kvproto/pkg/raft_cmdpb"
 	"go.etcd.io/etcd/raft/v3"
 )
@@ -29,6 +30,8 @@ const (
 	PeerMsgTypeDestroy
 	// PeerMsgTypeCasual carries low-priority, droppable messages.
 	PeerMsgTypeCasual
+	// PeerMsgTypeSchedule carries PD scheduling commands.
+	PeerMsgTypeSchedule
 )
 
 // PeerMsg is a message delivered to a peer goroutine's mailbox.
@@ -145,6 +148,23 @@ type RaftLogGCTask struct {
 	RegionID uint64
 	StartIdx uint64 // Inclusive
 	EndIdx   uint64 // Exclusive
+}
+
+// ScheduleMsgType identifies the type of PD scheduling command.
+type ScheduleMsgType int
+
+const (
+	ScheduleMsgTransferLeader ScheduleMsgType = iota
+	ScheduleMsgChangePeer
+	ScheduleMsgMerge
+)
+
+// ScheduleMsg carries a PD scheduling command to a Peer.
+type ScheduleMsg struct {
+	Type           ScheduleMsgType
+	TransferLeader *pdpb.TransferLeader
+	ChangePeer     *pdpb.ChangePeer
+	Merge          *pdpb.Merge
 }
 
 // Raft initialization constants (matching TiKV).

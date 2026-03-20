@@ -38,6 +38,9 @@ type MockClient struct {
 
 	// Store stats: storeID -> last heartbeat stats.
 	storeStats map[uint64]*pdpb.StoreStats
+
+	// GC safe point.
+	gcSafePoint atomic.Uint64
 }
 
 // NewMockClient creates a new mock PD client.
@@ -145,7 +148,7 @@ func (c *MockClient) PutStore(_ context.Context, store *metapb.Store) error {
 	return nil
 }
 
-func (c *MockClient) ReportRegionHeartbeat(_ context.Context, req *pdpb.RegionHeartbeatRequest) error {
+func (c *MockClient) ReportRegionHeartbeat(_ context.Context, req *pdpb.RegionHeartbeatRequest) (*pdpb.RegionHeartbeatResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -156,7 +159,16 @@ func (c *MockClient) ReportRegionHeartbeat(_ context.Context, req *pdpb.RegionHe
 			c.leaders[region.GetId()] = req.GetLeader()
 		}
 	}
-	return nil
+
+	// Return canned response if set.
+	if region != nil {
+		if resp, ok := c.heartbeatResponses[region.GetId()]; ok {
+			delete(c.heartbeatResponses, region.GetId())
+			return resp, nil
+		}
+	}
+
+	return &pdpb.RegionHeartbeatResponse{}, nil
 }
 
 func (c *MockClient) StoreHeartbeat(_ context.Context, stats *pdpb.StoreStats) error {
@@ -202,6 +214,22 @@ func (c *MockClient) ReportBatchSplit(_ context.Context, regions []*metapb.Regio
 		}
 	}
 	return nil
+}
+
+func (c *MockClient) GetGCSafePoint(_ context.Context) (uint64, error) {
+	return c.gcSafePoint.Load(), nil
+}
+
+func (c *MockClient) UpdateGCSafePoint(_ context.Context, safePoint uint64) (uint64, error) {
+	for {
+		old := c.gcSafePoint.Load()
+		if safePoint <= old {
+			return old, nil // PD only moves forward
+		}
+		if c.gcSafePoint.CompareAndSwap(old, safePoint) {
+			return safePoint, nil
+		}
+	}
 }
 
 func (c *MockClient) AllocID(_ context.Context) (uint64, error) {

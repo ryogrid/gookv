@@ -9,16 +9,18 @@ import (
 type ModifyType int
 
 const (
-	ModifyTypePut    ModifyType = iota
+	ModifyTypePut         ModifyType = iota
 	ModifyTypeDelete
+	ModifyTypeDeleteRange
 )
 
 // Modify represents a single column family operation.
 type Modify struct {
-	Type  ModifyType
-	CF    string
-	Key   []byte
-	Value []byte
+	Type   ModifyType
+	CF     string
+	Key    []byte
+	Value  []byte
+	EndKey []byte // Used only for ModifyTypeDeleteRange
 }
 
 // ReleasedLock contains information about a released lock, used for

@@ -237,8 +237,51 @@ func (w *PDWorker) sendRegionHeartbeat(data *RegionHeartbeatData) {
 		ApproximateKeys: data.ApproximateKeys,
 	}
 
-	if err := w.pdClient.ReportRegionHeartbeat(ctx, req); err != nil {
+	resp, err := w.pdClient.ReportRegionHeartbeat(ctx, req)
+	if err != nil {
 		slog.Warn("region heartbeat failed", "region", data.Region.GetId(), "err", err)
+		return
+	}
+
+	if resp != nil && data.Region != nil {
+		w.handleSchedulingCommand(data.Region.GetId(), resp)
+	}
+}
+
+// handleSchedulingCommand processes PD scheduling commands from a heartbeat response.
+func (w *PDWorker) handleSchedulingCommand(regionID uint64, resp *pdpb.RegionHeartbeatResponse) {
+	if resp.GetTransferLeader() != nil {
+		w.sendScheduleMsg(regionID, &raftstore.ScheduleMsg{
+			Type:           raftstore.ScheduleMsgTransferLeader,
+			TransferLeader: resp.GetTransferLeader(),
+		})
+	}
+	if resp.GetChangePeer() != nil {
+		w.sendScheduleMsg(regionID, &raftstore.ScheduleMsg{
+			Type:       raftstore.ScheduleMsgChangePeer,
+			ChangePeer: resp.GetChangePeer(),
+		})
+	}
+	if resp.GetMerge() != nil {
+		w.sendScheduleMsg(regionID, &raftstore.ScheduleMsg{
+			Type:  raftstore.ScheduleMsgMerge,
+			Merge: resp.GetMerge(),
+		})
+	}
+}
+
+// sendScheduleMsg delivers a scheduling message to a peer via the router.
+func (w *PDWorker) sendScheduleMsg(regionID uint64, msg *raftstore.ScheduleMsg) {
+	if w.coordinator == nil {
+		return
+	}
+	peerMsg := raftstore.PeerMsg{
+		Type: raftstore.PeerMsgTypeSchedule,
+		Data: msg,
+	}
+	if err := w.coordinator.Router().Send(regionID, peerMsg); err != nil {
+		slog.Warn("failed to send schedule message",
+			"region", regionID, "type", msg.Type, "err", err)
 	}
 }
 

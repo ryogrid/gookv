@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/pingcap/kvproto/pkg/metapb"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 
@@ -39,6 +40,10 @@ type PeerStorage struct {
 	snapReceiver <-chan GenSnapResult
 	snapCanceled *atomic.Bool
 	snapTriedCnt int
+
+	// Snapshot worker wiring (set by coordinator).
+	snapTaskCh chan<- GenSnapTask
+	region     *metapb.Region
 }
 
 // Ensure PeerStorage implements raft.Storage.
@@ -160,16 +165,41 @@ func (s *PeerStorage) FirstIndex() (uint64, error) {
 }
 
 // Snapshot returns the most recent snapshot.
-// In the initial implementation, we return an empty snapshot.
+// If a SnapWorker is wired, triggers async generation via RequestSnapshot.
+// Otherwise returns metadata-only snapshot (standalone fallback).
 func (s *PeerStorage) Snapshot() (raftpb.Snapshot, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return raftpb.Snapshot{
-		Metadata: raftpb.SnapshotMetadata{
-			Index: s.applyState.TruncatedIndex,
-			Term:  s.applyState.TruncatedTerm,
-		},
-	}, nil
+	taskCh := s.snapTaskCh
+	region := s.region
+	s.mu.RUnlock()
+
+	if taskCh == nil {
+		// No snap worker wired — return metadata-only (standalone fallback).
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return raftpb.Snapshot{
+			Metadata: raftpb.SnapshotMetadata{
+				Index: s.applyState.TruncatedIndex,
+				Term:  s.applyState.TruncatedTerm,
+			},
+		}, nil
+	}
+
+	return s.RequestSnapshot(taskCh, region)
+}
+
+// SetSnapTaskCh sets the snapshot task channel for async generation.
+func (s *PeerStorage) SetSnapTaskCh(ch chan<- GenSnapTask) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapTaskCh = ch
+}
+
+// SetRegion sets the region metadata on the storage.
+func (s *PeerStorage) SetRegion(region *metapb.Region) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.region = region
 }
 
 // SaveReady persists the Raft state changes from a Ready batch.

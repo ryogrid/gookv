@@ -61,6 +61,10 @@ func (s *Storage) ApplyModifies(modifies []mvcc.Modify) error {
 			if err := wb.Delete(m.CF, m.Key); err != nil {
 				return err
 			}
+		case mvcc.ModifyTypeDeleteRange:
+			if err := wb.DeleteRange(m.CF, m.Key, m.EndKey); err != nil {
+				return err
+			}
 		}
 	}
 	return wb.Commit()

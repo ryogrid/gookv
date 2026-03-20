@@ -29,6 +29,15 @@ func ModifiesToRequests(modifies []mvcc.Modify) []*raft_cmdpb.Request {
 					Key: m.Key,
 				},
 			})
+		case mvcc.ModifyTypeDeleteRange:
+			reqs = append(reqs, &raft_cmdpb.Request{
+				CmdType: raft_cmdpb.CmdType_DeleteRange,
+				DeleteRange: &raft_cmdpb.DeleteRangeRequest{
+					Cf:       m.CF,
+					StartKey: m.Key,
+					EndKey:   m.EndKey,
+				},
+			})
 		}
 	}
 	return reqs
@@ -52,6 +61,13 @@ func RequestsToModifies(reqs []*raft_cmdpb.Request) []mvcc.Modify {
 				Type: mvcc.ModifyTypeDelete,
 				CF:   r.Delete.Cf,
 				Key:  r.Delete.Key,
+			})
+		case raft_cmdpb.CmdType_DeleteRange:
+			modifies = append(modifies, mvcc.Modify{
+				Type:   mvcc.ModifyTypeDeleteRange,
+				CF:     r.DeleteRange.Cf,
+				Key:    r.DeleteRange.StartKey,
+				EndKey: r.DeleteRange.EndKey,
 			})
 		}
 	}

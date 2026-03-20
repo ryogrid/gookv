@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -1148,6 +1149,64 @@ func (svc *tikvService) KvGC(ctx context.Context, req *kvrpcpb.GCRequest) (*kvrp
 	case <-ctx.Done():
 		resp.Error = errToKeyError(ctx.Err())
 	}
+
+	// After successful GC, update PD safe point.
+	if svc.server.pdClient != nil && resp.Error == nil {
+		safePoint := req.GetSafePoint()
+		if _, err := svc.server.pdClient.UpdateGCSafePoint(ctx, safePoint); err != nil {
+			slog.Warn("failed to update PD GC safe point", "err", err)
+			// Non-fatal: GC already completed locally.
+		}
+	}
+
+	return resp, nil
+}
+
+// --- KvDeleteRange handler ---
+
+// KvDeleteRange implements transactional range deletion.
+func (svc *tikvService) KvDeleteRange(ctx context.Context, req *kvrpcpb.DeleteRangeRequest) (*kvrpcpb.DeleteRangeResponse, error) {
+	resp := &kvrpcpb.DeleteRangeResponse{}
+
+	startKey := req.GetStartKey()
+	endKey := req.GetEndKey()
+
+	if len(startKey) == 0 || len(endKey) == 0 {
+		resp.Error = "start_key and end_key are required"
+		return resp, nil
+	}
+
+	// Build DeleteRange modifies for the data CFs.
+	var modifies []mvcc.Modify
+	for _, cf := range []string{cfnames.CFDefault, cfnames.CFWrite} {
+		modifies = append(modifies, mvcc.Modify{
+			Type:   mvcc.ModifyTypeDeleteRange,
+			CF:     cf,
+			Key:    startKey,
+			EndKey: endKey,
+		})
+	}
+	// Delete locks in the range.
+	modifies = append(modifies, mvcc.Modify{
+		Type:   mvcc.ModifyTypeDeleteRange,
+		CF:     cfnames.CFLock,
+		Key:    startKey,
+		EndKey: endKey,
+	})
+
+	coord := svc.server.coordinator
+	if coord != nil {
+		// Cluster mode: propose via Raft.
+		if err := coord.ProposeModifies(1, modifies, 30*time.Second); err != nil {
+			resp.Error = err.Error()
+		}
+	} else {
+		// Standalone mode: apply directly.
+		if err := svc.server.storage.ApplyModifies(modifies); err != nil {
+			resp.Error = err.Error()
+		}
+	}
+
 	return resp, nil
 }
 
@@ -1376,6 +1435,42 @@ func (svc *tikvService) BatchRaft(stream tikvpb.Tikv_BatchRaftServer) error {
 			}
 		}
 	}
+}
+
+// Snapshot implements the Tikv_SnapshotServer streaming endpoint.
+// It receives chunked snapshot data from a leader node.
+func (svc *tikvService) Snapshot(stream tikvpb.Tikv_SnapshotServer) error {
+	var raftMsg *raft_serverpb.RaftMessage
+	var dataBuf bytes.Buffer
+
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if chunk.GetMessage() != nil {
+			raftMsg = chunk.GetMessage()
+		}
+		dataBuf.Write(chunk.GetData())
+	}
+
+	if raftMsg == nil {
+		return stream.SendAndClose(&raft_serverpb.Done{})
+	}
+
+	coord := svc.server.coordinator
+	if coord == nil {
+		return stream.SendAndClose(&raft_serverpb.Done{})
+	}
+
+	if err := coord.HandleSnapshotMessage(raftMsg, dataBuf.Bytes()); err != nil {
+		slog.Warn("snapshot receive failed", "err", err)
+	}
+
+	return stream.SendAndClose(&raft_serverpb.Done{})
 }
 
 // errToKeyError converts an internal error to a kvrpcpb.KeyError.

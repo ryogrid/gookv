@@ -3,9 +3,11 @@ package raftstore
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
+	"github.com/pingcap/kvproto/pkg/eraftpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
@@ -210,6 +212,12 @@ func (p *Peer) SetPDTaskCh(ch chan<- interface{}) { p.pdTaskCh = ch }
 // SetSplitCheckCh sets the channel for sending split check tasks.
 func (p *Peer) SetSplitCheckCh(ch chan<- split.SplitCheckTask) { p.splitCheckCh = ch }
 
+// SetSnapTaskCh wires the snapshot generation task channel to PeerStorage.
+func (p *Peer) SetSnapTaskCh(ch chan<- GenSnapTask) {
+	p.storage.SetSnapTaskCh(ch)
+	p.storage.SetRegion(p.region)
+}
+
 // UpdateRegion replaces the peer's region metadata (e.g., after a split).
 func (p *Peer) UpdateRegion(r *metapb.Region) { p.region = r }
 
@@ -283,6 +291,14 @@ func (p *Peer) handleMessage(msg PeerMsg) {
 		result := msg.Data.(*ApplyResult)
 		p.onApplyResult(result)
 
+	case PeerMsgTypeSignificant:
+		sig := msg.Data.(*SignificantMsg)
+		p.handleSignificantMessage(sig)
+
+	case PeerMsgTypeSchedule:
+		sched := msg.Data.(*ScheduleMsg)
+		p.handleScheduleMessage(sched)
+
 	case PeerMsgTypeDestroy:
 		p.stopped.Store(true)
 		// Drain mailbox.
@@ -290,6 +306,56 @@ func (p *Peer) handleMessage(msg PeerMsg) {
 
 	default:
 		// Unknown message type; ignore.
+	}
+}
+
+func (p *Peer) handleSignificantMessage(msg *SignificantMsg) {
+	switch msg.Type {
+	case SignificantMsgTypeUnreachable:
+		p.rawNode.ReportUnreachable(msg.ToPeerID)
+
+	case SignificantMsgTypeSnapshotStatus:
+		p.rawNode.ReportSnapshot(msg.ToPeerID, msg.Status)
+
+	case SignificantMsgTypeMergeResult:
+		slog.Info("merge result received, destroying peer",
+			"region", p.regionID, "peer", p.peerID)
+		p.stopped.Store(true)
+	}
+}
+
+func (p *Peer) handleScheduleMessage(msg *ScheduleMsg) {
+	if !p.isLeader.Load() {
+		return // Only leader executes scheduling.
+	}
+
+	switch msg.Type {
+	case ScheduleMsgTransferLeader:
+		targetPeer := msg.TransferLeader.GetPeer()
+		// Find peer ID for the target store.
+		for _, peer := range p.region.GetPeers() {
+			if peer.GetStoreId() == targetPeer.GetStoreId() {
+				p.rawNode.TransferLeader(peer.GetId())
+				slog.Info("transfer leader scheduled",
+					"region", p.regionID, "to_peer", peer.GetId())
+				return
+			}
+		}
+
+	case ScheduleMsgChangePeer:
+		cp := msg.ChangePeer
+		changeType := raftpb.ConfChangeAddNode
+		if cp.GetChangeType() == eraftpb.ConfChangeType_RemoveNode {
+			changeType = raftpb.ConfChangeRemoveNode
+		}
+		if err := p.ProposeConfChange(changeType, cp.GetPeer().GetId(), cp.GetPeer().GetStoreId()); err != nil {
+			slog.Warn("change peer scheduling failed", "region", p.regionID, "err", err)
+		}
+
+	case ScheduleMsgMerge:
+		// Merge is complex; log and skip for initial implementation.
+		slog.Info("merge scheduling not yet implemented",
+			"region", p.regionID, "target", msg.Merge.GetTarget().GetId())
 	}
 }
 
@@ -348,6 +414,13 @@ func (p *Peer) handleReady() {
 		// Fatal: persistence failure. In production, this should trigger
 		// a panic or store shutdown.
 		return
+	}
+
+	// Apply snapshot if present.
+	if !raft.IsEmptySnap(rd.Snapshot) {
+		if err := p.storage.ApplySnapshot(rd.Snapshot); err != nil {
+			slog.Error("failed to apply snapshot", "region", p.regionID, "err", err)
+		}
 	}
 
 	// Send Raft messages to other peers.

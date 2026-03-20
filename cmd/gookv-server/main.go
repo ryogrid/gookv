@@ -177,6 +177,11 @@ func main() {
 			pdWorker.Run()
 		}
 
+		// Start store worker for dynamic peer creation.
+		storeWorkerCtx, storeWorkerCancel := context.WithCancel(context.Background())
+		go coord.RunStoreWorker(storeWorkerCtx)
+		defer storeWorkerCancel()
+
 		// Start split result handler if PD-coordinated splits are enabled.
 		if pdClient != nil {
 			splitCtx, splitCancel := context.WithCancel(context.Background())

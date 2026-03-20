@@ -61,8 +61,8 @@ type Client interface {
 	PutStore(ctx context.Context, store *metapb.Store) error
 
 	// ReportRegionHeartbeat sends region heartbeat to PD.
-	// Returns any scheduling commands from PD.
-	ReportRegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatRequest) error
+	// Returns the PD response which may contain scheduling commands.
+	ReportRegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatRequest) (*pdpb.RegionHeartbeatResponse, error)
 
 	// StoreHeartbeat sends a store-level heartbeat to PD.
 	StoreHeartbeat(ctx context.Context, stats *pdpb.StoreStats) error
@@ -72,6 +72,13 @@ type Client interface {
 
 	// ReportBatchSplit notifies PD of completed splits.
 	ReportBatchSplit(ctx context.Context, regions []*metapb.Region) error
+
+	// GetGCSafePoint returns the cluster-wide GC safe point from PD.
+	GetGCSafePoint(ctx context.Context) (uint64, error)
+
+	// UpdateGCSafePoint advances the cluster-wide GC safe point on PD.
+	// PD ensures the safe point only moves forward.
+	UpdateGCSafePoint(ctx context.Context, safePoint uint64) (uint64, error)
 
 	// AllocID allocates a new unique ID from PD.
 	AllocID(ctx context.Context) (uint64, error)
@@ -406,8 +413,9 @@ func (c *grpcClient) PutStore(ctx context.Context, store *metapb.Store) error {
 	})
 }
 
-func (c *grpcClient) ReportRegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatRequest) error {
-	return c.withRetry(func() error {
+func (c *grpcClient) ReportRegionHeartbeat(ctx context.Context, req *pdpb.RegionHeartbeatRequest) (*pdpb.RegionHeartbeatResponse, error) {
+	var result *pdpb.RegionHeartbeatResponse
+	err := c.withRetry(func() error {
 		c.mu.RLock()
 		client := c.client
 		c.mu.RUnlock()
@@ -424,11 +432,14 @@ func (c *grpcClient) ReportRegionHeartbeat(ctx context.Context, req *pdpb.Region
 			return fmt.Errorf("pdclient: region heartbeat close: %w", err)
 		}
 		// Wait for the server to acknowledge the heartbeat.
-		if _, err := stream.Recv(); err != nil {
+		resp, err := stream.Recv()
+		if err != nil {
 			return fmt.Errorf("pdclient: region heartbeat recv: %w", err)
 		}
+		result = resp
 		return nil
 	})
+	return result, err
 }
 
 func (c *grpcClient) StoreHeartbeat(ctx context.Context, stats *pdpb.StoreStats) error {
@@ -493,6 +504,51 @@ func (c *grpcClient) ReportBatchSplit(ctx context.Context, regions []*metapb.Reg
 		}
 		return nil
 	})
+}
+
+func (c *grpcClient) GetGCSafePoint(ctx context.Context) (uint64, error) {
+	var safePoint uint64
+	err := c.withRetry(func() error {
+		c.mu.RLock()
+		client := c.client
+		c.mu.RUnlock()
+
+		resp, err := client.GetGCSafePoint(ctx, &pdpb.GetGCSafePointRequest{
+			Header: c.header(),
+		})
+		if err != nil {
+			return fmt.Errorf("pdclient: get gc safe point: %w", err)
+		}
+		if resp.GetHeader().GetError() != nil {
+			return fmt.Errorf("pdclient: get gc safe point error: %s", resp.GetHeader().GetError().GetMessage())
+		}
+		safePoint = resp.GetSafePoint()
+		return nil
+	})
+	return safePoint, err
+}
+
+func (c *grpcClient) UpdateGCSafePoint(ctx context.Context, safePoint uint64) (uint64, error) {
+	var newSafePoint uint64
+	err := c.withRetry(func() error {
+		c.mu.RLock()
+		client := c.client
+		c.mu.RUnlock()
+
+		resp, err := client.UpdateGCSafePoint(ctx, &pdpb.UpdateGCSafePointRequest{
+			Header:    c.header(),
+			SafePoint: safePoint,
+		})
+		if err != nil {
+			return fmt.Errorf("pdclient: update gc safe point: %w", err)
+		}
+		if resp.GetHeader().GetError() != nil {
+			return fmt.Errorf("pdclient: update gc safe point error: %s", resp.GetHeader().GetError().GetMessage())
+		}
+		newSafePoint = resp.GetNewSafePoint()
+		return nil
+	})
+	return newSafePoint, err
 }
 
 func (c *grpcClient) AllocID(ctx context.Context) (uint64, error) {

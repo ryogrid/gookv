@@ -50,9 +50,10 @@ The `main()` function proceeds through these steps in order:
    - `server.NewStaticStoreResolver(clusterMap)` creates a resolver that maps store IDs to network addresses.
    - `transport.NewRaftClient(resolver, config)` creates a Raft transport client for inter-node communication.
    - `raftrouter.New(256)` creates the Raft message router with 256 shards.
-   - `server.NewStoreCoordinator(...)` creates the coordinator that ties together the engine, storage, router, and Raft client.
+   - `server.NewStoreCoordinator(...)` creates the coordinator that ties together the engine, storage, router, Raft client, and optional PD client for split coordination.
    - The coordinator is attached to the server via `srv.SetCoordinator(coord)`.
    - **Region bootstrap**: A single region (ID=1) is created spanning all stores. Each store ID doubles as a peer ID (`Peer{Id: storeID, StoreId: storeID}`). `coord.BootstrapRegion()` initializes the Raft group.
+   - If PD client is configured, `go coord.RunSplitResultHandler(ctx)` is started to handle PD-coordinated splits.
 
 9. **gRPC server start** -- `srv.Start()` begins accepting gRPC connections.
 
@@ -143,12 +144,15 @@ This command inspects the multi-version concurrency control state for a single u
 | `--cf` | string | `"default"` | Column family name |
 | `--limit` | int | `50` | Maximum entries to dump |
 | `--decode` | bool | `false` | Decode MVCC keys and values |
+| `--sst` | string | `""` | Path to SST file for direct parsing (no `--db` required) |
 
 Iterates from the beginning of the specified column family and prints each key-value pair as tab-separated hex strings. Useful for low-level debugging.
 
 When `--decode` is set, the output includes decoded MVCC information:
 - **Write CF** (`dumpWriteCF`): Decodes user key, commit timestamp, write type (Put/Delete/Lock/Rollback), and start timestamp from each entry.
 - **Lock CF** (`dumpLockCF`): Decodes user key and lock details (type, primary key, start timestamp, TTL) from each entry.
+
+When `--sst` is provided, the command parses an SST file directly using Pebble's `sstable` package (`cmdDumpSST`), bypassing the need for a running database. This enables offline debugging of individual SST files.
 
 #### 3.3.5 `size` -- Approximate data size per column family
 
@@ -162,13 +166,15 @@ Iterates all four column families (`default`, `lock`, `write`, `raft`) and compu
 
 Sizes are formatted with human-readable units (B, KB, MB, GB) via the `formatSize()` helper.
 
-#### 3.3.6 `compact` -- Trigger WAL sync
+#### 3.3.6 `compact` -- Trigger compaction
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--db` | string | (required) | Path to data directory |
+| `--cf` | string | `""` | Column family to compact (empty = all CFs) |
+| `--flush-only` | bool | `false` | Only flush WAL without full compaction |
 
-Calls `eng.SyncWAL()` on the opened engine. Despite its name, this does **not** trigger actual LSM-tree compaction -- it only forces a write-ahead log sync to ensure durability. The misleading "Compaction triggered successfully" message is printed on completion.
+When `--flush-only` is set, calls `eng.SyncWAL()` to ensure WAL durability. Otherwise, calls `CompactAll()` (all CFs) or `CompactCF(cf)` (specific CF) to trigger full LSM-tree compaction.
 
 #### 3.3.7 `region` -- Region metadata inspection
 
@@ -281,7 +287,178 @@ flowchart TD
 
 ---
 
-## 6. Implementation Status
+## 6. Multi-Region Client Library (`pkg/client/`)
+
+The `pkg/client` package provides a full client library for gookv with transparent multi-region routing. It builds on `pkg/pdclient` for cluster metadata and connects directly to gookv-server nodes via gRPC.
+
+### 6.1 Architecture
+
+```mermaid
+graph TB
+    subgraph "pkg/client"
+        CLIENT["Client<br/>(entry point)"]
+        RAWKV["RawKVClient<br/>(Raw KV API)"]
+        CACHE["RegionCache<br/>(sorted-slice binary search)"]
+        SENDER["RegionRequestSender<br/>(gRPC pool + retry)"]
+        RESOLVER["PDStoreResolver<br/>(TTL-cached store lookup)"]
+    end
+
+    subgraph "pkg/pdclient"
+        PDCLIENT["pdclient.Client"]
+    end
+
+    subgraph "gookv-server nodes"
+        SRV1["Server 1"]
+        SRV2["Server 2"]
+        SRV_N["Server N"]
+    end
+
+    CLIENT --> RAWKV
+    CLIENT --> CACHE
+    CLIENT --> RESOLVER
+    CLIENT --> SENDER
+    RAWKV --> SENDER
+    RAWKV --> CACHE
+    SENDER --> CACHE
+    SENDER --> RESOLVER
+    CACHE --> PDCLIENT
+    CACHE --> RESOLVER
+    RESOLVER --> PDCLIENT
+    SENDER --> SRV1
+    SENDER --> SRV2
+    SENDER --> SRV_N
+```
+
+### 6.2 Config
+
+```go
+type Config struct {
+    PDAddrs       []string      // PD server addresses (required)
+    DialTimeout   time.Duration // gRPC dial timeout (default: 5s)
+    MaxRetries    int           // max retry attempts per request (default: 3)
+    StoreCacheTTL time.Duration // store address cache TTL (default: 30s)
+}
+```
+
+### 6.3 Client
+
+`Client` is the main entry point. Created via `NewClient(ctx, cfg)`, which initializes a PD client, `RegionCache`, `PDStoreResolver`, and `RegionRequestSender`.
+
+| Method | Description |
+|---|---|
+| `RawKV()` | Returns a `RawKVClient` for key-value operations |
+| `Close()` | Closes sender connections and PD client |
+
+### 6.4 RawKVClient
+
+Provides the full Raw KV API with transparent cross-region routing.
+
+**Single-key operations:**
+
+| Method | Description |
+|---|---|
+| `Get(ctx, key)` | Point read. Returns `(value, notFound, error)` |
+| `Put(ctx, key, value)` | Write a key-value pair |
+| `PutWithTTL(ctx, key, value, ttl)` | Write with per-key TTL |
+| `Delete(ctx, key)` | Delete a key |
+| `GetKeyTTL(ctx, key)` | Returns remaining TTL |
+
+**Batch operations** (parallel multi-region via `errgroup`):
+
+| Method | Description |
+|---|---|
+| `BatchGet(ctx, keys)` | Multi-key read across regions |
+| `BatchPut(ctx, pairs)` | Multi-key write across regions |
+| `BatchDelete(ctx, keys)` | Multi-key delete across regions |
+
+**Range operations** (automatic region boundary handling):
+
+| Method | Description |
+|---|---|
+| `Scan(ctx, startKey, endKey, limit)` | Cross-region scan with limit |
+| `DeleteRange(ctx, startKey, endKey)` | Delete all keys in range |
+
+**Atomic / utility operations:**
+
+| Method | Description |
+|---|---|
+| `CompareAndSwap(ctx, key, value, prevValue, prevNotExist)` | Atomic CAS. Returns `(succeeded, previousValue, error)` |
+| `Checksum(ctx, startKey, endKey)` | Returns `(checksum, totalKvs, totalBytes, error)` |
+
+### 6.5 RegionCache
+
+Maintains a sorted `[]*RegionInfo` slice (binary search on `StartKey`) plus a `map[uint64]int` index by region ID.
+
+| Method | Description |
+|---|---|
+| `LocateKey(ctx, key)` | Returns `*RegionInfo` from cache or queries PD |
+| `InvalidateRegion(regionID)` | Removes stale cache entry |
+| `UpdateLeader(regionID, leader, storeAddr)` | Updates leader in-place |
+| `GroupKeysByRegion(ctx, keys)` | Groups keys by region for batch operations |
+
+### 6.6 PDStoreResolver
+
+TTL-based cache mapping `storeID → gRPC address`. Default TTL is 30 seconds.
+
+| Method | Description |
+|---|---|
+| `Resolve(ctx, storeID)` | Returns cached address or queries PD |
+| `InvalidateStore(storeID)` | Removes stale address from cache |
+
+### 6.7 RegionRequestSender
+
+gRPC connection pool with automatic retry on region errors. Manages a `map[string]*grpc.ClientConn` pool with double-check locking.
+
+| Method | Description |
+|---|---|
+| `SendToRegion(ctx, key, rpcFn)` | Core retry loop: locate region, dial, execute, handle errors |
+| `HandleRegionError(ctx, info, regionErr)` | Processes `NotLeader`, `EpochNotMatch`, `RegionNotFound`, `StoreNotMatch` errors and invalidates cache |
+| `Close()` | Closes all gRPC connections |
+
+**Retry behavior**: On `NotLeader`, updates the cached leader and retries. On `EpochNotMatch`, `RegionNotFound`, or `StoreNotMatch`, invalidates the region cache entry and retries with fresh PD data. Max retries configurable (default 3).
+
+### 6.8 Request Flow
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant RawKV as RawKVClient
+    participant Sender as RegionRequestSender
+    participant Cache as RegionCache
+    participant Resolver as PDStoreResolver
+    participant PD as PD Server
+    participant Store as gookv-server
+
+    App->>RawKV: Get(ctx, key)
+    RawKV->>Sender: SendToRegion(key, rpcFn)
+    Sender->>Cache: LocateKey(key)
+    alt Cache miss
+        Cache->>PD: GetRegion(key)
+        PD-->>Cache: region + leader
+        Cache->>Resolver: Resolve(leaderStoreID)
+        alt Store cache miss
+            Resolver->>PD: GetStore(storeID)
+            PD-->>Resolver: store addr
+        end
+        Resolver-->>Cache: addr
+        Cache-->>Sender: RegionInfo
+    else Cache hit
+        Cache-->>Sender: RegionInfo
+    end
+    Sender->>Store: RawGet RPC
+    alt Region error (NotLeader)
+        Store-->>Sender: regionError
+        Sender->>Cache: UpdateLeader / InvalidateRegion
+        Sender->>Store: retry with new leader
+    end
+    Store-->>Sender: value
+    Sender-->>RawKV: value
+    RawKV-->>App: (value, false, nil)
+```
+
+---
+
+## 7. Implementation Status
 
 | Component | Status | Notes |
 |---|---|---|
@@ -290,9 +467,10 @@ flowchart TD
 | CLI: `scan` | Implemented | Column-family range scan with hex key bounds |
 | CLI: `get` | Implemented | Single key point lookup |
 | CLI: `mvcc` | Implemented | Lock inspection, write history (up to 10 records), JSON output |
-| CLI: `dump` | Implemented | Raw hex key-value dump |
+| CLI: `dump` | Implemented | Raw hex key-value dump with `--sst` for direct SST file parsing |
 | CLI: `size` | Implemented | Per-CF key count and byte size |
-| CLI: `compact` | Partial | Only calls `SyncWAL()`; does not trigger actual LSM compaction |
+| CLI: `compact` | Implemented | Full LSM compaction via `CompactAll()`/`CompactCF()` with `--flush-only` flag for WAL-only sync |
 | CLI: `region` | Implemented | Region metadata inspection with `--id`, `--all`, `--limit` flags |
 | CLI: `dump --decode` | Implemented | MVCC key/value decoding for write and lock CFs |
-| PD client library | Implemented | Full gRPC client + mock for testing |
+| PD client library | Implemented | Full gRPC client with multi-endpoint failover and retry + mock for testing |
+| Client library (`pkg/client`) | Implemented | Multi-region RawKVClient, RegionCache, PDStoreResolver, RegionRequestSender |

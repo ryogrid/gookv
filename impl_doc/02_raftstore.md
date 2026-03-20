@@ -55,6 +55,7 @@ type Peer struct {
     lastCompactedIdx uint64                         // last index sent to RaftLogGCWorker
     logGCWorkerCh    chan<- RaftLogGCTask            // sends GC tasks to RaftLogGCWorker
     pdTaskCh         chan<- interface{}              // sends RegionHeartbeatInfo to PDWorker
+    splitCheckCh     chan<- split.SplitCheckTask     // sends split check tasks to SplitCheckWorker
 
     stopped          atomic.Bool
     isLeader         atomic.Bool
@@ -79,6 +80,7 @@ type PeerConfig struct {
     RaftLogGCCountLimit      uint64         // default: 72000
     RaftLogGCSizeLimit       uint64         // default: 72 MiB
     RaftLogGCThreshold       uint64         // default: 50
+    SplitCheckTickInterval   time.Duration  // default: 10s (0 = disabled)
 }
 ```
 
@@ -160,6 +162,9 @@ classDiagram
         -onReadyCompactLog(compactIdx, compactTerm uint64)
         -scheduleRaftLogGC(compactIdx uint64)
         -sendRegionHeartbeatToPD()
+        -onSplitCheckTick()
+        +SetSplitCheckCh(ch chan SplitCheckTask)
+        +UpdateRegion(region *metapb.Region)
     }
 
     class PeerStorage {
@@ -714,4 +719,4 @@ This is used after a peer is removed via conf change or region merge.
 - **Significant messages** — `PeerMsgTypeSignificant` is defined; only `SnapshotStatus` is partially handled. `Unreachable` and `MergeResult` are not handled.
 - **Casual messages** — `PeerMsgTypeCasual` is defined but not handled in `handleMessage`.
 - **PeerMsgTypeStart** — Defined but not handled.
-- **PD-coordinated split** — `SplitCheckWorker` exists but the peer event loop does not handle `PeerTickSplitRegionCheck` to trigger PD-coordinated split proposals.
+- **PD-coordinated split** — Now wired end-to-end. Peers call `onSplitCheckTick()` at a configurable interval (`SplitCheckTickInterval`, default 10s) when acting as leader, sending `SplitCheckTask` to the `SplitCheckWorker` via `splitCheckCh`. The `StoreCoordinator.RunSplitResultHandler()` processes results: calls `AskBatchSplit` on PD for new IDs, executes `ExecBatchSplit`, bootstraps child regions via `CreatePeer`, and reports splits to PD via `ReportBatchSplit`.

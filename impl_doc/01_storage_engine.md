@@ -479,3 +479,7 @@ All individual mutations in the batch are applied atomically. The commit is sync
 - **`SyncWAL`** calls `db.Flush()` rather than a true WAL sync. `Flush()` forces a memtable flush to SST files, which is a stronger (and more expensive) durability guarantee than WAL-only sync. This means `SyncWAL` is not semantically identical to RocksDB's `SyncWAL` -- it writes data to L0 SSTs rather than just ensuring the WAL is fsync'd.
 - **`GetProperty`** ignores the `cf` and `name` parameters and always returns the full Pebble metrics string. This is a simplified implementation compared to RocksDB's per-CF property queries.
 - **Value copying**: Both `Engine.Get` and `iterator.Value` allocate new slices and copy data before returning, preventing callers from holding references to Pebble's internal buffers.
+
+### Conformance Tests
+
+`internal/engine/traits/conformance_test.go` provides 17 test cases that verify the `KvEngine` interface contract independently of the Pebble implementation. Tests cover `WriteBatch` atomicity and rollback, `Snapshot` isolation, `Iterator` boundary behavior, cross-CF operations, and concurrent access patterns.

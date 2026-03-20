@@ -52,6 +52,10 @@ Reverses `EncodeBytes`. Reads 9 bytes at a time:
 
 Returns `(decoded, remaining, error)` where `remaining` is the unconsumed tail of the input buffer.
 
+### Fuzz Tests
+
+`pkg/codec/fuzz_test.go` provides 6 fuzz targets using Go's `testing.F` framework, covering `EncodeBytes`/`DecodeBytes`, `EncodeBytesDesc`/`DecodeBytesDesc`, `EncodeUint64`/`DecodeUint64`, `EncodeUint64Desc`/`DecodeUint64Desc`, `EncodeInt64`/`DecodeInt64`, and `EncodeFloat64`/`DecodeFloat64`. Each target verifies round-trip correctness and ordering invariants.
+
 ### `EncodeBytesDesc(dst, data) []byte` / `DecodeBytesDesc(data) ([]byte, []byte, error)`
 
 Descending-order variants. `EncodeBytesDesc` calls `EncodeBytes` and then bitwise-inverts every newly appended byte (`^`). `DecodeBytesDesc` inverts each group and marker inline before applying the same group-based decoding logic.

@@ -33,7 +33,8 @@
 | `pkg/keys` | Internal key construction for Raft logs, hard state, apply state, region metadata. Defines `DataPrefix` (0x7A) and `LocalPrefix` (0x01) key namespaces. |
 | `pkg/cfnames` | Column family name constants: `default`, `lock`, `write`, `raft`. Defines `DataCFs` and `AllCFs` slices. |
 | `pkg/txntypes` | Transaction type definitions: `TimeStamp` (hybrid logical clock, physical<<18 \| logical), `Lock` (with TiKV-compatible binary serialization), `Write` (commit/rollback records), `Mutation`, `LockType`, `WriteType`. |
-| `pkg/pdclient` | PD (Placement Driver) gRPC client interface: TSO allocation (`GetTS`), region lookup, store management, heartbeats, split requests, cluster bootstrap. Provides `Client` interface and `grpcClient` implementation. |
+| `pkg/pdclient` | PD (Placement Driver) gRPC client interface: TSO allocation (`GetTS`), region lookup, store management, heartbeats, split requests, cluster bootstrap. Provides `Client` interface and `grpcClient` implementation with multi-endpoint failover and retry logic. |
+| `pkg/client` | Multi-region client library: `Client` (entry point, PD-backed), `RawKVClient` (full Raw KV API with transparent cross-region routing), `RegionCache` (sorted-slice binary-search key→region cache with PD fallback), `RegionRequestSender` (gRPC connection pool with region-error retry), `PDStoreResolver` (TTL-cached storeID→address resolver). |
 
 ### Private Packages (`internal/`)
 
@@ -57,8 +58,8 @@
 | `internal/raftstore/store_worker.go` | Region data cleanup: `CleanupRegionData` removes all Raft state for destroyed regions. |
 | `internal/pd` | Embedded PD server: TSO allocation, metadata store, ID allocation, GC safe point management. Implements `pdpb.PD` gRPC service. |
 | `internal/server/pd_worker.go` | PDWorker: store heartbeat loop, region heartbeat forwarding, batch split reporting. |
-| `internal/server/raw_storage.go` | Non-transactional Raw KV storage layer bypassing MVCC. |
-| `internal/server` | gRPC server (`tikvpb.Tikv` service): `Server` (gRPC lifecycle), `tikvService` (implements KvGet, KvScan, KvPrewrite, KvCommit, KvBatchGet, KvBatchRollback, KvCleanup, KvCheckTxnStatus, BatchCommands, Raft, BatchRaft), `Storage` (transaction-aware bridge between engine/MVCC/txn layers with latch-based serialization), `StoreCoordinator` (Raft peer lifecycle management, proposal routing, entry application), `StaticStoreResolver` (storeID-to-address mapping), `ModifiesToRequests`/`RequestsToModifies` (MVCC modify <-> raft_cmdpb conversion). |
+| `internal/server/raw_storage.go` | Non-transactional Raw KV storage layer bypassing MVCC. Supports TTL encoding, CAS, batch scan, checksum computation. |
+| `internal/server` | gRPC server (`tikvpb.Tikv` service): `Server` (gRPC lifecycle with optional PD client for TSO), `tikvService` (implements KvGet, KvScan, KvPrewrite, KvCommit, KvBatchGet, KvBatchRollback, KvCleanup, KvCheckTxnStatus, KvCheckSecondaryLocks, KvScanLock, KvPessimisticLock, KvResolveLock, KvTxnHeartBeat, RawBatchScan, RawGetKeyTTL, RawCompareAndSwap, RawChecksum, BatchCommands, Raft, BatchRaft), `Storage` (transaction-aware bridge between engine/MVCC/txn layers with latch-based serialization, async commit, and 1PC support), `StoreCoordinator` (Raft peer lifecycle management, proposal routing, entry application, PD-coordinated split detection and execution), `StaticStoreResolver` (storeID-to-address mapping), `ModifiesToRequests`/`RequestsToModifies` (MVCC modify <-> raft_cmdpb conversion). Region-aware request validation via `validateRegionContext()`. |
 | `internal/server/transport` | Inter-node Raft message transport over gRPC: `RaftClient` (connection pooling, `Send`/`BatchSend`/`SendSnapshot`), `MessageBatcher` (batch accumulation), `StoreResolver` interface. |
 | `internal/server/status` | HTTP diagnostics server: `/debug/pprof/*`, `/metrics` (Prometheus), `/config`, `/status`, `/health`. |
 | `internal/server/flow` | Flow control and backpressure: `ReadPool` (EWMA-based busy detection, worker pool), `FlowController` (probabilistic request dropping based on compaction pressure), `MemoryQuota` (lock-free scheduler memory enforcement). |
@@ -71,7 +72,7 @@
 | Package | Description |
 |---|---|
 | `cmd/gookv-server` | Main server entry point. Parses CLI flags, loads TOML config, opens Pebble engine, creates Storage and gRPC Server, optionally bootstraps Raft cluster mode, starts HTTP status server, handles graceful shutdown on SIGINT/SIGTERM. |
-| `cmd/gookv-ctl` | Admin CLI. Subcommands: `scan` (range scan by CF), `get` (point read), `mvcc` (MVCC info as JSON), `dump` (raw hex dump), `size` (per-CF key count and size), `compact` (trigger WAL flush), `region` (metadata inspection with `--id`, `--all`, `--limit`). Opens Pebble engine directly. |
+| `cmd/gookv-ctl` | Admin CLI. Subcommands: `scan` (range scan by CF), `get` (point read), `mvcc` (MVCC info as JSON), `dump` (raw hex dump with `--decode` and `--sst` for direct SST file parsing), `size` (per-CF key count and size), `compact` (LSM compaction with `CompactAll`/`CompactCF` and `--flush-only` flag), `region` (metadata inspection with `--id`, `--all`, `--limit`). Opens Pebble engine directly. |
 | `cmd/gookv-pd` | PD server entry point. Parses `--addr`, `--data-dir`, `--cluster-id` flags. |
 
 ---
@@ -83,6 +84,7 @@ graph TB
     subgraph "Client Layer"
         CLI["gookv-ctl<br/>(Admin CLI)"]
         GRPC_CLIENT["gRPC Clients<br/>(TiKV-compatible)"]
+        CLIENT_LIB["pkg/client<br/>RawKVClient, RegionCache,<br/>PDStoreResolver,<br/>RegionRequestSender"]
     end
 
     subgraph "gRPC Server Layer"
@@ -134,6 +136,8 @@ graph TB
 
     GRPC_CLIENT --> TIKV_SVC
     GRPC_CLIENT --> BATCH_CMD
+    CLIENT_LIB --> TIKV_SVC
+    CLIENT_LIB --> PD_SERVER
     CLI --> KV_ENGINE
 
     TIKV_SVC --> STORAGE
@@ -285,6 +289,10 @@ main()
   |          server.NewPDWorker(pdClient, storeID, coord)
   |          -> Wires pdTaskCh for heartbeat/split reporting
   |          -> go pdWorker.Run(ctx) -- store heartbeat loop, region heartbeat forwarding
+  |       k. Start split result handler
+  |          go coord.RunSplitResultHandler(ctx)
+  |          -> Processes split check results, coordinates with PD for new IDs,
+  |             executes ExecBatchSplit, bootstraps child regions, reports to PD
   |
   +-- 7. Start gRPC server
   |     srv.Start()
@@ -402,6 +410,7 @@ graph LR
         CFNAMES["cfnames"]
         TXNTYPES["txntypes"]
         PDCLIENT["pdclient"]
+        PKG_CLIENT["client<br/>(RawKVClient,<br/>RegionCache)"]
     end
 
     %% cmd dependencies
@@ -533,6 +542,8 @@ graph LR
     KEYS --> CODEC
     TXNTYPES -.-> CODEC
     PDCLIENT -.-> TXNTYPES
+    PKG_CLIENT --> PDCLIENT
+    PKG_CLIENT --> SRV
 ```
 
 ### Key Architectural Notes

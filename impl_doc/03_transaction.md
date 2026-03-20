@@ -613,6 +613,8 @@ type TxnStatus struct {
 
 Async commit reduces commit latency by making the transaction logically committed as soon as the primary key's lock is persisted. The primary lock stores all secondary keys; readers can determine commit status by inspecting the primary lock.
 
+**gRPC Integration**: The `KvPrewrite` handler inspects `req.UseAsyncCommit` and routes to `PrewriteAsyncCommit` / `PrewriteAsyncCommitModifies`. When a PD client is configured, the server uses PD-allocated timestamps (via `pdClient.GetTS()`) for `MaxCommitTS`, ensuring linearizability. `KvCheckSecondaryLocks` is fully implemented: it inspects locks on secondary keys and returns lock status and commit timestamps for async commit resolution.
+
 #### AsyncCommitPrewriteProps
 
 ```go
@@ -648,6 +650,8 @@ func CheckAsyncCommitStatus(reader, primaryKey, startTS) (TimeStamp, error)
 ### 1PC Optimization
 
 For small, single-region transactions, 1PC skips CF_LOCK entirely and writes commit records directly to CF_WRITE in one batch.
+
+**gRPC Integration**: The `KvPrewrite` handler checks 1PC eligibility (`Is1PCEligible`) and routes to `Prewrite1PC` / `Prewrite1PCModifies`. The server uses PD-allocated timestamps for the `CommitTS` when a PD client is configured.
 
 #### OnePCProps
 

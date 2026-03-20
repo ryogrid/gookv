@@ -35,6 +35,7 @@ type Server struct {
     rawStorage  *RawStorage           // raw KV operations (bypasses MVCC)
     coordinator *StoreCoordinator
     gcWorker    *gc.GCWorker          // background GC of old MVCC versions
+    pdClient    pdclient.Client       // optional PD client for TSO allocation
     listener    net.Listener
     ctx         context.Context
     cancel      context.CancelFunc
@@ -52,6 +53,7 @@ type Server struct {
 - `Start()` -- binds a TCP listener and launches `grpcServer.Serve` in a goroutine.
 - `Stop()` -- cancels the context and calls `GracefulStop`.
 - `SetCoordinator(coord)` -- injects the `StoreCoordinator` for cluster mode (must be called before `Start`).
+- `SetPDClient(client)` -- registers PD client for TSO allocation (used by 1PC and async commit).
 - `Addr()` -- returns the actual listener address.
 
 ### 2.2 tikvService (`internal/server/server.go`)
@@ -99,22 +101,30 @@ type Storage struct {
 | `TxnHeartBeat(primaryKey, startTS, adviseLockTTL)` | Refresh lock TTL; returns updated TTL |
 | `ResolveLock(startTS, commitTS, keys)` | Commit or rollback all locks for a transaction |
 | `ResolveLockModifies(startTS, commitTS, keys)` | Returns `[]mvcc.Modify` for resolve (for Raft proposal) |
+| `PrewriteAsyncCommit(mutations, props)` | Async commit prewrite with direct apply |
+| `PrewriteAsyncCommitModifies(mutations, props)` | Async commit prewrite returning `[]mvcc.Modify` |
+| `Prewrite1PC(mutations, props)` | One-phase commit prewrite with direct apply |
+| `Prewrite1PCModifies(mutations, props)` | One-phase commit returning `[]mvcc.Modify` |
+| `CheckSecondaryLocks(keys, startTS)` | Inspect locks on async commit secondary keys |
+| `ScanLock(startKey, endKey, maxVersion, limit)` | Scan CF_LOCK for locks with startTS <= maxVersion |
 | `ApplyModifies(modifies)` | Write `[]mvcc.Modify` to engine atomically |
 
 ### 2.4 StoreCoordinator (`internal/server/coordinator.go`)
 
 ```go
 type StoreCoordinator struct {
-    mu      sync.RWMutex
-    storeID uint64
-    engine  traits.KvEngine
-    storage *Storage
-    router  *router.Router
-    client  *transport.RaftClient
-    cfg     raftstore.PeerConfig
-    peers   map[uint64]*raftstore.Peer       // regionID -> Peer
-    cancels map[uint64]context.CancelFunc    // regionID -> cancel
-    dones   map[uint64]chan struct{}          // regionID -> done signal
+    mu               sync.RWMutex
+    storeID          uint64
+    engine           traits.KvEngine
+    storage          *Storage
+    router           *router.Router
+    client           *transport.RaftClient
+    cfg              raftstore.PeerConfig
+    peers            map[uint64]*raftstore.Peer       // regionID -> Peer
+    cancels          map[uint64]context.CancelFunc    // regionID -> cancel
+    dones            map[uint64]chan struct{}          // regionID -> done signal
+    splitCheckWorker *split.SplitCheckWorker           // background split detection
+    pdClient         pdclient.Client                   // optional PD client for split coordination
 }
 ```
 
@@ -126,7 +136,10 @@ type StoreCoordinator struct {
 | `ProposeModifies(regionID, modifies, timeout)` | Serializes modifies as `RaftCmdRequest` and proposes via Raft; blocks until committed or timeout |
 | `HandleRaftMessage(msg)` | Dispatches incoming `RaftMessage` to the correct peer via the router |
 | `GetPeer(regionID)` | Returns the peer for a region |
-| `Stop()` | Cancels all peers and unregisters from the router |
+| `ResolveRegionForKey(key)` | Routes a key to its containing region by checking peer ranges |
+| `CreatePeer(region, peers)` | Creates and starts a new Raft peer (used after split) |
+| `RunSplitResultHandler(ctx)` | Goroutine that processes split check results, coordinates with PD (AskBatchSplit), executes splits, bootstraps child regions, and reports splits to PD (ReportBatchSplit) |
+| `Stop()` | Cancels all peers, stops split check worker, and unregisters from the router |
 
 Helper functions in `internal/server/raftcmd.go` provide the serialization bridge:
 - `ModifiesToRequests([]mvcc.Modify) []*raft_cmdpb.Request` -- leader serialization path.
@@ -165,8 +178,8 @@ The `Tikv` service declares the full TiKV-compatible API. Below is the implement
 | `KvPessimisticLock` | `PessimisticLockRequest` / `PessimisticLockResponse` | Yes (dual-mode: cluster proposes via Raft, standalone applies locally) |
 | `KVPessimisticRollback` | `PessimisticRollbackRequest` / `PessimisticRollbackResponse` | Yes |
 | `KvTxnHeartBeat` | `TxnHeartBeatRequest` / `TxnHeartBeatResponse` | Yes |
-| `KvCheckSecondaryLocks` | `CheckSecondaryLocksRequest` / `CheckSecondaryLocksResponse` | No (unimplemented stub) |
-| `KvScanLock` | `ScanLockRequest` / `ScanLockResponse` | No (unimplemented stub) |
+| `KvCheckSecondaryLocks` | `CheckSecondaryLocksRequest` / `CheckSecondaryLocksResponse` | Yes (inspects locks on secondary keys for async commit resolution) |
+| `KvScanLock` | `ScanLockRequest` / `ScanLockResponse` | Yes (iterates CF_LOCK with StartTS <= maxVersion filter, respects limit) |
 | `KvResolveLock` | `ResolveLockRequest` / `ResolveLockResponse` | Yes (dual-mode: cluster proposes via Raft, standalone applies locally) |
 | `KvGC` | `GCRequest` / `GCResponse` | No (unimplemented stub) |
 | `KvDeleteRange` | `DeleteRangeRequest` / `DeleteRangeResponse` | No (unimplemented stub) |
@@ -178,7 +191,10 @@ The `Tikv` service declares the full TiKV-compatible API. Below is the implement
 | `RawGet`, `RawPut`, `RawDelete`, `RawScan` | Yes |
 | `RawBatchGet`, `RawBatchPut`, `RawBatchDelete` | Yes |
 | `RawDeleteRange` | Yes |
-| `RawBatchScan`, `RawGetKeyTTL`, `RawCompareAndSwap`, `RawChecksum` | No (unimplemented stubs) |
+| `RawBatchScan` | Yes (multi-range scan with per-range limits) |
+| `RawGetKeyTTL` | Yes (returns remaining TTL for a key, with full TTL encoding) |
+| `RawCompareAndSwap` | Yes (atomic CAS with TTL awareness) |
+| `RawChecksum` | Yes (CRC64 XOR-based checksum over key ranges, filters expired entries) |
 
 All implemented Raw RPCs delegate to the `RawStorage` layer (see Section 5.6). Single-key operations (`RawGet`, `RawPut`, `RawDelete`, `RawScan`) and batch operations (`RawBatchGet`, `RawBatchPut`, `RawBatchDelete`) follow the same pattern: the handler extracts key/value/CF parameters from the request and calls the corresponding `RawStorage` method. `RawDeleteRange` deletes all keys in a given range.
 
@@ -229,7 +245,17 @@ KvGet(ctx, GetRequest) -> GetResponse
 5. If `value == nil`: set `resp.NotFound = true`.
 6. Otherwise: set `resp.Value = value`.
 
-### 4.2 KvPrewrite Handler Flow (dual mode)
+### 4.2 Region Validation (`validateRegionContext`)
+
+In cluster mode, all read-only Raw KV handlers call `validateRegionContext()` before processing. This method checks:
+1. The request's `Context.RegionId` matches a known peer managed by the coordinator.
+2. The requesting peer is the current leader of the region.
+3. The request keys fall within the region's `[StartKey, EndKey)` range.
+4. The region epoch matches (no stale requests after splits/merges).
+
+On failure, a `regionError` is returned to the client (e.g., `NotLeader`, `EpochNotMatch`, `KeyNotInRegion`), enabling the client library to retry with updated routing information.
+
+### 4.3 KvPrewrite Handler Flow (dual mode)
 
 ```
 KvPrewrite(ctx, PrewriteRequest) -> PrewriteResponse
@@ -248,7 +274,13 @@ KvPrewrite(ctx, PrewriteRequest) -> PrewriteResponse
 1. Call `storage.Prewrite(mutations, primary, startTS, lockTTL)` -- this performs MVCC checks, computes modifications, and applies them directly to the engine in a single `WriteBatch.Commit`.
 2. Convert any errors and return.
 
-### 4.3 KvCommit Handler Flow (dual mode)
+**1PC and Async Commit paths**:
+The `KvPrewrite` handler inspects request flags to select the optimal path:
+- If `req.UseAsyncCommit` is true and the transaction is eligible, routes to `PrewriteAsyncCommit` / `PrewriteAsyncCommitModifies`. The server uses PD-allocated timestamps (via `pdClient.GetTS()`) for `MaxCommitTS` if a PD client is configured.
+- If 1PC is eligible (`Is1PCEligible`), routes to `Prewrite1PC` / `Prewrite1PCModifies`, which skips CF_LOCK entirely and writes commit records directly to CF_WRITE.
+- Otherwise, falls through to standard 2PC prewrite.
+
+### 4.4 KvCommit Handler Flow (dual mode)
 
 Follows the same dual-mode pattern as KvPrewrite:
 - **Cluster**: `storage.CommitModifies` -> `coordinator.ProposeModifies` -> Raft -> applied.
@@ -336,10 +368,16 @@ type RawStorage struct {
 | `BatchDelete(cf, keys)` | Multi-key delete via `WriteBatch` |
 | `Scan(cf, startKey, endKey, limit)` | Range scan returning key-value pairs |
 | `DeleteRange(cf, startKey, endKey)` | Delete all keys in a range via `WriteBatch` |
+| `BatchScan(cf, ranges, limits)` | Multi-range scan with per-range result limits |
+| `GetKeyTTL(cf, key)` | Returns remaining TTL for a key (0 if no TTL set) |
+| `CompareAndSwap(cf, key, value, prevValue, prevNotExist)` | Atomic CAS with TTL-aware value comparison |
+| `Checksum(cf, startKey, endKey)` | CRC64 XOR-based checksum over a key range, filtering expired TTL entries |
 | `PutModify(cf, key, value)` | Returns an `engine.Modify` (Put) for use with Raft proposals |
 | `DeleteModify(cf, key)` | Returns an `engine.Modify` (Delete) for use with Raft proposals |
 
 `PutModify` and `DeleteModify` do not write to the engine themselves. They return `engine.Modify` structs that the gRPC handler collects and passes to `coordinator.ProposeModifies` in cluster mode.
+
+**TTL Support**: `RawStorage` supports per-key TTL (Time-To-Live) with a 9-byte encoding overhead appended to values: 8 bytes for the expiry timestamp (big-endian Unix nanoseconds) + 1 byte flag. All read operations (`Get`, `BatchGet`, `Scan`, `BatchScan`, `Checksum`) automatically filter expired entries. `Put` accepts an optional TTL parameter.
 
 ---
 

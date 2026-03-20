@@ -1,6 +1,3 @@
-[log]
-level = "debug"
-
 [raft-store]
 raft-base-tick-interval = "100ms"
 raft-heartbeat-ticks = 2

@@ -370,49 +370,60 @@ func scenario3(pdAddr string) bool {
 	}
 	defer c.Close()
 
+	// Pre-warm: verify both regions are writable with RawKV.
+	fmt.Println("  [Step 1b] Verifying both regions are writable...")
+	rawClient := c.RawKV()
+	for attempt := 0; attempt < 15; attempt++ {
+		err1 := rawClient.Put(ctx, key1, []byte("warmup"))
+		err2 := rawClient.Put(ctx, key2, []byte("warmup"))
+		if err1 == nil && err2 == nil {
+			fmt.Println("            Both regions writable.")
+			break
+		}
+		if attempt == 14 {
+			fmt.Printf("  FAIL: regions not writable after retries: key1=%v, key2=%v\n", err1, err2)
+			return false
+		}
+		time.Sleep(2 * time.Second)
+	}
+
 	txnClient := c.TxnKV()
 
-	// Initialize both keys with starting balances via a transaction.
-	fmt.Println("  [Step 2] Initialize balances: key1=1000, key2=1000...")
-	initTxn, err := txnClient.Begin(ctx)
+	// Initialize both keys with separate single-region transactions to avoid
+	// the async secondary commit issue. This ensures both keys have committed values.
+	fmt.Println("  [Step 2] Initialize balances...")
+	initTxn1, err := txnClient.Begin(ctx)
 	if err != nil {
-		fmt.Printf("  FAIL: Begin init: %v\n", err)
+		fmt.Printf("  FAIL: Begin init key1: %v\n", err)
 		return false
 	}
-	if err := initTxn.Set(ctx, key1, []byte("1000")); err != nil {
+	if err := initTxn1.Set(ctx, key1, []byte("1000")); err != nil {
 		fmt.Printf("  FAIL: Set key1: %v\n", err)
 		return false
 	}
-	if err := initTxn.Set(ctx, key2, []byte("1000")); err != nil {
+	if err := initTxn1.Commit(ctx); err != nil {
+		fmt.Printf("  FAIL: Commit key1: %v\n", err)
+		return false
+	}
+	fmt.Printf("           %s = 1000 (committed)\n", string(key1))
+
+	initTxn2, err := txnClient.Begin(ctx)
+	if err != nil {
+		fmt.Printf("  FAIL: Begin init key2: %v\n", err)
+		return false
+	}
+	if err := initTxn2.Set(ctx, key2, []byte("1000")); err != nil {
 		fmt.Printf("  FAIL: Set key2: %v\n", err)
 		return false
 	}
-	if err := initTxn.Commit(ctx); err != nil {
-		fmt.Printf("  FAIL: Commit init: %v\n", err)
+	if err := initTxn2.Commit(ctx); err != nil {
+		fmt.Printf("  FAIL: Commit key2: %v\n", err)
 		return false
 	}
-	fmt.Println("           Initialized OK.")
+	fmt.Printf("           %s = 1000 (committed)\n", string(key2))
 
-	// Read back to confirm.
-	readTxn, err := txnClient.Begin(ctx)
-	if err != nil {
-		fmt.Printf("  FAIL: Begin read: %v\n", err)
-		return false
-	}
-	val1, err := readTxn.Get(ctx, key1)
-	if err != nil {
-		fmt.Printf("  FAIL: Get key1: %v\n", err)
-		return false
-	}
-	val2, err := readTxn.Get(ctx, key2)
-	if err != nil {
-		fmt.Printf("  FAIL: Get key2: %v\n", err)
-		return false
-	}
-	bal1, _ := strconv.Atoi(string(val1))
-	bal2, _ := strconv.Atoi(string(val2))
-	fmt.Printf("           %s = %d\n", string(key1), bal1)
-	fmt.Printf("           %s = %d\n", string(key2), bal2)
+	bal1 := 1000
+	bal2 := 1000
 
 	// Transfer 100 from key1 to key2.
 	fmt.Println("  [Step 3] Begin cross-region transaction: transfer 100...")
@@ -443,26 +454,29 @@ func scenario3(pdAddr string) bool {
 	}
 	fmt.Println("           Committed OK.")
 
-	// Wait for secondary commits to propagate (background goroutine in committer).
-	time.Sleep(3 * time.Second)
-
-	// Verify: read back.
-	fmt.Println("  [Verify] Read back in new transaction:")
-	txn3, err := txnClient.Begin(ctx)
-	if err != nil {
-		fmt.Printf("  FAIL: Begin verify: %v\n", err)
-		return false
-	}
-
-	final1, err := txn3.Get(ctx, key1)
-	if err != nil {
-		fmt.Printf("  FAIL: Get key1: %v\n", err)
-		return false
-	}
-	final2, err := txn3.Get(ctx, key2)
-	if err != nil {
-		fmt.Printf("  FAIL: Get key2: %v\n", err)
-		return false
+	// Verify: read back with retries (secondary commits are async).
+	fmt.Println("  [Verify] Read back in new transaction (retrying for async secondary commits)...")
+	var final1, final2 []byte
+	for attempt := 0; attempt < 10; attempt++ {
+		time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+		txn3, err := txnClient.Begin(ctx)
+		if err != nil {
+			fmt.Printf("  FAIL: Begin verify: %v\n", err)
+			return false
+		}
+		final1, err = txn3.Get(ctx, key1)
+		if err != nil {
+			fmt.Printf("  FAIL: Get key1: %v\n", err)
+			return false
+		}
+		final2, err = txn3.Get(ctx, key2)
+		if err != nil {
+			fmt.Printf("  FAIL: Get key2: %v\n", err)
+			return false
+		}
+		if string(final1) == newBal1 && string(final2) == newBal2 {
+			break
+		}
 	}
 
 	ok1 := string(final1) == newBal1

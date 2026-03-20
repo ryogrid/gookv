@@ -352,6 +352,8 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 
 	// --- Standard 2PC path ---
 	// Cluster mode: compute modifications then propose via Raft.
+	// All mutations in a single prewrite request belong to the same region
+	// (the client groups by region). Use the request's region context.
 	if coord := svc.server.coordinator; coord != nil {
 		modifies, errs := svc.server.storage.PrewriteModifies(mutations, primary, startTS, lockTTL)
 		for _, err := range errs {
@@ -363,10 +365,15 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 		if len(resp.Errors) > 0 || len(modifies) == 0 {
 			return resp, nil
 		}
-		if regErr, err := svc.proposeModifiesToRegionsWithRegionError(coord, modifies, 10*time.Second); regErr != nil {
-			resp.RegionError = regErr
-			return resp, nil
-		} else if err != nil {
+		regionID := req.GetContext().GetRegionId()
+		if regionID == 0 {
+			regionID = svc.resolveRegionID(primary)
+		}
+		if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+			if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
+				resp.RegionError = regErr
+				return resp, nil
+			}
 			return nil, status.Errorf(codes.Internal, "raft propose failed: %v", err)
 		}
 		return resp, nil
@@ -393,6 +400,7 @@ func (svc *tikvService) KvCommit(ctx context.Context, req *kvrpcpb.CommitRequest
 	commitTS := txntypes.TimeStamp(req.GetCommitVersion())
 
 	// Cluster mode: compute modifications then propose via Raft.
+	// All keys in a commit request belong to the same region (client groups by region).
 	if coord := svc.server.coordinator; coord != nil {
 		modifies, err := svc.server.storage.CommitModifies(keys, startTS, commitTS)
 		if err != nil {
@@ -400,10 +408,15 @@ func (svc *tikvService) KvCommit(ctx context.Context, req *kvrpcpb.CommitRequest
 			return resp, nil
 		}
 		if len(modifies) > 0 {
-			if regErr, propErr := svc.proposeModifiesToRegionsWithRegionError(coord, modifies, 10*time.Second); regErr != nil {
-				resp.RegionError = regErr
-				return resp, nil
-			} else if propErr != nil {
+			regionID := req.GetContext().GetRegionId()
+			if regionID == 0 {
+				regionID = svc.resolveRegionID(keys[0])
+			}
+			if propErr := coord.ProposeModifies(regionID, modifies, 10*time.Second); propErr != nil {
+				if regErr := proposeErrorToRegionError(propErr, regionID); regErr != nil {
+					resp.RegionError = regErr
+					return resp, nil
+				}
 				return nil, status.Errorf(codes.Internal, "raft propose failed: %v", propErr)
 			}
 		}
@@ -795,11 +808,17 @@ func (svc *tikvService) resolveRegionID(key []byte) uint64 {
 }
 
 // groupModifiesByRegion groups modifies by their target region.
-// This is used for batch Raw KV operations where keys may span multiple regions.
+// Modify keys are codec-encoded (EncodeLockKey / EncodeKey), so we decode
+// them to raw user keys before resolving the region.
 func (svc *tikvService) groupModifiesByRegion(modifies []mvcc.Modify) map[uint64][]mvcc.Modify {
 	groups := make(map[uint64][]mvcc.Modify)
 	for _, m := range modifies {
-		regionID := svc.resolveRegionID(m.Key)
+		// Decode the codec-encoded key to get the raw user key for region routing.
+		rawKey, _, _ := mvcc.DecodeKey(m.Key)
+		if rawKey == nil {
+			rawKey = m.Key // fallback: use as-is if decode fails
+		}
+		regionID := svc.resolveRegionID(rawKey)
 		groups[regionID] = append(groups[regionID], m)
 	}
 	return groups
@@ -842,6 +861,14 @@ func proposeErrorToRegionError(err error, regionID uint64) *errorpb.Error {
 		}
 	}
 	if strings.Contains(msg, "not leader") {
+		return &errorpb.Error{
+			Message:   msg,
+			NotLeader: &errorpb.NotLeader{RegionId: regionID},
+		}
+	}
+	if strings.Contains(msg, "timeout") {
+		// Proposal timeout usually means the Raft group isn't functioning.
+		// Return as NotLeader so the client retries with a different store.
 		return &errorpb.Error{
 			Message:   msg,
 			NotLeader: &errorpb.NotLeader{RegionId: regionID},

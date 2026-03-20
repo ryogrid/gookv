@@ -597,10 +597,16 @@ func (sc *StoreCoordinator) handleSplitCheckResult(result split.SplitCheckResult
 }
 
 // ResolveRegionForKey returns the region ID whose key range contains the given key.
+// When multiple regions match (e.g., after a split where the parent's metadata is stale),
+// returns the most specific (narrowest) match.
 // Returns 0 if no matching region is found.
 func (sc *StoreCoordinator) ResolveRegionForKey(key []byte) uint64 {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
+
+	var bestID uint64
+	var bestStartKey []byte
+	bestStartSet := false
 
 	for regionID, peer := range sc.peers {
 		region := peer.Region()
@@ -615,9 +621,17 @@ func (sc *StoreCoordinator) ResolveRegionForKey(key []byte) uint64 {
 		if len(endKey) > 0 && bytes.Compare(key, endKey) >= 0 {
 			continue
 		}
-		return regionID
+
+		// Among all matching regions, pick the one with the largest startKey
+		// (most specific / narrowest range). This handles stale parent regions
+		// whose key range hasn't been updated after a split.
+		if !bestStartSet || bytes.Compare(startKey, bestStartKey) > 0 {
+			bestID = regionID
+			bestStartKey = startKey
+			bestStartSet = true
+		}
 	}
-	return 0
+	return bestID
 }
 
 // sendRaftMessage converts and sends a single raftpb.Message via gRPC transport.

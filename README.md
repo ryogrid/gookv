@@ -656,6 +656,42 @@ go tool pprof http://127.0.0.1:20180/debug/pprof/profile?seconds=10
 | IMPL-047 | CLI improvements (compact with full LSM compaction, dump --sst for SST parsing) | Done |
 | IMPL-048 | Client library for multi-region routing (pkg/client) | Done |
 
+## Known Limitations
+
+The following features are intentionally deferred or not yet fully connected. See `impl_doc/08_not_yet_implemented.md` for details.
+
+### gRPC RPCs
+
+| RPC | Status | Notes |
+|-----|--------|-------|
+| `BatchCoprocessor` | Stub | Only single-region `Coprocessor` and `CoprocessorStream` are implemented. Multi-region dispatch is not wired. |
+| `KvGC` | Stub | GC is performed by the internal `GCWorker`; the gRPC endpoint is not connected. |
+| `KvDeleteRange` | Stub | Raw KV `RawDeleteRange` works; the transactional variant is not implemented. |
+| `Snapshot` (Raft) | Stub | Raft snapshots are generated and applied internally, but the gRPC streaming `Snapshot` RPC for snapshot transfer is not wired. |
+
+### Client Library (`pkg/client`)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| TxnClient (2PC cross-region) | Not implemented | Only `RawKVClient` is provided. A transactional client with per-region prewrite/commit coordination is deferred to future design. |
+| TSO batching | Not implemented | Each `GetTS` call opens a new stream. Batching multiple allocations into a single RPC is a low-priority optimization. |
+
+### Placement Driver (PD)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| GC safe point via PD | Partially connected | `GetGCSafePoint` / `UpdateGCSafePoint` are implemented on PDServer but not exposed in `pdclient.Client`. The GC worker uses in-process safe point tracking. |
+| Scheduling commands | Not implemented | `RegionHeartbeat` on PDServer always returns an empty response. Leader transfer, peer rebalancing, and merge scheduling are not implemented server-side. |
+| Periodic PD leader refresh | Not implemented | `Config.UpdateInterval` is defined but not consumed. The client relies on connection-time endpoint discovery and error-driven reconnection. |
+
+### Raftstore
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Store goroutine | Not implemented | `StoreMsg` types and `storeCh` are defined, but no store-level goroutine processes them. |
+| Significant messages | Partial | Only `SnapshotStatus` is handled. `Unreachable` and `MergeResult` are defined but not processed. |
+| Casual / Start messages | Not implemented | `PeerMsgTypeCasual` and `PeerMsgTypeStart` are defined but ignored in `handleMessage`. |
+
 ## Acknowledgments
 
 The architecture and implementation of gookv were designed with reference to the [TiKV](https://github.com/tikv/tikv) source code. TiKV is licensed under the Apache License 2.0 — see [TiKV LICENSE](https://github.com/tikv/tikv/blob/de241946c52851ac996e1f1d1047a9d3c914f149/LICENSE).

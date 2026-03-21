@@ -148,28 +148,59 @@ func rawPutOnLeaderMC(t *testing.T, mc *multiRegionCluster, key, value []byte) {
 func TestMultiRegionTransactions(t *testing.T) {
 	mc, _, _ := setupTwoRegionCluster(t)
 
+	ctx := context.Background()
 	startTS := uint64(100)
 	commitTS := uint64(110)
 
 	// Prewrite with primary in region1 and a secondary in region2.
-	prewriteResp := tryPrewrite(t, mc, &kvrpcpb.PrewriteRequest{
-		Mutations: []*kvrpcpb.Mutation{
-			{Op: kvrpcpb.Op_Put, Key: []byte("alpha"), Value: []byte("v1")},
-			{Op: kvrpcpb.Op_Put, Key: []byte("zebra"), Value: []byte("v2")},
-		},
-		PrimaryLock:  []byte("alpha"),
-		StartVersion: startTS,
-		LockTtl:      5000,
-	})
+	// Find the leader node and pin all subsequent operations to it,
+	// since the lock is applied on the leader immediately after Raft
+	// commit but followers may apply asynchronously.
+	var leaderAddr string
+	var prewriteResp *kvrpcpb.PrewriteResponse
+	for _, n := range mc.nodes {
+		_, client := dialTikvClient(t, n.addr)
+		resp, err := client.KvPrewrite(ctx, &kvrpcpb.PrewriteRequest{
+			Mutations: []*kvrpcpb.Mutation{
+				{Op: kvrpcpb.Op_Put, Key: []byte("alpha"), Value: []byte("v1")},
+				{Op: kvrpcpb.Op_Put, Key: []byte("zebra"), Value: []byte("v2")},
+			},
+			PrimaryLock:  []byte("alpha"),
+			StartVersion: startTS,
+			LockTtl:      5000,
+		})
+		if err != nil || resp.GetRegionError() != nil {
+			continue
+		}
+		hasRetryable := false
+		for _, e := range resp.GetErrors() {
+			if e.GetRetryable() != "" {
+				hasRetryable = true
+				break
+			}
+		}
+		if hasRetryable {
+			continue
+		}
+		prewriteResp = resp
+		leaderAddr = n.addr
+		break
+	}
+	require.NotNil(t, prewriteResp, "KvPrewrite should succeed on at least one node")
 	assert.Empty(t, prewriteResp.GetErrors(), "prewrite should succeed")
 
-	// Commit both keys.
-	commitResp := tryCommit(t, mc, &kvrpcpb.CommitRequest{
+	// Commit on the same leader node.
+	_, leaderClient := dialTikvClient(t, leaderAddr)
+	commitResp, err := leaderClient.KvCommit(ctx, &kvrpcpb.CommitRequest{
 		Keys:          [][]byte{[]byte("alpha"), []byte("zebra")},
 		StartVersion:  startTS,
 		CommitVersion: commitTS,
 	})
+	require.NoError(t, err)
 	assert.Nil(t, commitResp.GetError(), "commit should succeed")
+
+	// Wait for Raft replication so reads on any node can find the data.
+	time.Sleep(200 * time.Millisecond)
 
 	// Verify both keys are readable.
 	readTS := commitTS + 1
@@ -197,6 +228,9 @@ func TestMultiRegionRawKVBatchScan(t *testing.T) {
 	// Write keys in region2 (>= "m").
 	rawPutOnLeaderMC(t, mc, []byte("m1"), []byte("val-m1"))
 	rawPutOnLeaderMC(t, mc, []byte("m2"), []byte("val-m2"))
+
+	// Wait for Raft replication to propagate writes to followers.
+	time.Sleep(200 * time.Millisecond)
 
 	// RawBatchScan with two ranges.
 	ctx := context.Background()
@@ -560,50 +594,76 @@ func TestMultiRegionAsyncCommit(t *testing.T) {
 	startTS := uint64(500)
 
 	// Async commit prewrite: primary in region1, secondary in region2.
-	primaryKey := []byte("ac-primary")   // region1 (< "m")
+	primaryKey := []byte("ac-primary")     // region1 (< "m")
 	secondaryKey := []byte("zz-secondary") // region2 (>= "m")
 
-	prewriteResp := tryPrewrite(t, mc, &kvrpcpb.PrewriteRequest{
-		Mutations: []*kvrpcpb.Mutation{
-			{Op: kvrpcpb.Op_Put, Key: primaryKey, Value: []byte("primary-val")},
-			{Op: kvrpcpb.Op_Put, Key: secondaryKey, Value: []byte("secondary-val")},
-		},
-		PrimaryLock:    primaryKey,
-		StartVersion:   startTS,
-		LockTtl:        5000,
-		UseAsyncCommit: true,
-		Secondaries:    [][]byte{secondaryKey},
-	})
+	// Find the leader node for the primary key's region and use it for all
+	// operations. Since async commit proposes all modifications through the
+	// primary's region, the leader node has the locks applied immediately
+	// after ProposeModifies returns (followers apply asynchronously).
+	var leaderAddr string
+	var prewriteResp *kvrpcpb.PrewriteResponse
+	for _, n := range mc.nodes {
+		_, client := dialTikvClient(t, n.addr)
+		resp, err := client.KvPrewrite(ctx, &kvrpcpb.PrewriteRequest{
+			Mutations: []*kvrpcpb.Mutation{
+				{Op: kvrpcpb.Op_Put, Key: primaryKey, Value: []byte("primary-val")},
+				{Op: kvrpcpb.Op_Put, Key: secondaryKey, Value: []byte("secondary-val")},
+			},
+			PrimaryLock:    primaryKey,
+			StartVersion:   startTS,
+			LockTtl:        5000,
+			UseAsyncCommit: true,
+			Secondaries:    [][]byte{secondaryKey},
+		})
+		if err != nil || resp.GetRegionError() != nil {
+			continue
+		}
+		hasRetryable := false
+		for _, e := range resp.GetErrors() {
+			if e.GetRetryable() != "" {
+				hasRetryable = true
+				break
+			}
+		}
+		if hasRetryable {
+			continue
+		}
+		prewriteResp = resp
+		leaderAddr = n.addr
+		break
+	}
+	require.NotNil(t, prewriteResp, "KvPrewrite should succeed on at least one node")
 	assert.Empty(t, prewriteResp.GetErrors(), "async commit prewrite should succeed")
 	assert.Greater(t, prewriteResp.GetMinCommitTs(), uint64(0),
 		"MinCommitTs should be > 0 for async commit prewrite")
 
+	// Use the same leader node for all subsequent operations (locks are
+	// guaranteed to be applied on this node).
+	_, leaderClient := dialTikvClient(t, leaderAddr)
+
 	// CheckSecondaryLocks on the secondary key.
-	var checkResp *kvrpcpb.CheckSecondaryLocksResponse
-	for _, n := range mc.nodes {
-		_, client := dialTikvClient(t, n.addr)
-		resp, err := client.KvCheckSecondaryLocks(ctx, &kvrpcpb.CheckSecondaryLocksRequest{
-			Keys:         [][]byte{secondaryKey},
-			StartVersion: startTS,
-		})
-		if err == nil {
-			checkResp = resp
-			break
-		}
-	}
-	require.NotNil(t, checkResp, "CheckSecondaryLocks should succeed")
+	checkResp, err := leaderClient.KvCheckSecondaryLocks(ctx, &kvrpcpb.CheckSecondaryLocksRequest{
+		Keys:         [][]byte{secondaryKey},
+		StartVersion: startTS,
+	})
+	require.NoError(t, err, "CheckSecondaryLocks RPC should not fail")
 	assert.Nil(t, checkResp.GetError(), "should not return an error")
 	assert.NotEmpty(t, checkResp.GetLocks(), "should find the lock on the secondary key")
 	assert.Equal(t, uint64(0), checkResp.GetCommitTs(), "commitTs should be 0 while lock is held")
 
-	// Commit the transaction.
+	// Commit the transaction on the same leader node.
 	commitTS := startTS + 10
-	commitResp := tryCommit(t, mc, &kvrpcpb.CommitRequest{
+	commitResp, err := leaderClient.KvCommit(ctx, &kvrpcpb.CommitRequest{
 		Keys:          [][]byte{primaryKey, secondaryKey},
 		StartVersion:  startTS,
 		CommitVersion: commitTS,
 	})
+	require.NoError(t, err, "KvCommit RPC should not fail")
 	assert.Nil(t, commitResp.GetError(), "commit should succeed")
+
+	// Wait for Raft replication so reads on any node can find the data.
+	time.Sleep(200 * time.Millisecond)
 
 	// Verify both keys readable.
 	readTS := commitTS + 1

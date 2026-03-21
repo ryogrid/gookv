@@ -329,10 +329,15 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 			if len(resp.Errors) > 0 || len(modifies) == 0 {
 				return resp, nil
 			}
-			if regErr, err := svc.proposeModifiesToRegionsWithRegionError(coord, modifies, 10*time.Second); regErr != nil {
-				resp.RegionError = regErr
-				return resp, nil
-			} else if err != nil {
+			regionID := req.GetContext().GetRegionId()
+			if regionID == 0 {
+				regionID = svc.resolveRegionID(primary)
+			}
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
+					resp.RegionError = regErr
+					return resp, nil
+				}
 				return nil, status.Errorf(codes.Internal, "raft propose failed: %v", err)
 			}
 			resp.MinCommitTs = uint64(minCommitTS)

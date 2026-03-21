@@ -379,6 +379,9 @@ func TestMultiRegionRawKV(t *testing.T) {
 	rawPutOnLeader([]byte("alpha-key"), []byte("alpha-value"))
 	rawPutOnLeader([]byte("zulu-key"), []byte("zulu-value"))
 
+	// Wait for Raft replication to propagate writes to followers.
+	time.Sleep(200 * time.Millisecond)
+
 	// RawGet can use any node since all share the same engine.
 	_, client := dialTikvClient(t, mc.nodes[0].addr)
 

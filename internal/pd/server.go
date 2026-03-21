@@ -5,15 +5,27 @@ package pd
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/ryogrid/gookv/internal/engine/rocks"
+	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/keys"
 )
 
 // StoreState represents the lifecycle state of a TiKV store.
@@ -25,6 +37,18 @@ const (
 	StoreStateDown                           // Disconnected > DownDuration — replicas should be repaired
 	StoreStateTombstone                      // Permanently removed
 )
+
+// PDServerRaftConfig holds the Raft-cluster configuration for a PD server.
+// If nil in PDServerConfig.RaftConfig, the server runs in single-node mode.
+type PDServerRaftConfig struct {
+	PDNodeID             uint64            // this node's Raft ID
+	InitialCluster       map[uint64]string // peerID -> peer gRPC address
+	PeerAddr             string            // listen address for peer-to-peer gRPC
+	ClientAddrs          map[uint64]string // peerID -> client gRPC address (for forwarding)
+	RaftTickInterval     time.Duration
+	ElectionTimeoutTicks int
+	HeartbeatTicks       int
+}
 
 // PDServerConfig holds configuration for the PD server.
 type PDServerConfig struct {
@@ -42,6 +66,10 @@ type PDServerConfig struct {
 
 	RegionBalanceThreshold float64
 	RegionBalanceRateLimit int
+
+	// RaftConfig enables Raft-based replication when non-nil.
+	// When nil, the server operates in single-node mode (backward compatible).
+	RaftConfig *PDServerRaftConfig
 }
 
 // DefaultPDServerConfig returns default PD server configuration.
@@ -77,9 +105,24 @@ type PDServer struct {
 	grpcServer *grpc.Server
 	listener   net.Listener
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	// Raft replication (nil in single-node mode).
+	raftPeer       *PDRaftPeer
+	raftStorage    *PDRaftStorage
+	transport      *PDTransport
+	raftCfg        *PDServerRaftConfig
+	raftEngine     traits.KvEngine // dedicated engine for PD Raft logs
+	peerGrpcServer *grpc.Server    // separate gRPC server for peer port
+	peerListener   net.Listener
+
+	// Leader forwarding (cached connection to current leader for follower forwarding).
+	leaderConnMu    sync.Mutex
+	cachedLeaderConn *grpc.ClientConn
+	cachedLeaderID  uint64
+
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	stopped sync.Once
 }
 
 // NewPDServer creates a new PD server.
@@ -113,7 +156,142 @@ func NewPDServer(cfg PDServerConfig) (*PDServer, error) {
 
 	pdpb.RegisterPDServer(grpcSrv, s)
 
+	// Set up Raft replication if configured.
+	if cfg.RaftConfig != nil {
+		if err := s.initRaft(cfg.RaftConfig); err != nil {
+			cancel()
+			return nil, fmt.Errorf("pd: init raft: %w", err)
+		}
+	}
+
 	return s, nil
+}
+
+// initRaft initializes the Raft subsystem for replicated PD mode.
+func (s *PDServer) initRaft(rc *PDServerRaftConfig) error {
+	s.raftCfg = rc
+
+	// 1. Open a dedicated engine for PD Raft logs.
+	raftDataDir := s.cfg.DataDir + "/raft"
+	engine, err := rocks.Open(raftDataDir)
+	if err != nil {
+		return fmt.Errorf("open raft engine at %s: %w", raftDataDir, err)
+	}
+	s.raftEngine = engine
+
+	// 2. Create PDRaftStorage.
+	s.raftStorage = NewPDRaftStorage(s.cfg.ClusterID, engine)
+
+	// 3. Build Raft peer config.
+	peerCfg := DefaultPDRaftConfig()
+	if rc.RaftTickInterval > 0 {
+		peerCfg.RaftTickInterval = rc.RaftTickInterval
+	}
+	if rc.ElectionTimeoutTicks > 0 {
+		peerCfg.ElectionTimeoutTicks = rc.ElectionTimeoutTicks
+	}
+	if rc.HeartbeatTicks > 0 {
+		peerCfg.HeartbeatTicks = rc.HeartbeatTicks
+	}
+
+	// 4. Decide whether to bootstrap or recover.
+	var raftPeers []raft.Peer
+	isRestart := HasPersistedPDRaftState(engine, s.cfg.ClusterID)
+	if isRestart {
+		// Recovering from persisted state.
+		if err := s.raftStorage.RecoverFromEngine(); err != nil {
+			engine.Close()
+			return fmt.Errorf("recover raft storage: %w", err)
+		}
+		raftPeers = nil // signal to NewPDRaftPeer: no bootstrap
+	} else {
+		// Fresh start: build peer list from InitialCluster.
+		for id := range rc.InitialCluster {
+			raftPeers = append(raftPeers, raft.Peer{ID: id})
+		}
+	}
+
+	// 5. Create PDRaftPeer.
+	peer, err := NewPDRaftPeer(rc.PDNodeID, s.raftStorage, raftPeers, rc.InitialCluster, peerCfg)
+	if err != nil {
+		engine.Close()
+		return fmt.Errorf("create raft peer: %w", err)
+	}
+	s.raftPeer = peer
+
+	// 6. Create PDTransport and wire it up.
+	s.transport = NewPDTransport(rc.InitialCluster)
+	peer.WireTransport(s.transport)
+
+	// 7. Set the apply function and snapshot functions.
+	peer.SetApplyFunc(s.applyCommand)
+	peer.SetApplySnapshotFunc(s.ApplySnapshot)
+	s.raftStorage.SetSnapshotGenFunc(s.GenerateSnapshot)
+
+	// 8. On restart, replay committed entries to rebuild in-memory state.
+	if isRestart {
+		if err := s.replayRaftLog(); err != nil {
+			engine.Close()
+			return fmt.Errorf("replay raft log: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// replayRaftLog replays committed but un-applied entries from the Raft log
+// to rebuild in-memory PD state after a restart.
+func (s *PDServer) replayRaftLog() error {
+	as := s.raftStorage.GetApplyState()
+	appliedIndex := as.AppliedIndex
+	lastIndex, err := s.raftStorage.LastIndex()
+	if err != nil {
+		return fmt.Errorf("get last index: %w", err)
+	}
+
+	if appliedIndex >= lastIndex {
+		slog.Info("pd: no entries to replay",
+			"appliedIndex", appliedIndex, "lastIndex", lastIndex)
+		return nil
+	}
+
+	// Read entries from appliedIndex+1 through lastIndex (inclusive).
+	entries, err := s.raftStorage.Entries(appliedIndex+1, lastIndex+1, 0)
+	if err != nil {
+		return fmt.Errorf("read entries [%d, %d): %w", appliedIndex+1, lastIndex+1, err)
+	}
+
+	slog.Info("pd: replaying raft log entries",
+		"from", appliedIndex+1, "to", lastIndex, "count", len(entries))
+
+	for _, e := range entries {
+		// Skip empty entries (leader election no-ops).
+		if len(e.Data) == 0 {
+			continue
+		}
+		// Skip conf change entries.
+		if e.Type == raftpb.EntryConfChange || e.Type == raftpb.EntryConfChangeV2 {
+			continue
+		}
+
+		cmd, err := UnmarshalPDCommand(e.Data)
+		if err != nil {
+			slog.Warn("pd: skip unrecognized entry during replay",
+				"index", e.Index, "err", err)
+			continue
+		}
+
+		if _, err := s.applyCommand(cmd); err != nil {
+			slog.Warn("pd: error applying entry during replay",
+				"index", e.Index, "err", err)
+		}
+	}
+
+	// Update applied index.
+	as.AppliedIndex = lastIndex
+	s.raftStorage.SetApplyState(as)
+
+	return nil
 }
 
 // Start starts the PD server.
@@ -131,7 +309,7 @@ func (s *PDServer) Start() error {
 			select {
 			case <-s.ctx.Done():
 			default:
-				fmt.Printf("PD gRPC server error: %v\n", err)
+				slog.Error("PD gRPC server error", "err", err)
 			}
 		}
 	}()
@@ -140,6 +318,47 @@ func (s *PDServer) Start() error {
 	go func() {
 		defer s.wg.Done()
 		s.runStoreStateWorker(s.ctx)
+	}()
+
+	// Start Raft subsystem if configured.
+	if s.raftPeer != nil {
+		if err := s.startRaft(); err != nil {
+			return fmt.Errorf("pd: start raft: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// startRaft starts the peer gRPC server and the Raft event loop.
+func (s *PDServer) startRaft() error {
+	// Start peer gRPC server on the configured peer address.
+	peerLis, err := net.Listen("tcp", s.raftCfg.PeerAddr)
+	if err != nil {
+		return fmt.Errorf("listen peer %s: %w", s.raftCfg.PeerAddr, err)
+	}
+	s.peerListener = peerLis
+
+	s.peerGrpcServer = grpc.NewServer()
+	RegisterPDPeerService(s.peerGrpcServer, s.raftPeer)
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		if err := s.peerGrpcServer.Serve(peerLis); err != nil {
+			select {
+			case <-s.ctx.Done():
+			default:
+				slog.Error("PD peer gRPC server error", "err", err)
+			}
+		}
+	}()
+
+	// Start the Raft event loop.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.raftPeer.Run(s.ctx)
 	}()
 
 	return nil
@@ -171,26 +390,103 @@ func (s *PDServer) Addr() string {
 	return s.cfg.ListenAddr
 }
 
-// Stop gracefully stops the PD server.
+// DataDir returns the data directory path configured for this server.
+func (s *PDServer) DataDir() string {
+	return s.cfg.DataDir
+}
+
+// IsRaftLeader returns whether this server's Raft peer believes it is the leader.
+// Returns false if the server is running in single-node mode (no Raft).
+func (s *PDServer) IsRaftLeader() bool {
+	if s.raftPeer == nil {
+		return false
+	}
+	return s.raftPeer.IsLeader()
+}
+
+// Stop gracefully stops the PD server. It is safe to call multiple times.
 func (s *PDServer) Stop() {
-	s.cancel()
-	s.grpcServer.GracefulStop()
-	s.wg.Wait()
+	s.stopped.Do(func() {
+		s.cancel()
+
+		// Stop Raft subsystem first.
+		if s.peerGrpcServer != nil {
+			s.peerGrpcServer.GracefulStop()
+		}
+		if s.transport != nil {
+			s.transport.Close()
+		}
+
+		// Close cached leader connection.
+		s.leaderConnMu.Lock()
+		if s.cachedLeaderConn != nil {
+			s.cachedLeaderConn.Close()
+			s.cachedLeaderConn = nil
+			s.cachedLeaderID = 0
+		}
+		s.leaderConnMu.Unlock()
+
+		s.grpcServer.GracefulStop()
+		s.wg.Wait()
+
+		if s.raftEngine != nil {
+			s.raftEngine.Close()
+		}
+	})
+}
+
+// HasPersistedPDRaftState checks whether the engine has persisted PD Raft state
+// for the given cluster. Returns true if a hard state key exists.
+func HasPersistedPDRaftState(engine traits.KvEngine, clusterID uint64) bool {
+	_, err := engine.Get(cfnames.CFRaft, keys.RaftStateKey(clusterID))
+	return err == nil
 }
 
 // --- gRPC handlers ---
 
 func (s *PDServer) GetMembers(ctx context.Context, req *pdpb.GetMembersRequest) (*pdpb.GetMembersResponse, error) {
+	if s.raftCfg == nil {
+		// Single-node mode: return this node only.
+		return &pdpb.GetMembersResponse{
+			Header: s.header(),
+			Leader: &pdpb.Member{
+				Name:       "gookv-pd-1",
+				ClientUrls: []string{"http://" + s.Addr()},
+			},
+		}, nil
+	}
+
+	// Raft mode: return all cluster members.
+	var members []*pdpb.Member
+	var leader *pdpb.Member
+	leaderID := s.raftPeer.LeaderID()
+
+	for id, clientAddr := range s.raftCfg.ClientAddrs {
+		peerAddr := s.raftCfg.InitialCluster[id]
+		m := &pdpb.Member{
+			Name:       fmt.Sprintf("gookv-pd-%d", id),
+			MemberId:   id,
+			ClientUrls: []string{"http://" + clientAddr},
+			PeerUrls:   []string{"http://" + peerAddr},
+		}
+		members = append(members, m)
+		if id == leaderID {
+			leader = m
+		}
+	}
+
 	return &pdpb.GetMembersResponse{
-		Header: s.header(),
-		Leader: &pdpb.Member{
-			Name:       "gookv-pd-1",
-			ClientUrls: []string{"http://" + s.Addr()},
-		},
+		Header:  s.header(),
+		Members: members,
+		Leader:  leader,
 	}, nil
 }
 
 func (s *PDServer) Tso(stream pdpb.PD_TsoServer) error {
+	if s.raftPeer != nil && !s.raftPeer.IsLeader() {
+		return status.Error(codes.Unavailable, "not PD leader, reconnect to leader")
+	}
+
 	for {
 		req, err := stream.Recv()
 		if err == io.EOF {
@@ -205,42 +501,98 @@ func (s *PDServer) Tso(stream pdpb.PD_TsoServer) error {
 			count = 1
 		}
 
-		ts, err := s.tso.Allocate(int(count))
-		if err != nil {
-			return err
-		}
-
-		resp := &pdpb.TsoResponse{
-			Header:    s.header(),
-			Count:     count,
-			Timestamp: ts,
-		}
-		if err := stream.Send(resp); err != nil {
-			return err
+		if s.raftPeer == nil {
+			// Single-node mode: direct allocation.
+			ts, err := s.tso.Allocate(int(count))
+			if err != nil {
+				return err
+			}
+			resp := &pdpb.TsoResponse{
+				Header:    s.header(),
+				Count:     count,
+				Timestamp: ts,
+			}
+			if err := stream.Send(resp); err != nil {
+				return err
+			}
+		} else {
+			// Leader: propose via Raft.
+			cmd := PDCommand{Type: CmdTSOAllocate, TSOBatchSize: int(count)}
+			result, err := s.raftPeer.ProposeAndWait(stream.Context(), cmd)
+			if err != nil {
+				return err
+			}
+			var ts pdpb.Timestamp
+			if err := json.Unmarshal(result, &ts); err != nil {
+				return fmt.Errorf("pd: unmarshal tso result: %w", err)
+			}
+			resp := &pdpb.TsoResponse{
+				Header:    s.header(),
+				Count:     count,
+				Timestamp: &ts,
+			}
+			if err := stream.Send(resp); err != nil {
+				return err
+			}
 		}
 	}
 }
 
 func (s *PDServer) Bootstrap(ctx context.Context, req *pdpb.BootstrapRequest) (*pdpb.BootstrapResponse, error) {
-	resp := &pdpb.BootstrapResponse{Header: s.header()}
-
-	if s.meta.IsBootstrapped() {
-		resp.Header = s.errorHeader("cluster already bootstrapped")
+	if s.raftPeer == nil {
+		// Single-node mode: existing direct code.
+		resp := &pdpb.BootstrapResponse{Header: s.header()}
+		if s.meta.IsBootstrapped() {
+			resp.Header = s.errorHeader("cluster already bootstrapped")
+			return resp, nil
+		}
+		store := req.GetStore()
+		region := req.GetRegion()
+		if store != nil {
+			s.meta.PutStore(store)
+		}
+		if region != nil {
+			s.meta.PutRegion(region, nil)
+		}
+		s.meta.SetBootstrapped(true)
 		return resp, nil
 	}
 
-	store := req.GetStore()
-	region := req.GetRegion()
-
-	if store != nil {
-		s.meta.PutStore(store)
+	if !s.raftPeer.IsLeader() {
+		return s.forwardBootstrap(ctx, req)
 	}
-	if region != nil {
-		s.meta.PutRegion(region, nil)
-	}
-	s.meta.SetBootstrapped(true)
 
-	return resp, nil
+	// Leader: validate then propose via Raft.
+	if s.meta.IsBootstrapped() {
+		return &pdpb.BootstrapResponse{
+			Header: s.errorHeader("cluster already bootstrapped"),
+		}, nil
+	}
+
+	// Propose SetBootstrapped(true).
+	bTrue := true
+	cmd := PDCommand{Type: CmdSetBootstrapped, Bootstrapped: &bTrue}
+	if _, err := s.raftPeer.ProposeAndWait(ctx, cmd); err != nil {
+		return nil, err
+	}
+
+	// Propose PutStore.
+	if store := req.GetStore(); store != nil {
+		cmd = PDCommand{Type: CmdPutStore, Store: store}
+		if _, err := s.raftPeer.ProposeAndWait(ctx, cmd); err != nil {
+			return nil, err
+		}
+	}
+
+	// Propose PutRegion.
+	if region := req.GetRegion(); region != nil {
+		cmd = PDCommand{Type: CmdPutRegion, Region: region}
+		if _, err := s.raftPeer.ProposeAndWait(ctx, cmd); err != nil {
+			return nil, err
+		}
+	}
+
+	return &pdpb.BootstrapResponse{Header: s.header()}, nil
 }
 
 func (s *PDServer) IsBootstrapped(ctx context.Context, req *pdpb.IsBootstrappedRequest) (*pdpb.IsBootstrappedResponse, error) {
@@ -251,7 +603,26 @@ func (s *PDServer) IsBootstrapped(ctx context.Context, req *pdpb.IsBootstrappedR
 }
 
 func (s *PDServer) AllocID(ctx context.Context, req *pdpb.AllocIDRequest) (*pdpb.AllocIDResponse, error) {
-	id := s.idAlloc.Alloc()
+	if s.raftPeer == nil {
+		// Single-node mode: direct allocation.
+		id := s.idAlloc.Alloc()
+		return &pdpb.AllocIDResponse{
+			Header: s.header(),
+			Id:     id,
+		}, nil
+	}
+
+	if !s.raftPeer.IsLeader() {
+		return s.forwardAllocID(ctx, req)
+	}
+
+	// Leader: propose via Raft.
+	cmd := PDCommand{Type: CmdIDAlloc, IDBatchSize: 1}
+	result, err := s.raftPeer.ProposeAndWait(ctx, cmd)
+	if err != nil {
+		return nil, err
+	}
+	id := binary.BigEndian.Uint64(result)
 	return &pdpb.AllocIDResponse{
 		Header: s.header(),
 		Id:     id,
@@ -268,7 +639,21 @@ func (s *PDServer) GetStore(ctx context.Context, req *pdpb.GetStoreRequest) (*pd
 }
 
 func (s *PDServer) PutStore(ctx context.Context, req *pdpb.PutStoreRequest) (*pdpb.PutStoreResponse, error) {
-	s.meta.PutStore(req.GetStore())
+	if s.raftPeer == nil {
+		// Single-node mode: existing direct code.
+		s.meta.PutStore(req.GetStore())
+		return &pdpb.PutStoreResponse{Header: s.header()}, nil
+	}
+
+	if !s.raftPeer.IsLeader() {
+		return s.forwardPutStore(ctx, req)
+	}
+
+	// Leader: propose via Raft.
+	cmd := PDCommand{Type: CmdPutStore, Store: req.GetStore()}
+	if _, err := s.raftPeer.ProposeAndWait(ctx, cmd); err != nil {
+		return nil, err
+	}
 	return &pdpb.PutStoreResponse{Header: s.header()}, nil
 }
 
@@ -281,14 +666,37 @@ func (s *PDServer) GetAllStores(ctx context.Context, req *pdpb.GetAllStoresReque
 }
 
 func (s *PDServer) StoreHeartbeat(ctx context.Context, req *pdpb.StoreHeartbeatRequest) (*pdpb.StoreHeartbeatResponse, error) {
+	if s.raftPeer == nil {
+		// Single-node mode: existing direct code.
+		if stats := req.GetStats(); stats != nil {
+			s.meta.UpdateStoreStats(stats.GetStoreId(), stats)
+		}
+		return &pdpb.StoreHeartbeatResponse{Header: s.header()}, nil
+	}
+
+	if !s.raftPeer.IsLeader() {
+		return s.forwardStoreHeartbeat(ctx, req)
+	}
+
+	// Leader: propose via Raft.
 	if stats := req.GetStats(); stats != nil {
-		// UpdateStoreStats also records the heartbeat timestamp for liveness.
-		s.meta.UpdateStoreStats(stats.GetStoreId(), stats)
+		cmd := PDCommand{
+			Type:       CmdUpdateStoreStats,
+			StoreID:    stats.GetStoreId(),
+			StoreStats: stats,
+		}
+		if _, err := s.raftPeer.ProposeAndWait(ctx, cmd); err != nil {
+			return nil, err
+		}
 	}
 	return &pdpb.StoreHeartbeatResponse{Header: s.header()}, nil
 }
 
 func (s *PDServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
+	if s.raftPeer != nil && !s.raftPeer.IsLeader() {
+		return status.Error(codes.Unavailable, "not PD leader")
+	}
+
 	for {
 		req, err := stream.Recv()
 		if err == io.EOF {
@@ -300,13 +708,25 @@ func (s *PDServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 
 		region := req.GetRegion()
 		leader := req.GetLeader()
-		if region != nil {
-			s.meta.PutRegion(region, leader)
+
+		if s.raftPeer == nil {
+			// Single-node mode: existing direct code.
+			if region != nil {
+				s.meta.PutRegion(region, leader)
+			}
+		} else {
+			// Leader: propose via Raft.
+			if region != nil {
+				cmd := PDCommand{Type: CmdPutRegion, Region: region, Leader: leader}
+				if _, err := s.raftPeer.ProposeAndWait(stream.Context(), cmd); err != nil {
+					return err
+				}
+			}
 		}
 
 		resp := &pdpb.RegionHeartbeatResponse{Header: s.header()}
 
-		// Run scheduler to produce commands.
+		// Run scheduler to produce commands (on leader or single-node).
 		if region != nil && leader != nil && s.scheduler != nil {
 			if cmd := s.scheduler.Schedule(region.GetId(), region, leader); cmd != nil {
 				if cmd.TransferLeader != nil {
@@ -348,17 +768,57 @@ func (s *PDServer) GetRegionByID(ctx context.Context, req *pdpb.GetRegionByIDReq
 }
 
 func (s *PDServer) AskBatchSplit(ctx context.Context, req *pdpb.AskBatchSplitRequest) (*pdpb.AskBatchSplitResponse, error) {
-	resp := &pdpb.AskBatchSplitResponse{Header: s.header()}
+	if s.raftPeer == nil {
+		// Single-node mode: existing direct code.
+		resp := &pdpb.AskBatchSplitResponse{Header: s.header()}
+		splitCount := int(req.GetSplitCount())
+		if splitCount == 0 {
+			splitCount = 1
+		}
+		for i := 0; i < splitCount; i++ {
+			newRegionID := s.idAlloc.Alloc()
+			var peerIDs []uint64
+			for j := 0; j < s.cfg.MaxPeerCount; j++ {
+				peerIDs = append(peerIDs, s.idAlloc.Alloc())
+			}
+			splitID := &pdpb.SplitID{
+				NewRegionId: newRegionID,
+				NewPeerIds:  peerIDs,
+			}
+			resp.Ids = append(resp.Ids, splitID)
+		}
+		return resp, nil
+	}
 
+	if !s.raftPeer.IsLeader() {
+		return s.forwardAskBatchSplit(ctx, req)
+	}
+
+	// Leader: allocate IDs via Raft proposals.
+	resp := &pdpb.AskBatchSplitResponse{Header: s.header()}
 	splitCount := int(req.GetSplitCount())
 	if splitCount == 0 {
 		splitCount = 1
 	}
+
 	for i := 0; i < splitCount; i++ {
-		newRegionID := s.idAlloc.Alloc()
+		// Allocate new region ID.
+		cmd := PDCommand{Type: CmdIDAlloc, IDBatchSize: 1}
+		result, err := s.raftPeer.ProposeAndWait(ctx, cmd)
+		if err != nil {
+			return nil, err
+		}
+		newRegionID := binary.BigEndian.Uint64(result)
+
+		// Allocate peer IDs.
 		var peerIDs []uint64
-		for i := 0; i < s.cfg.MaxPeerCount; i++ {
-			peerIDs = append(peerIDs, s.idAlloc.Alloc())
+		for j := 0; j < s.cfg.MaxPeerCount; j++ {
+			cmd = PDCommand{Type: CmdIDAlloc, IDBatchSize: 1}
+			result, err = s.raftPeer.ProposeAndWait(ctx, cmd)
+			if err != nil {
+				return nil, err
+			}
+			peerIDs = append(peerIDs, binary.BigEndian.Uint64(result))
 		}
 
 		splitID := &pdpb.SplitID{
@@ -372,8 +832,24 @@ func (s *PDServer) AskBatchSplit(ctx context.Context, req *pdpb.AskBatchSplitReq
 }
 
 func (s *PDServer) ReportBatchSplit(ctx context.Context, req *pdpb.ReportBatchSplitRequest) (*pdpb.ReportBatchSplitResponse, error) {
+	if s.raftPeer == nil {
+		// Single-node mode: existing direct code.
+		for _, region := range req.GetRegions() {
+			s.meta.PutRegion(region, nil)
+		}
+		return &pdpb.ReportBatchSplitResponse{Header: s.header()}, nil
+	}
+
+	if !s.raftPeer.IsLeader() {
+		return s.forwardReportBatchSplit(ctx, req)
+	}
+
+	// Leader: propose each region via Raft.
 	for _, region := range req.GetRegions() {
-		s.meta.PutRegion(region, nil)
+		cmd := PDCommand{Type: CmdPutRegion, Region: region}
+		if _, err := s.raftPeer.ProposeAndWait(ctx, cmd); err != nil {
+			return nil, err
+		}
 	}
 	return &pdpb.ReportBatchSplitResponse{Header: s.header()}, nil
 }
@@ -386,7 +862,26 @@ func (s *PDServer) GetGCSafePoint(ctx context.Context, req *pdpb.GetGCSafePointR
 }
 
 func (s *PDServer) UpdateGCSafePoint(ctx context.Context, req *pdpb.UpdateGCSafePointRequest) (*pdpb.UpdateGCSafePointResponse, error) {
-	newSP := s.gcMgr.UpdateSafePoint(req.GetSafePoint())
+	if s.raftPeer == nil {
+		// Single-node mode: existing direct code.
+		newSP := s.gcMgr.UpdateSafePoint(req.GetSafePoint())
+		return &pdpb.UpdateGCSafePointResponse{
+			Header:       s.header(),
+			NewSafePoint: newSP,
+		}, nil
+	}
+
+	if !s.raftPeer.IsLeader() {
+		return s.forwardUpdateGCSafePoint(ctx, req)
+	}
+
+	// Leader: propose via Raft.
+	cmd := PDCommand{Type: CmdUpdateGCSafePoint, GCSafePoint: req.GetSafePoint()}
+	result, err := s.raftPeer.ProposeAndWait(ctx, cmd)
+	if err != nil {
+		return nil, err
+	}
+	newSP := binary.BigEndian.Uint64(result)
 	return &pdpb.UpdateGCSafePointResponse{
 		Header:       s.header(),
 		NewSafePoint: newSP,

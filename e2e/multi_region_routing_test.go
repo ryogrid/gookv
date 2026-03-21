@@ -709,6 +709,9 @@ func TestMultiRegionScanLock(t *testing.T) {
 	})
 	assert.Empty(t, prewriteResp2.GetErrors(), "prewrite zeta should succeed")
 
+	// Wait for Raft replication to propagate locks to followers.
+	time.Sleep(200 * time.Millisecond)
+
 	// ScanLock for region1 range: startKey="" endKey="m" should find only "alpha".
 	var scanResp1 *kvrpcpb.ScanLockResponse
 	for _, n := range mc.nodes {

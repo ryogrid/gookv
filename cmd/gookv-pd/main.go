@@ -9,11 +9,51 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	goolog "github.com/ryogrid/gookv/internal/log"
 	"github.com/ryogrid/gookv/internal/pd"
 )
+
+// parseClusterString parses a cluster topology string of the form
+// "ID1=HOST:PORT,ID2=HOST:PORT,..." into a map[uint64]string.
+func parseClusterString(s string) (map[uint64]string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, fmt.Errorf("empty cluster string")
+	}
+
+	result := make(map[uint64]string)
+	entries := strings.Split(s, ",")
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid cluster entry %q: expected ID=HOST:PORT", entry)
+		}
+		id, err := strconv.ParseUint(strings.TrimSpace(parts[0]), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid node ID %q in cluster entry %q: %w", parts[0], entry, err)
+		}
+		addr := strings.TrimSpace(parts[1])
+		if addr == "" {
+			return nil, fmt.Errorf("empty address in cluster entry %q", entry)
+		}
+		result[id] = addr
+	}
+
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no valid entries in cluster string")
+	}
+
+	return result, nil
+}
 
 func main() {
 	listenAddr := flag.String("addr", "0.0.0.0:2379", "gRPC listen address")
@@ -21,6 +61,13 @@ func main() {
 	clusterID := flag.Uint64("cluster-id", 1, "Cluster ID")
 	logLevel := flag.String("log-level", "", "Log level: debug, info, warn, error (overrides default)")
 	logFile := flag.String("log-file", "", "Log file path (overrides default)")
+
+	// Raft replication flags (Step 15).
+	pdID := flag.Uint64("pd-id", 0, "PD node ID (required with --initial-cluster)")
+	initialCluster := flag.String("initial-cluster", "", "PD cluster topology: ID1=HOST:PORT,ID2=HOST:PORT,...")
+	peerPort := flag.String("peer-port", "0.0.0.0:2380", "Listen address for PD-to-PD Raft peer communication")
+	clientCluster := flag.String("client-cluster", "", "PD client addresses: ID1=HOST:PORT,... (for leader forwarding)")
+
 	flag.Parse()
 
 	// Set up structured logging.
@@ -51,6 +98,55 @@ func main() {
 	cfg.ListenAddr = *listenAddr
 	cfg.DataDir = *dataDir
 	cfg.ClusterID = *clusterID
+
+	// Step 16 & 17: Construct PDServerRaftConfig if --initial-cluster is specified.
+	if *initialCluster != "" {
+		// Validate --pd-id is non-zero.
+		if *pdID == 0 {
+			fmt.Fprintf(os.Stderr, "Error: --pd-id is required and must be non-zero when --initial-cluster is specified\n")
+			os.Exit(1)
+		}
+
+		// Parse --initial-cluster.
+		peers, err := parseClusterString(*initialCluster)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid --initial-cluster: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Validate --pd-id exists in the parsed map.
+		if _, ok := peers[*pdID]; !ok {
+			fmt.Fprintf(os.Stderr, "Error: --pd-id %d not found in --initial-cluster\n", *pdID)
+			os.Exit(1)
+		}
+
+		// Validate odd count (1, 3, 5, ...).
+		if len(peers)%2 == 0 {
+			fmt.Fprintf(os.Stderr, "Error: --initial-cluster must have an odd number of entries (got %d)\n", len(peers))
+			os.Exit(1)
+		}
+
+		// Parse --client-cluster if provided.
+		var clientAddrs map[uint64]string
+		if *clientCluster != "" {
+			clientAddrs, err = parseClusterString(*clientCluster)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --client-cluster: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		cfg.RaftConfig = &pd.PDServerRaftConfig{
+			PDNodeID:             *pdID,
+			InitialCluster:       peers,
+			PeerAddr:             *peerPort,
+			ClientAddrs:          clientAddrs,
+			RaftTickInterval:     100 * time.Millisecond,
+			ElectionTimeoutTicks: 10,
+			HeartbeatTicks:       2,
+		}
+	}
+	// If --initial-cluster is NOT specified, cfg.RaftConfig remains nil (single-node mode).
 
 	server, err := pd.NewPDServer(cfg)
 	if err != nil {

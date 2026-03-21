@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -193,9 +194,36 @@ func (c *grpcClient) header() *pdpb.RequestHeader {
 	return &pdpb.RequestHeader{ClusterId: c.clusterID}
 }
 
-// reconnect closes the existing connection and tries the next endpoint (round-robin).
-// It tries all endpoints once before giving up. Must be called with reconnectMu held.
+// reconnect closes the existing connection and tries the next endpoint.
+// It first tries to discover the leader via GetMembers, then falls back
+// to round-robin over all endpoints. Must be called with reconnectMu held.
 func (c *grpcClient) reconnect() error {
+	// Try to discover leader via GetMembers on the current connection first.
+	if leaderAddr := c.discoverLeader(); leaderAddr != "" {
+		c.mu.Lock()
+		if c.conn != nil {
+			c.conn.Close()
+		}
+		c.mu.Unlock()
+
+		slog.Debug("pd.reconnect.leader", "addr", leaderAddr)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, err := grpc.DialContext(ctx, leaderAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+		)
+		cancel()
+		if err == nil {
+			c.mu.Lock()
+			c.conn = conn
+			c.client = pdpb.NewPDClient(conn)
+			c.mu.Unlock()
+			return nil
+		}
+		slog.Debug("pd.reconnect.leader.failed", "addr", leaderAddr, "err", err)
+	}
+
+	// Fallback: round-robin over all endpoints.
 	c.mu.Lock()
 	if c.conn != nil {
 		c.conn.Close()
@@ -226,6 +254,44 @@ func (c *grpcClient) reconnect() error {
 		return nil
 	}
 	return fmt.Errorf("pdclient: reconnect failed: all %d endpoints exhausted", n)
+}
+
+// discoverLeader queries GetMembers on the current connection to find the leader's
+// client address. Returns empty string if discovery fails.
+func (c *grpcClient) discoverLeader() string {
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+	if client == nil {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resp, err := client.GetMembers(ctx, &pdpb.GetMembersRequest{})
+	if err != nil {
+		return ""
+	}
+
+	leader := resp.GetLeader()
+	if leader == nil {
+		return ""
+	}
+
+	urls := leader.GetClientUrls()
+	if len(urls) == 0 {
+		return ""
+	}
+
+	// Client URLs are in "http://host:port" format; strip the scheme.
+	addr := urls[0]
+	if strings.HasPrefix(addr, "http://") {
+		addr = strings.TrimPrefix(addr, "http://")
+	} else if strings.HasPrefix(addr, "https://") {
+		addr = strings.TrimPrefix(addr, "https://")
+	}
+	return addr
 }
 
 // withRetry retries fn up to RetryMaxCount times with exponential backoff
@@ -404,18 +470,27 @@ func (c *grpcClient) GetAllStores(ctx context.Context) ([]*metapb.Store, error) 
 
 func (c *grpcClient) Bootstrap(ctx context.Context, store *metapb.Store, region *metapb.Region) (*pdpb.BootstrapResponse, error) {
 	slog.Debug("pd.Bootstrap", "store-id", store.GetId(), "region-id", region.GetId())
-	resp, err := c.client.Bootstrap(ctx, &pdpb.BootstrapRequest{
-		Header: c.header(),
-		Store:  store,
-		Region: region,
+	var result *pdpb.BootstrapResponse
+	err := c.withRetry(func() error {
+		c.mu.RLock()
+		client := c.client
+		c.mu.RUnlock()
+
+		resp, err := client.Bootstrap(ctx, &pdpb.BootstrapRequest{
+			Header: c.header(),
+			Store:  store,
+			Region: region,
+		})
+		if err != nil {
+			return fmt.Errorf("pdclient: bootstrap: %w", err)
+		}
+		if resp.GetHeader().GetError() != nil {
+			return fmt.Errorf("pdclient: bootstrap error: %s", resp.GetHeader().GetError().GetMessage())
+		}
+		result = resp
+		return nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("pdclient: bootstrap: %w", err)
-	}
-	if resp.GetHeader().GetError() != nil {
-		return nil, fmt.Errorf("pdclient: bootstrap error: %s", resp.GetHeader().GetError().GetMessage())
-	}
-	return resp, nil
+	return result, err
 }
 
 func (c *grpcClient) IsBootstrapped(ctx context.Context) (bool, error) {

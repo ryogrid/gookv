@@ -150,8 +150,6 @@ func main() {
 
 		slog.Info("cluster mode enabled", "store-id", *storeID, "cluster", clusterMap)
 
-		resolver := server.NewStaticStoreResolver(clusterMap)
-		raftClient := transport.NewRaftClient(resolver, transport.DefaultRaftClientConfig())
 		rtr := raftrouter.New(256)
 
 		peerCfg := raftstore.DefaultPeerConfig()
@@ -209,6 +207,16 @@ func main() {
 				pdTaskCh = pdWorker.PeerTaskCh()
 			}
 		}
+
+		// Create store resolver: use PD-based resolver if PD is available
+		// (enables discovering dynamically added stores), otherwise use static map.
+		var resolver transport.StoreResolver
+		if pdClient != nil {
+			resolver = server.NewPDStoreResolver(pdClient, 30*time.Second)
+		} else {
+			resolver = server.NewStaticStoreResolver(clusterMap)
+		}
+		raftClient := transport.NewRaftClient(resolver, transport.DefaultRaftClientConfig())
 
 		coord = server.NewStoreCoordinator(server.StoreCoordinatorConfig{
 			StoreID:  *storeID,

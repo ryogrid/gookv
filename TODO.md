@@ -53,8 +53,11 @@
 - [x] No TODO/FIXME/HACK/XXX comments in new files
 - [x] Deferred items reported (see below)
 
-## Deferred Items
+## Phase 6: Deferred Items Implementation
 
-1. **Streaming RPC forwarding (Tso, RegionHeartbeat)**: Followers return `codes.Unavailable` instead of full bidirectional proxy forwarding. The pdclient retry logic handles reconnection to the leader. Full proxy forwarding is a future optimization.
-2. **TSOBuffer/IDBuffer integration into RPC handlers**: The buffers are implemented but not yet wired into the Tso/AllocID RPC handlers (which currently propose per-request through Raft). Wiring them is a performance optimization for high-throughput scenarios.
-3. **Raft log compaction for PD**: No automatic Raft log compaction is implemented for the PD Raft group. Over time, the Raft log will grow unbounded. A periodic compaction ticker (similar to `onRaftLogGCTick` in raftstore) should be added.
+- [x] Item 2: Wire TSOBuffer/IDBuffer into RPC handlers + leader change callback
+- [x] Item 3: PD Raft log compaction (CmdCompactLog, GC ticker, engine deletion)
+- [x] Item 1: Streaming RPC forwarding (Tso, RegionHeartbeat bidirectional proxy)
+- [x] Unit tests for new items (leader change callback, DeleteEntriesTo, CmdCompactLog)
+- [x] E2E tests (TSOViaFollowerForwarding, RegionHeartbeatViaFollower)
+- [x] Final verification

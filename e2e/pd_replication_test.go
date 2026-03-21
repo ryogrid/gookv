@@ -587,6 +587,109 @@ func TestPDReplication_TSOViaFollower(t *testing.T) {
 	}
 }
 
+// TestPDReplication_TSOViaFollowerForwarding verifies that TSO allocation works
+// via streaming proxy forwarding when the client is connected only to a follower.
+// Unlike TestPDReplication_TSOViaFollower which tests the retry-based approach,
+// this test verifies the streaming proxy path by calling GetTS 20 times and
+// checking strict monotonicity.
+func TestPDReplication_TSOViaFollowerForwarding(t *testing.T) {
+	servers, clientAddrs, _ := startPDCluster(t, 3)
+	ctx := context.Background()
+
+	client := newPDClusterClient(t, clientAddrs)
+	waitForLeader(t, client, 10*time.Second)
+	bootstrapCluster(t, client)
+
+	// Find a follower address.
+	leaderIdx := findLeaderIndex(t, servers)
+	followerAddr := ""
+	for i, addr := range clientAddrs {
+		if i != leaderIdx {
+			followerAddr = addr
+			break
+		}
+	}
+	require.NotEmpty(t, followerAddr, "should find a follower address")
+
+	// Create client connected ONLY to the follower.
+	followerClient := newPDClusterClient(t, []string{followerAddr})
+
+	// Call GetTS 20 times; all should succeed (forwarded to leader via streaming proxy).
+	var prevTS uint64
+	for i := 0; i < 20; i++ {
+		ts, err := followerClient.GetTS(ctx)
+		require.NoError(t, err, "GetTS via follower forwarding call %d should succeed", i)
+		val := ts.ToUint64()
+		assert.Greater(t, val, prevTS,
+			"TSO via follower forwarding must be strictly increasing (call %d)", i)
+		prevTS = val
+	}
+	t.Logf("20 TSO calls via follower forwarding all succeeded with monotonic timestamps")
+}
+
+// TestPDReplication_RegionHeartbeatViaFollower verifies that a region heartbeat
+// sent via a follower is forwarded to the leader and the region metadata becomes
+// visible on all nodes.
+func TestPDReplication_RegionHeartbeatViaFollower(t *testing.T) {
+	servers, clientAddrs, _ := startPDCluster(t, 3)
+	ctx := context.Background()
+
+	client := newPDClusterClient(t, clientAddrs)
+	waitForLeader(t, client, 10*time.Second)
+	bootstrapCluster(t, client)
+
+	// Find a follower address.
+	leaderIdx := findLeaderIndex(t, servers)
+	followerAddr := ""
+	for i, addr := range clientAddrs {
+		if i != leaderIdx {
+			followerAddr = addr
+			break
+		}
+	}
+	require.NotEmpty(t, followerAddr, "should find a follower address")
+
+	// Create client connected ONLY to the follower.
+	followerClient := newPDClusterClient(t, []string{followerAddr})
+
+	// Send RegionHeartbeat via follower with a new region.
+	region := &metapb.Region{
+		Id:       200,
+		StartKey: []byte("follower-a"),
+		EndKey:   []byte("follower-z"),
+		Peers: []*metapb.Peer{
+			{Id: 200, StoreId: 1},
+		},
+		RegionEpoch: &metapb.RegionEpoch{
+			ConfVer: 1,
+			Version: 1,
+		},
+	}
+	leader := &metapb.Peer{Id: 200, StoreId: 1}
+
+	_, err := followerClient.ReportRegionHeartbeat(ctx, &pdpb.RegionHeartbeatRequest{
+		Region: region,
+		Leader: leader,
+	})
+	require.NoError(t, err, "ReportRegionHeartbeat via follower should succeed")
+
+	// Wait for Raft replication to propagate writes to all nodes.
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify the region is visible on all nodes.
+	for i, addr := range clientAddrs {
+		c := newPDClusterClient(t, []string{addr})
+		r, l, err := c.GetRegionByID(ctx, 200)
+		require.NoError(t, err, "GetRegionByID on node %d should succeed", i+1)
+		require.NotNil(t, r, "region 200 should exist on node %d", i+1)
+		assert.Equal(t, uint64(200), r.GetId())
+		if l != nil {
+			assert.Equal(t, uint64(200), l.GetId())
+		}
+	}
+	t.Logf("Region heartbeat via follower forwarding succeeded, visible on all 3 nodes")
+}
+
 // TestPDReplication_5NodeCluster verifies that a 5-node PD cluster operates
 // correctly with basic operations.
 func TestPDReplication_5NodeCluster(t *testing.T) {

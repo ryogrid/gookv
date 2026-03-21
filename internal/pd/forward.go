@@ -114,3 +114,75 @@ func (s *PDServer) forwardReportBatchSplit(ctx context.Context, req *pdpb.Report
 	}
 	return client.ReportBatchSplit(ctx, req)
 }
+
+// forwardTso proxies a bidirectional Tso stream from a follower to the leader.
+func (s *PDServer) forwardTso(stream pdpb.PD_TsoServer) error {
+	client, err := s.getLeaderClient()
+	if err != nil {
+		return status.Error(codes.Unavailable, err.Error())
+	}
+
+	// Open a Tso stream to the leader.
+	leaderStream, err := client.Tso(stream.Context())
+	if err != nil {
+		return status.Error(codes.Unavailable, "failed to connect to PD leader: "+err.Error())
+	}
+
+	// Proxy loop: read from client, forward to leader, read response, send to client.
+	for {
+		req, err := stream.Recv()
+		if err != nil {
+			// Client closed or error.
+			leaderStream.CloseSend()
+			return err
+		}
+
+		if err := leaderStream.Send(req); err != nil {
+			return status.Error(codes.Unavailable, "leader stream send failed: "+err.Error())
+		}
+
+		resp, err := leaderStream.Recv()
+		if err != nil {
+			return status.Error(codes.Unavailable, "leader stream recv failed: "+err.Error())
+		}
+
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
+}
+
+// forwardRegionHeartbeat proxies a bidirectional RegionHeartbeat stream from a follower to the leader.
+func (s *PDServer) forwardRegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
+	client, err := s.getLeaderClient()
+	if err != nil {
+		return status.Error(codes.Unavailable, err.Error())
+	}
+
+	leaderStream, err := client.RegionHeartbeat(stream.Context())
+	if err != nil {
+		return status.Error(codes.Unavailable, "failed to connect to PD leader: "+err.Error())
+	}
+
+	// Same proxy pattern as forwardTso.
+	for {
+		req, err := stream.Recv()
+		if err != nil {
+			leaderStream.CloseSend()
+			return err
+		}
+
+		if err := leaderStream.Send(req); err != nil {
+			return status.Error(codes.Unavailable, "leader stream send failed: "+err.Error())
+		}
+
+		resp, err := leaderStream.Recv()
+		if err != nil {
+			return status.Error(codes.Unavailable, "leader stream recv failed: "+err.Error())
+		}
+
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
+}

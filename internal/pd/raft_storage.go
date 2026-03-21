@@ -346,6 +346,19 @@ func (s *PDRaftStorage) CompactTo(compactTo uint64) {
 	s.entries = s.entries[offset:]
 }
 
+// DeleteEntriesTo deletes persisted Raft log entries in [1, endIdx) from the engine.
+// This is the physical counterpart to CompactTo (which only trims the in-memory cache).
+// It uses engine.DeleteRange for efficient bulk deletion, following the same pattern
+// as RaftLogGCWorker.gcRaftLog in internal/raftstore/raftlog_gc.go.
+func (s *PDRaftStorage) DeleteEntriesTo(endIdx uint64) error {
+	if endIdx <= 1 {
+		return nil
+	}
+	startKey := keys.RaftLogKey(s.clusterID, 0)
+	endKey := keys.RaftLogKey(s.clusterID, endIdx)
+	return s.engine.DeleteRange(cfnames.CFRaft, startKey, endKey)
+}
+
 // --- Internal helpers ---
 
 func (s *PDRaftStorage) firstIndexLocked() uint64 {

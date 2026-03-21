@@ -6,7 +6,6 @@ package pd
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,8 +18,6 @@ import (
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/ryogrid/gookv/internal/engine/rocks"
 	"github.com/ryogrid/gookv/internal/engine/traits"
@@ -113,6 +110,10 @@ type PDServer struct {
 	raftEngine     traits.KvEngine // dedicated engine for PD Raft logs
 	peerGrpcServer *grpc.Server    // separate gRPC server for peer port
 	peerListener   net.Listener
+
+	// Buffered allocators (non-nil only in Raft mode).
+	tsoBuffer *TSOBuffer
+	idBuffer  *IDBuffer
 
 	// Leader forwarding (cached connection to current leader for follower forwarding).
 	leaderConnMu    sync.Mutex
@@ -228,7 +229,19 @@ func (s *PDServer) initRaft(rc *PDServerRaftConfig) error {
 	peer.SetApplySnapshotFunc(s.ApplySnapshot)
 	s.raftStorage.SetSnapshotGenFunc(s.GenerateSnapshot)
 
-	// 8. On restart, replay committed entries to rebuild in-memory state.
+	// 8. Initialize buffered allocators and wire leader change callback.
+	s.tsoBuffer = NewTSOBuffer(peer)
+	s.idBuffer = NewIDBuffer(peer)
+	peer.SetLeaderChangeFunc(func(isLeader bool) {
+		if s.tsoBuffer != nil {
+			s.tsoBuffer.Reset()
+		}
+		if s.idBuffer != nil {
+			s.idBuffer.Reset()
+		}
+	})
+
+	// 9. On restart, replay committed entries to rebuild in-memory state.
 	if isRestart {
 		if err := s.replayRaftLog(); err != nil {
 			engine.Close()
@@ -484,7 +497,7 @@ func (s *PDServer) GetMembers(ctx context.Context, req *pdpb.GetMembersRequest) 
 
 func (s *PDServer) Tso(stream pdpb.PD_TsoServer) error {
 	if s.raftPeer != nil && !s.raftPeer.IsLeader() {
-		return status.Error(codes.Unavailable, "not PD leader, reconnect to leader")
+		return s.forwardTso(stream)
 	}
 
 	for {
@@ -516,20 +529,15 @@ func (s *PDServer) Tso(stream pdpb.PD_TsoServer) error {
 				return err
 			}
 		} else {
-			// Leader: propose via Raft.
-			cmd := PDCommand{Type: CmdTSOAllocate, TSOBatchSize: int(count)}
-			result, err := s.raftPeer.ProposeAndWait(stream.Context(), cmd)
+			// Leader: allocate from buffered TSO (amortized Raft cost).
+			ts, err := s.tsoBuffer.GetTS(stream.Context(), int(count))
 			if err != nil {
 				return err
-			}
-			var ts pdpb.Timestamp
-			if err := json.Unmarshal(result, &ts); err != nil {
-				return fmt.Errorf("pd: unmarshal tso result: %w", err)
 			}
 			resp := &pdpb.TsoResponse{
 				Header:    s.header(),
 				Count:     count,
-				Timestamp: &ts,
+				Timestamp: ts,
 			}
 			if err := stream.Send(resp); err != nil {
 				return err
@@ -616,13 +624,11 @@ func (s *PDServer) AllocID(ctx context.Context, req *pdpb.AllocIDRequest) (*pdpb
 		return s.forwardAllocID(ctx, req)
 	}
 
-	// Leader: propose via Raft.
-	cmd := PDCommand{Type: CmdIDAlloc, IDBatchSize: 1}
-	result, err := s.raftPeer.ProposeAndWait(ctx, cmd)
+	// Leader: allocate from buffered ID allocator (amortized Raft cost).
+	id, err := s.idBuffer.Alloc(ctx)
 	if err != nil {
 		return nil, err
 	}
-	id := binary.BigEndian.Uint64(result)
 	return &pdpb.AllocIDResponse{
 		Header: s.header(),
 		Id:     id,
@@ -694,7 +700,7 @@ func (s *PDServer) StoreHeartbeat(ctx context.Context, req *pdpb.StoreHeartbeatR
 
 func (s *PDServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 	if s.raftPeer != nil && !s.raftPeer.IsLeader() {
-		return status.Error(codes.Unavailable, "not PD leader")
+		return s.forwardRegionHeartbeat(stream)
 	}
 
 	for {
@@ -802,23 +808,20 @@ func (s *PDServer) AskBatchSplit(ctx context.Context, req *pdpb.AskBatchSplitReq
 	}
 
 	for i := 0; i < splitCount; i++ {
-		// Allocate new region ID.
-		cmd := PDCommand{Type: CmdIDAlloc, IDBatchSize: 1}
-		result, err := s.raftPeer.ProposeAndWait(ctx, cmd)
+		// Allocate new region ID from buffered allocator.
+		newRegionID, err := s.idBuffer.Alloc(ctx)
 		if err != nil {
 			return nil, err
 		}
-		newRegionID := binary.BigEndian.Uint64(result)
 
-		// Allocate peer IDs.
+		// Allocate peer IDs from buffered allocator.
 		var peerIDs []uint64
 		for j := 0; j < s.cfg.MaxPeerCount; j++ {
-			cmd = PDCommand{Type: CmdIDAlloc, IDBatchSize: 1}
-			result, err = s.raftPeer.ProposeAndWait(ctx, cmd)
+			peerID, err := s.idBuffer.Alloc(ctx)
 			if err != nil {
 				return nil, err
 			}
-			peerIDs = append(peerIDs, binary.BigEndian.Uint64(result))
+			peerIDs = append(peerIDs, peerID)
 		}
 
 		splitID := &pdpb.SplitID{

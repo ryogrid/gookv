@@ -1,6 +1,7 @@
 package pd
 
 import (
+	"fmt"
 	"math"
 	"path/filepath"
 	"testing"
@@ -343,4 +344,80 @@ func TestPDRaftStorage_DummyEntry(t *testing.T) {
 	last, err := s.LastIndex()
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), last)
+}
+
+// TestPDRaftStorage_DeleteEntriesTo verifies that DeleteEntriesTo removes
+// persisted entries from the engine while leaving entries at and above endIdx intact.
+func TestPDRaftStorage_DeleteEntriesTo(t *testing.T) {
+	engine := newTestEngine(t)
+	s := NewPDRaftStorage(1, engine)
+
+	// Save 10 entries at indices 1-10.
+	entries := make([]raftpb.Entry, 10)
+	for i := range entries {
+		entries[i] = raftpb.Entry{
+			Index: uint64(i + 1),
+			Term:  1,
+			Data:  []byte(fmt.Sprintf("entry-%d", i+1)),
+		}
+	}
+	rd := raft.Ready{Entries: entries}
+	require.NoError(t, s.SaveReady(rd))
+
+	// Set apply state to simulate compaction at index 5.
+	s.SetApplyState(raftstore.ApplyState{
+		AppliedIndex:   10,
+		TruncatedIndex: 5,
+		TruncatedTerm:  1,
+	})
+
+	// Compact cache so entries 1-5 are only on engine.
+	s.CompactTo(6)
+
+	// Delete entries [0, 6) from the engine (indices 0-5).
+	require.NoError(t, s.DeleteEntriesTo(6))
+
+	// Reading entries 1-5 from engine should now fail (they were deleted
+	// and also compacted, so the storage returns ErrCompacted).
+	_, err := s.Entries(1, 6, math.MaxUint64)
+	assert.Equal(t, raft.ErrCompacted, err)
+
+	// Entries 6-10 should still be available from cache.
+	got, err := s.Entries(6, 11, math.MaxUint64)
+	require.NoError(t, err)
+	assert.Len(t, got, 5)
+	assert.Equal(t, uint64(6), got[0].Index)
+	assert.Equal(t, uint64(10), got[4].Index)
+
+	// Verify entries 6-10 are still readable from a fresh storage (engine-only).
+	s2 := NewPDRaftStorage(1, engine)
+	require.NoError(t, s2.RecoverFromEngine())
+	last, err := s2.LastIndex()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(10), last)
+}
+
+// TestPDRaftStorage_DeleteEntriesTo_Noop verifies that DeleteEntriesTo with
+// endIdx <= 1 is a no-op.
+func TestPDRaftStorage_DeleteEntriesTo_Noop(t *testing.T) {
+	engine := newTestEngine(t)
+	s := NewPDRaftStorage(1, engine)
+
+	// Save a single entry.
+	rd := raft.Ready{
+		Entries: []raftpb.Entry{
+			{Index: 1, Term: 1, Data: []byte("data")},
+		},
+	}
+	require.NoError(t, s.SaveReady(rd))
+
+	// DeleteEntriesTo(0) and DeleteEntriesTo(1) should be no-ops.
+	require.NoError(t, s.DeleteEntriesTo(0))
+	require.NoError(t, s.DeleteEntriesTo(1))
+
+	// Entry 1 should still be readable.
+	got, err := s.Entries(1, 2, math.MaxUint64)
+	require.NoError(t, err)
+	assert.Len(t, got, 1)
+	assert.Equal(t, uint64(1), got[0].Index)
 }

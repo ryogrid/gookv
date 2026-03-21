@@ -286,3 +286,74 @@ func TestPDRaftPeer_MultipleProposals(t *testing.T) {
 	}
 	assert.Equal(t, 10, len(seen), "expected 10 unique results")
 }
+
+// TestPDRaftPeer_LeaderChangeCallback verifies that the leaderChangeFunc
+// callback fires with isLeader=true on the leader and isLeader=false on
+// followers after leader election.
+func TestPDRaftPeer_LeaderChangeCallback(t *testing.T) {
+	peers, cleanup := createTestPDRaftCluster(t, 3)
+	defer cleanup()
+
+	// Track callback invocations per node.
+	type callbackEvent struct {
+		nodeID   uint64
+		isLeader bool
+	}
+	var mu sync.Mutex
+	var events []callbackEvent
+
+	for _, p := range peers {
+		nodeID := p.nodeID
+		p.SetLeaderChangeFunc(func(isLeader bool) {
+			mu.Lock()
+			events = append(events, callbackEvent{nodeID: nodeID, isLeader: isLeader})
+			mu.Unlock()
+		})
+	}
+
+	// Wait for leader election.
+	leaderIdx := waitForLeader(t, peers, 3*time.Second)
+	require.NotEqual(t, -1, leaderIdx, "no leader elected within 3 seconds")
+
+	// Give a bit of time for all callbacks to fire.
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// The leader should have received a callback with isLeader=true.
+	leaderNodeID := peers[leaderIdx].nodeID
+	leaderGotTrue := false
+	for _, ev := range events {
+		if ev.nodeID == leaderNodeID && ev.isLeader {
+			leaderGotTrue = true
+			break
+		}
+	}
+	assert.True(t, leaderGotTrue,
+		"leader node %d should have received leaderChangeFunc(true)", leaderNodeID)
+
+	// Each follower should have NOT received isLeader=true as their final state.
+	// (They may have received intermediate callbacks, but the last callback
+	// for a follower must be isLeader=false, or no callback at all.)
+	for i, p := range peers {
+		if i == leaderIdx {
+			continue
+		}
+		// Find the last callback for this node.
+		lastIsLeader := false
+		hasCallback := false
+		for _, ev := range events {
+			if ev.nodeID == p.nodeID {
+				lastIsLeader = ev.isLeader
+				hasCallback = true
+			}
+		}
+		if hasCallback {
+			assert.False(t, lastIsLeader,
+				"follower node %d should not have isLeader=true as final state", p.nodeID)
+		}
+		// It's also valid for a follower to have no callback if it was never
+		// a leader candidate (wasLeader starts as false, stays false).
+	}
+}

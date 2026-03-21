@@ -24,9 +24,10 @@ const (
 	CmdStartMove                                  // 9
 	CmdAdvanceMove                                // 10
 	CmdCleanupStaleMove                           // 11
+	CmdCompactLog                                 // 12
 )
 
-const maxPDCommandType = CmdCleanupStaleMove
+const maxPDCommandType = CmdCompactLog
 
 // PDCommand represents a single state-mutation that can be replicated via Raft.
 // For each command type, only the relevant payload fields are populated.
@@ -50,6 +51,8 @@ type PDCommand struct {
 	AdvanceRegion     *metapb.Region   `json:"advance_region,omitempty"`
 	AdvanceLeader     *metapb.Peer     `json:"advance_leader,omitempty"`
 	CleanupTimeout    time.Duration    `json:"cleanup_timeout,omitempty"`
+	CompactIndex      uint64           `json:"compact_index,omitempty"`
+	CompactTerm       uint64           `json:"compact_term,omitempty"`
 }
 
 // Marshal encodes a PDCommand as [1-byte type prefix] + [JSON payload].

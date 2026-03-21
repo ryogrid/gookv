@@ -81,6 +81,19 @@ func (s *PDServer) applyCommand(cmd PDCommand) ([]byte, error) {
 		s.moveTracker.CleanupStale(cmd.CleanupTimeout)
 		return nil, nil
 
+	case CmdCompactLog:
+		as := s.raftStorage.GetApplyState()
+		if cmd.CompactIndex <= as.TruncatedIndex {
+			return nil, nil // already compacted
+		}
+		as.TruncatedIndex = cmd.CompactIndex
+		as.TruncatedTerm = cmd.CompactTerm
+		s.raftStorage.SetApplyState(as)
+		s.raftStorage.CompactTo(cmd.CompactIndex + 1)
+		// Schedule background engine deletion.
+		go s.raftStorage.DeleteEntriesTo(cmd.CompactIndex + 1)
+		return nil, nil
+
 	default:
 		return nil, fmt.Errorf("applyCommand: unknown command type %d", cmd.Type)
 	}

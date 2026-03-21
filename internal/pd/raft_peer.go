@@ -54,23 +54,33 @@ type PDRaftConfig struct {
 	MaxSizePerMsg uint64
 	// MailboxCapacity is the size of the peer's mailbox channel (default 256).
 	MailboxCapacity int
+	// RaftLogGCTickInterval is how often the log GC tick fires (default 60s).
+	// Set to 0 to disable Raft log GC.
+	RaftLogGCTickInterval time.Duration
+	// RaftLogGCCountLimit triggers compaction when excess entry count exceeds this (default 10000).
+	RaftLogGCCountLimit uint64
+	// RaftLogGCThreshold is the minimum number of entries to keep after compaction (default 50).
+	RaftLogGCThreshold uint64
 }
 
 // DefaultPDRaftConfig returns a PDRaftConfig with sensible defaults.
 func DefaultPDRaftConfig() PDRaftConfig {
 	return PDRaftConfig{
-		RaftTickInterval:     100 * time.Millisecond,
-		ElectionTimeoutTicks: 10,
-		HeartbeatTicks:       2,
-		MaxInflightMsgs:      256,
-		MaxSizePerMsg:        1 << 20, // 1 MiB
-		MailboxCapacity:      256,
+		RaftTickInterval:      100 * time.Millisecond,
+		ElectionTimeoutTicks:  10,
+		HeartbeatTicks:        2,
+		MaxInflightMsgs:       256,
+		MaxSizePerMsg:         1 << 20, // 1 MiB
+		MailboxCapacity:       256,
+		RaftLogGCTickInterval: 60 * time.Second,
+		RaftLogGCCountLimit:   10000,
+		RaftLogGCThreshold:    50,
 	}
 }
 
 // PDRaftPeer manages a single Raft node in the PD cluster.
 // It is modeled on Peer in internal/raftstore/peer.go but simplified:
-// no region management, no conf change handling, no split checks, no log GC.
+// no region management, no conf change handling, no split checks.
 type PDRaftPeer struct {
 	nodeID    uint64
 	rawNode   *raft.RawNode
@@ -95,9 +105,16 @@ type PDRaftPeer struct {
 	// It replaces the PD server's in-memory state with the snapshot data.
 	applySnapshotFunc func([]byte) error
 
+	// leaderChangeFunc is called when the local leader status changes.
+	// The argument is true if this node became the leader, false otherwise.
+	leaderChangeFunc func(isLeader bool)
+
 	isLeader atomic.Bool
 	leaderID atomic.Uint64
 	stopped  atomic.Bool
+
+	// lastCompactedIdx tracks the last index scheduled for log GC.
+	lastCompactedIdx uint64
 
 	cfg PDRaftConfig
 }
@@ -164,6 +181,14 @@ func (p *PDRaftPeer) Run(ctx context.Context) {
 	ticker := time.NewTicker(p.cfg.RaftTickInterval)
 	defer ticker.Stop()
 
+	// Optional GC ticker for Raft log compaction.
+	var gcTickerCh <-chan time.Time
+	if p.cfg.RaftLogGCTickInterval > 0 {
+		gcTicker := time.NewTicker(p.cfg.RaftLogGCTickInterval)
+		defer gcTicker.Stop()
+		gcTickerCh = gcTicker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -172,6 +197,9 @@ func (p *PDRaftPeer) Run(ctx context.Context) {
 
 		case <-ticker.C:
 			p.rawNode.Tick()
+
+		case <-gcTickerCh:
+			p.onRaftLogGCTick()
 
 		case msg, ok := <-p.Mailbox:
 			if !ok {
@@ -238,8 +266,15 @@ func (p *PDRaftPeer) handleReady() {
 
 	// Step 1: Update leader status from SoftState.
 	if rd.SoftState != nil {
-		p.isLeader.Store(rd.SoftState.Lead == p.nodeID)
+		wasLeader := p.isLeader.Load()
+		nowLeader := rd.SoftState.Lead == p.nodeID
+		p.isLeader.Store(nowLeader)
 		p.leaderID.Store(rd.SoftState.Lead)
+
+		// Fire leader change callback when status transitions.
+		if wasLeader != nowLeader && p.leaderChangeFunc != nil {
+			p.leaderChangeFunc(nowLeader)
+		}
 	}
 
 	// Step 1.5: Apply incoming snapshot if present.
@@ -331,6 +366,52 @@ func (p *PDRaftPeer) handleReady() {
 	p.rawNode.Advance(rd)
 }
 
+// onRaftLogGCTick evaluates whether the Raft log should be compacted.
+// Only the leader proposes CmdCompactLog commands.
+// Follows the same pattern as Peer.onRaftLogGCTick in internal/raftstore/peer.go,
+// simplified for single-node PD (no follower match tracking).
+func (p *PDRaftPeer) onRaftLogGCTick() {
+	if !p.isLeader.Load() {
+		return
+	}
+
+	as := p.storage.GetApplyState()
+	appliedIdx := as.AppliedIndex
+	firstIdx := as.TruncatedIndex + 1
+
+	if appliedIdx <= firstIdx {
+		return
+	}
+
+	excessCount := appliedIdx - firstIdx
+	if excessCount < p.cfg.RaftLogGCCountLimit {
+		return
+	}
+
+	compactIdx := appliedIdx - p.cfg.RaftLogGCThreshold
+	if compactIdx <= p.lastCompactedIdx {
+		return
+	}
+
+	// Get the term at compactIdx.
+	term, err := p.storage.Term(compactIdx)
+	if err != nil {
+		return
+	}
+
+	cmd := PDCommand{
+		Type:         CmdCompactLog,
+		CompactIndex: compactIdx,
+		CompactTerm:  term,
+	}
+	data, err := cmd.Marshal()
+	if err != nil {
+		return
+	}
+	_ = p.rawNode.Propose(data) // fire-and-forget
+	p.lastCompactedIdx = compactIdx
+}
+
 // ProposeAndWait proposes a PDCommand and blocks until it is committed and applied,
 // or the context is cancelled. Returns ErrNotLeader if this peer is not the leader.
 func (p *PDRaftPeer) ProposeAndWait(ctx context.Context, cmd PDCommand) ([]byte, error) {
@@ -381,6 +462,11 @@ func (p *PDRaftPeer) SetApplyFunc(f func(PDCommand) ([]byte, error)) { p.applyFu
 
 // SetApplySnapshotFunc sets the function used to apply a received snapshot.
 func (p *PDRaftPeer) SetApplySnapshotFunc(f func([]byte) error) { p.applySnapshotFunc = f }
+
+// SetLeaderChangeFunc sets a callback that fires when the local leader status
+// changes. The callback receives true if this node became the leader, false
+// otherwise. This is used to reset buffered allocators on leader change.
+func (p *PDRaftPeer) SetLeaderChangeFunc(f func(isLeader bool)) { p.leaderChangeFunc = f }
 
 // WireTransport sets up p.sendFunc to route outbound Raft messages via the
 // given PDTransport. Messages addressed to the local node are delivered

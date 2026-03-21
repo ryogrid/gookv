@@ -130,6 +130,14 @@ func TestPDCommand_MarshalRoundTrip(t *testing.T) {
 				CleanupTimeout: 5 * time.Minute,
 			},
 		},
+		{
+			name: "CmdCompactLog",
+			cmd: PDCommand{
+				Type:         CmdCompactLog,
+				CompactIndex: 42,
+				CompactTerm:  7,
+			},
+		},
 	}
 
 	for _, tt := range tests {

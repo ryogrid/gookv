@@ -48,7 +48,8 @@ func (m *mockPDClient) GetRegionByID(context.Context, uint64) (*metapb.Region, *
 func (m *mockPDClient) Bootstrap(context.Context, *metapb.Store, *metapb.Region) (*pdpb.BootstrapResponse, error) {
 	return nil, nil
 }
-func (m *mockPDClient) IsBootstrapped(context.Context) (bool, error) { return false, nil }
+func (m *mockPDClient) GetAllStores(context.Context) ([]*metapb.Store, error) { return nil, nil }
+func (m *mockPDClient) IsBootstrapped(context.Context) (bool, error)         { return false, nil }
 func (m *mockPDClient) PutStore(context.Context, *metapb.Store) error { return nil }
 func (m *mockPDClient) ReportRegionHeartbeat(context.Context, *pdpb.RegionHeartbeatRequest) (*pdpb.RegionHeartbeatResponse, error) {
 	return nil, nil

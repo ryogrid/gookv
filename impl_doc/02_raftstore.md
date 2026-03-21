@@ -325,6 +325,12 @@ Called on restart (non-bootstrap path):
 3. Unmarshal each entry, track the maximum index as `persistedLastIndex`.
 4. Keep the last 1024 entries in the in-memory cache.
 
+### 4.3.1 `HasPersistedRaftState(engine, regionID)`
+
+A package-level utility function that checks whether the engine has persisted Raft state for a given region by looking up `keys.RaftStateKey(regionID)` in `CF_RAFT`. Returns `true` if the key exists.
+
+Used by `StoreCoordinator.CreatePeer` to decide whether a newly created peer should be bootstrapped with the region's full peer list (no persisted state → bootstrap with peers) or should recover from the engine (persisted state exists → `RecoverFromEngine`).
+
 ### 4.4 Entry Cache
 
 The cache is a `[]raftpb.Entry` slice holding the most recent entries (up to 1024). The `appendToCache` method handles overlap:
@@ -614,7 +620,7 @@ sequenceDiagram
 
 On the leader side, `PeerStorage.Snapshot()` triggers `SnapWorker` to generate `SnapshotData` (scanning all three data CFs). When the snapshot result arrives via `GenSnapTask.ResultCh`, the leader's next `handleReady()` includes the snapshot in `rd.Messages` as a `MsgSnap`. The `sendRaftMessage` function detects `MsgSnap` and uses `RaftClient.SendSnapshot` (streaming 1MB chunks) instead of the normal `Send` path. On send failure, `reportSnapshotStatus` with `SnapshotFailure` is sent back.
 
-On the receiving side, the gRPC `Snapshot` handler reassembles the chunks and calls `HandleSnapshotMessage`, which attaches the snapshot data to the Raft message and creates a peer if one doesn't exist for the region. The follower's `handleReady()` detects a non-empty `rd.Snapshot` and calls `storage.ApplySnapshot()` to apply the data.
+On the receiving side, the gRPC `Snapshot` handler reassembles the chunks and calls `HandleSnapshotMessage`, which attaches the snapshot data to the Raft message and creates a peer if one doesn't exist for the region (via `maybeCreatePeerForMessage`). When PD is available, `maybeCreatePeerForMessage` queries `pdClient.GetRegionByID()` to obtain full region metadata (including the complete peer list), so the child peer is bootstrapped with the correct cluster configuration. If PD is unavailable or the query fails, it falls back to constructing minimal metadata from the `FromPeer`/`ToPeer` in the Raft message. The follower's `handleReady()` detects a non-empty `rd.Snapshot` and calls `storage.ApplySnapshot()` to apply the data.
 
 ### 8.2 Region Split
 
@@ -767,7 +773,7 @@ This is used after a peer is removed via conf change or region merge.
 - **Apply result processing** — `onApplyResult()` processes `ExecResultTypeCompactLog` via `onReadyCompactLog()` and invokes pending proposal callbacks.
 - **Region data cleanup** — `CleanupRegionData` removes all Raft state for destroyed regions.
 
-- **Store goroutine** — `RunStoreWorker` (in `StoreCoordinator`) is started in `main.go`. It listens on `router.StoreCh()` and handles `CreatePeer`, `DestroyPeer`, and `RaftMessage` (for unknown regions). `HandleRaftMessage` falls back to `storeCh` on `ErrRegionNotFound`, enabling dynamic peer creation.
+- **Store goroutine** — `RunStoreWorker` (in `StoreCoordinator`) is started in `main.go`. It listens on `router.StoreCh()` and handles `CreatePeer`, `DestroyPeer`, and `RaftMessage` (for unknown regions). `HandleRaftMessage` falls back to `storeCh` on `ErrRegionNotFound`, enabling dynamic peer creation. The `maybeCreatePeerForMessage` function queries PD via `pdClient.GetRegionByID()` for full region metadata when creating child peers (falling back to minimal metadata from the message if PD is unavailable).
 - **Significant messages** — All three `SignificantMsgType` values are fully handled in `handleSignificantMessage()`: `Unreachable` → `rawNode.ReportUnreachable`, `SnapshotStatus` → `rawNode.ReportSnapshot`, `MergeResult` → `stopped = true`.
 - **PD scheduling messages** — `PeerMsgTypeSchedule` (value 8) dispatches to `handleScheduleMessage()`. Only the leader executes; routes `TransferLeader`, `ChangePeer`, and `Merge` commands from PD's scheduler.
 - **Snapshot transfer** — Fully wired end-to-end: `PeerStorage.Snapshot()` → `SnapWorker` generation → `handleReady` applies snapshots → `sendRaftMessage` detects `MsgSnap` → `SendSnapshot` streaming → remote `Snapshot` gRPC handler → `HandleSnapshotMessage` → `ApplySnapshot` → `reportSnapshotStatus`.

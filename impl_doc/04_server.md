@@ -145,8 +145,8 @@ type StoreCoordinator struct {
 | `Router()` | Returns the coordinator's router (used by `PDWorker.sendScheduleMsg`) |
 | `RunStoreWorker(ctx)` | Goroutine that listens on `router.StoreCh()` and handles `CreatePeer`, `DestroyPeer`, and `RaftMessage` for unknown regions |
 | `GetPeer(regionID)` | Returns the peer for a region |
-| `ResolveRegionForKey(key)` | Routes a key to its containing region by checking peer ranges |
-| `CreatePeer(region, peers)` | Creates and starts a new Raft peer (used after split) |
+| `ResolveRegionForKey(key)` | Routes a key to its containing region; when multiple regions match (e.g., stale parent after split), selects the narrowest match (largest startKey) |
+| `CreatePeer(region, peers)` | Creates and starts a new Raft peer; if no persisted Raft state exists (`HasPersistedRaftState` returns false), bootstraps with the region's full peer list so the Raft node knows the correct cluster configuration |
 | `RunSplitResultHandler(ctx)` | Goroutine that processes split check results, coordinates with PD (AskBatchSplit), executes splits, bootstraps child regions, and reports splits to PD (ReportBatchSplit) |
 | `Stop()` | Cancels all peers, stops split check worker, and unregisters from the router |
 
@@ -286,8 +286,11 @@ KvPrewrite(ctx, PrewriteRequest) -> PrewriteResponse
 **Cluster mode** (when `coordinator != nil`):
 1. Call `storage.PrewriteModifies(mutations, primary, startTS, lockTTL)` -- this performs MVCC checks and computes `[]mvcc.Modify` without writing to the engine.
 2. If any per-mutation errors exist, convert them via `errToKeyError` and return immediately.
-3. Call `proposeModifiesToRegionsWithRegionError(coord, modifies, 10s timeout)` -- this groups modifications by region via `groupModifiesByRegion()` and proposes to each region's leader separately via Raft. Returns a structured `regionError` on routing failures (NotLeader, RegionNotFound).
-4. Return the response.
+3. Extract the region ID from `req.GetContext().GetRegionId()`. If zero (e.g., standalone client), fall back to `resolveRegionID(primary)`.
+4. Call `coord.ProposeModifies(regionID, modifies, 10s timeout)` to propose directly to the single target region. This works because the client library groups mutations by region before sending each `PrewriteRequest`.
+5. On proposal error, call `proposeErrorToRegionError(err, regionID)` to convert to a structured `regionError` (NotLeader, RegionNotFound, or timeout). Return the response.
+
+**Note:** The async commit path still uses `proposeModifiesToRegionsWithRegionError` because async commit secondaries may span multiple regions. The 1PC path uses `resolveRegionID(primary)` with direct `ProposeModifies`.
 
 **Standalone mode** (when `coordinator == nil`):
 1. Call `storage.Prewrite(mutations, primary, startTS, lockTTL)` -- this performs MVCC checks, computes modifications, and applies them directly to the engine in a single `WriteBatch.Commit`.
@@ -302,7 +305,7 @@ The `KvPrewrite` handler inspects request flags to select the optimal path:
 ### 4.4 KvCommit Handler Flow (dual mode)
 
 Follows the same dual-mode pattern as KvPrewrite:
-- **Cluster**: `storage.CommitModifies` -> `proposeModifiesToRegionsWithRegionError(coord, modifies, ...)` which groups modifications by region and proposes to each region's leader separately via Raft.
+- **Cluster**: `storage.CommitModifies` -> extract region ID from `req.GetContext().GetRegionId()` (falls back to `resolveRegionID(keys[0])` if zero) -> `coord.ProposeModifies(regionID, modifies, ...)` to propose directly to the single target region. On proposal error, converts to structured `regionError` via `proposeErrorToRegionError`. The client groups commit keys by region before sending each request, so multi-region grouping is not needed.
 - **Standalone**: `storage.Commit` -> direct engine write.
 
 ---
@@ -340,12 +343,11 @@ For `PrewriteModifies`, `CommitModifies`:
 
 Steps 1-4 are identical to the standalone path, but step 5 is skipped. Instead:
 - The method returns `[]mvcc.Modify` to the caller (the gRPC handler).
-- The handler calls `proposeModifiesToRegionsWithRegionError(coord, modifies, timeout)` which groups modifications by region and proposes to each region's leader separately.
+- **For `KvPrewrite` (standard 2PC) and `KvCommit`:** The handler extracts the region ID from the request context (`req.GetContext().GetRegionId()`) and calls `coord.ProposeModifies(regionID, modifies, timeout)` directly to the single target region. This works because the client library groups mutations by region before sending each request.
+- **For `KvPrewrite` (async commit), `KvBatchRollback`, `KvPessimisticLock`, and `KvResolveLock`:** The handler calls `proposeModifiesToRegionsWithRegionError(coord, modifies, timeout)` which groups modifications by region via `groupModifiesByRegion()` and proposes to each region's leader separately.
 - `ProposeModifies` converts modifies to `[]*raft_cmdpb.Request` via `ModifiesToRequests`, wraps them in a `RaftCmdRequest`, and sends a `PeerMsgTypeRaftCommand` to the peer's mailbox via the router.
 - The peer proposes the entry to Raft. After consensus, the `applyFunc` callback fires.
 - `applyEntries` unmarshals each committed entry back to `RaftCmdRequest`, converts the requests to modifies via `RequestsToModifies`, and calls `storage.ApplyModifies`.
-
-**Note:** `KvBatchRollback`, `KvPessimisticLock`, and `KvResolveLock` also use `proposeModifiesToRegionsWithRegionError` for multi-region routing in cluster mode.
 
 ### 5.4 CheckTxnStatus
 
@@ -414,7 +416,7 @@ The following helper methods on `tikvService` enable cross-region Raft proposals
 func (svc *tikvService) groupModifiesByRegion(modifies []mvcc.Modify) map[uint64][]mvcc.Modify
 ```
 
-Groups modifications by target region using the coordinator's `ResolveRegionForKey()`. Returns `map[regionID → []Modify]`.
+Groups modifications by target region. Because modify keys are MVCC codec-encoded (`EncodeLockKey` or `EncodeKey`), this function first decodes each key to the raw user key via `mvcc.DecodeKey()` before calling `ResolveRegionForKey()` on the coordinator. If decoding fails, the codec-encoded key is used as-is as a fallback. Returns `map[regionID → []Modify]`.
 
 ```go
 func (svc *tikvService) proposeModifiesToRegions(coord *StoreCoordinator, modifies []mvcc.Modify, timeout time.Duration) error
@@ -426,7 +428,60 @@ Groups modifications by region and calls `coord.ProposeModifies()` for each regi
 func (svc *tikvService) proposeModifiesToRegionsWithRegionError(coord *StoreCoordinator, modifies []mvcc.Modify, timeout time.Duration) (*errorpb.Error, error)
 ```
 
-Like `proposeModifiesToRegions` but converts proposal errors to structured region errors via `proposeErrorToRegionError()`. Returns `(*errorpb.Error, nil)` for region routing errors (NotLeader, RegionNotFound) or `(nil, error)` for other errors. Used by `KvPrewrite`, `KvCommit`, `KvBatchRollback`, `KvPessimisticLock`, and `KvResolveLock` handlers in cluster mode.
+Like `proposeModifiesToRegions` but converts proposal errors to structured region errors via `proposeErrorToRegionError()`. Returns `(*errorpb.Error, nil)` for region routing errors (NotLeader, RegionNotFound, timeout) or `(nil, error)` for other errors. Used by `KvPrewrite` (async commit path), `KvBatchRollback`, `KvPessimisticLock`, and `KvResolveLock` handlers in cluster mode. Note: `KvPrewrite` (standard 2PC) and `KvCommit` no longer use this function — they use `req.GetContext().GetRegionId()` with direct `coord.ProposeModifies()` since the client groups mutations by region.
+
+```go
+func proposeErrorToRegionError(err error, regionID uint64) *errorpb.Error
+```
+
+Converts a `ProposeModifies` error into a structured region error by inspecting the error message string. Returns `nil` if the error is not a recognized region-routing error. Recognized patterns:
+- `"not found"` → `RegionNotFound{RegionId}`
+- `"not leader"` → `NotLeader{RegionId}`
+- `"timeout"` → `NotLeader{RegionId}` (proposal timeout usually indicates the Raft group is non-functional; returning NotLeader triggers client retry with a different store)
+
+Used by `proposeModifiesToRegionsWithRegionError`, the direct proposal paths in `KvPrewrite` (standard 2PC, 1PC), `KvCommit`, and Raw KV write handlers.
+
+**Proposal routing strategy overview:**
+
+```mermaid
+flowchart LR
+    subgraph "Direct Proposal (context RegionId)"
+        KvPrewrite2PC["KvPrewrite\n(standard 2PC)"]
+        KvCommit["KvCommit"]
+        KvPrewrite1PC["KvPrewrite\n(1PC)"]
+    end
+    subgraph "Multi-Region Grouping (groupModifiesByRegion)"
+        KvPrewriteAC["KvPrewrite\n(async commit)"]
+        KvBatchRollback["KvBatchRollback"]
+        KvPessimisticLock["KvPessimisticLock"]
+        KvResolveLock["KvResolveLock"]
+    end
+
+    KvPrewrite2PC --> ProposeModifies
+    KvCommit --> ProposeModifies
+    KvPrewrite1PC --> ProposeModifies
+
+    KvPrewriteAC --> proposeModifiesToRegions
+    KvBatchRollback --> proposeModifiesToRegions
+    KvPessimisticLock --> proposeModifiesToRegions
+    KvResolveLock --> proposeModifiesToRegions
+
+    proposeModifiesToRegions -->|"per region"| ProposeModifies
+    ProposeModifies -->|"on error"| proposeErrorToRegionError
+```
+
+**Error classification in `proposeErrorToRegionError`:**
+
+```mermaid
+flowchart TD
+    Err["ProposeModifies error"] --> CheckNotFound{"contains\n'not found'?"}
+    CheckNotFound -->|Yes| RegionNotFound["RegionNotFound\n{RegionId}"]
+    CheckNotFound -->|No| CheckNotLeader{"contains\n'not leader'?"}
+    CheckNotLeader -->|Yes| NotLeader["NotLeader\n{RegionId}"]
+    CheckNotLeader -->|No| CheckTimeout{"contains\n'timeout'?"}
+    CheckTimeout -->|Yes| NotLeaderTimeout["NotLeader\n{RegionId}\n(Raft group down)"]
+    CheckTimeout -->|No| Nil["nil\n(not a region error)"]
+```
 
 ### 5.9 lockToLockInfo
 

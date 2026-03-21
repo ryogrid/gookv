@@ -44,6 +44,15 @@ A third implementation round (branch `cross-region-txn`, commit `616cacf16`) add
 - **twoPhaseCommitter** — Executes the 2PC protocol: `selectPrimary` → prewrite (primary-first, secondaries parallel) → `getCommitTS` from PD → `commitPrimary` (sync) → `commitSecondaries` (background). Supports 1PC and async commit paths.
 - **Server-side enhancements** — `LockError` structured error type (in `mvcc` package) replaces bare `ErrKeyIsLocked`, enabling full `LockInfo` propagation in read RPCs via `lockToLockInfo()`. Multi-region Raft proposal routing via `proposeModifiesToRegionsWithRegionError()`. `BatchRollbackModifies()` for cluster-mode rollback.
 
+A subsequent fix (branch `new-demo-impl`, commit `e09c358fe`) resolved 6 infrastructure bugs required for cross-region transactions to work end-to-end, and added a cross-region transaction demo (`make txn-demo-start/verify/stop` with `scripts/txn-demo-verify/main.go`):
+
+- **SplitCheckCfg wiring** — `SplitCheckCfg` and `SplitCheckTickInterval` are now properly passed from TOML config through `main.go` to the coordinator, instead of falling back to hardcoded defaults.
+- **PD metadata query for child peers** — `maybeCreatePeerForMessage` queries PD via `GetRegionByID()` for full region metadata when creating child peers after split, falling back to minimal metadata from the Raft message.
+- **MVCC codec key decoding** — `groupModifiesByRegion()` now decodes MVCC codec-encoded keys (via `mvcc.DecodeKey`) before region routing, because modify keys use `EncodeLockKey`/`EncodeKey` encoding.
+- **Narrowest-match region resolution** — `ResolveRegionForKey` selects the most specific region (largest startKey) among matches, handling stale parent regions after split.
+- **Context RegionId in KvPrewrite/KvCommit** — Standard 2PC `KvPrewrite` and `KvCommit` use `req.GetContext().GetRegionId()` directly instead of multi-region grouping, since the client groups mutations by region.
+- **Proposal timeout as retriable error** — `proposeErrorToRegionError()` treats timeout errors as `NotLeader`, enabling client retry.
+
 ## 2. Remaining Items
 
 | # | Category | Feature | Status | Notes |

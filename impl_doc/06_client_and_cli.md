@@ -50,7 +50,8 @@ The `main()` function proceeds through these steps in order:
    - `server.NewStaticStoreResolver(clusterMap)` creates a resolver that maps store IDs to network addresses.
    - `transport.NewRaftClient(resolver, config)` creates a Raft transport client for inter-node communication.
    - `raftrouter.New(256)` creates the Raft message router with 256 shards.
-   - `server.NewStoreCoordinator(...)` creates the coordinator that ties together the engine, storage, router, Raft client, and optional PD client for split coordination.
+   - A `PeerConfig` is built from `cfg.RaftStore`, including `SplitCheckTickInterval` (propagated from the TOML `split-check-tick-interval` field, default 10s).
+   - `server.NewStoreCoordinator(...)` creates the coordinator with `SplitCheckCfg` populated from the config (`SplitSize`, `MaxSize` from `cfg.RaftStore`, `SplitKeys`, `MaxKeys` from `cfg.Coprocessor`). This ensures the split check worker uses the configured thresholds instead of hardcoded defaults.
    - The coordinator is attached to the server via `srv.SetCoordinator(coord)`.
    - **Region bootstrap**: A single region (ID=1) is created spanning all stores. Each store ID doubles as a peer ID (`Peer{Id: storeID, StoreId: storeID}`). `coord.BootstrapRegion()` initializes the Raft group.
    - If PD client is configured, `go coord.RunSplitResultHandler(ctx)` is started to handle PD-coordinated splits.

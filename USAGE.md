@@ -226,13 +226,33 @@ make txn-demo-stop
 | Node 2 | 127.0.0.1:20171 (gRPC), :20191 (status) |
 | Node 3 | 127.0.0.1:20172 (gRPC), :20192 (status) |
 
+### Demo Configuration
+
+The demo cluster uses `scripts/txn-demo/config.toml` with low thresholds to trigger region splits quickly with minimal data:
+
+```toml
+[raft-store]
+raft-base-tick-interval = "100ms"   # Fast ticks for quick leader election
+raft-heartbeat-ticks = 2
+raft-election-timeout-ticks = 10
+region-max-size = "2KB"             # Low threshold to trigger split quickly
+region-split-size = "1KB"
+split-check-tick-interval = "2s"    # Check for oversized regions every 2s
+```
+
 ### What Each Scenario Demonstrates
 
-1. **Single-Region Transaction**: Verifies `TxnKVClient` works for basic 2PC within one Raft group.
-2. **Region Split**: Writes enough data to exceed the 1KB split threshold, triggering PD-coordinated region split. Shows before/after region layout.
-3. **Cross-Region 2PC**: Commits a transaction whose keys span different regions (different Raft groups, potentially different leaders), demonstrating atomic cross-region transactions.
+1. **Single-Region Transaction (Baseline)**: Connects to PD, verifies the cluster starts with a single region, then performs a 2PC transaction setting `account:alice=1000` and `account:bob=1000`. Reads back both keys in a new transaction to confirm correctness.
+
+2. **Region Split**: Writes ~15 keys of ~150 bytes each via `RawKVClient` to exceed the 1KB split threshold. Polls PD until the region count increases (up to 60s timeout). Prints the before/after region layout showing each region's ID, key range, peer stores, and leader.
+
+3. **Cross-Region 2PC**: Waits for the region count to stabilize (3 consecutive stable polls). Picks keys guaranteed to be in different regions — `account:alice` in the first region and a key derived from the last region's start key. Pre-warms both regions with RawKV writes to ensure they are writable, then initializes balances with separate single-region transactions. Performs a cross-region balance transfer (100 units) via 2PC. Verifies the result with a retry loop to handle async secondary commits.
 
 The cluster uses 3 KVS nodes with 3-node Raft groups. After split, both regions have 3 peers on the same 3 stores but run as separate Raft groups with potentially different leaders.
+
+### Expected Output
+
+The demo prints structured output with scenario banners (`--- Scenario 1/3: ...`), numbered steps, region layout tables, and explicit PASS/FAIL per scenario. A final summary reports how many scenarios passed (e.g., `All 3 scenarios passed.`). The program exits with code 0 on full success, 1 if any scenario fails.
 
 ## Using the Admin CLI
 

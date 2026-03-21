@@ -39,8 +39,10 @@ Shut down gracefully with `SIGINT` or `SIGTERM`.
 
 ## Running the PD Server
 
+### Single-Node Mode (default)
+
 ```bash
-# Start the Placement Driver server
+# Start the Placement Driver server (single-node, no Raft)
 ./gookv-pd --addr 0.0.0.0:2379
 
 # PD provides:
@@ -49,6 +51,68 @@ Shut down gracefully with `SIGINT` or `SIGTERM`.
 #   - Region scheduling (split ID allocation, heartbeat processing)
 #   - GC safe point management
 ```
+
+### Multi-Node PD Cluster (Raft-replicated)
+
+For high availability, PD can run as a 3-node or 5-node Raft cluster. Each node replicates all state mutations through Raft consensus. Clients can connect to any node — followers transparently forward writes to the leader.
+
+```bash
+# Start a 3-node replicated PD cluster.
+# Each node needs:
+#   --pd-id:           unique node ID within the PD cluster
+#   --initial-cluster: peer-to-peer addresses for Raft (ID=HOST:PORT,...)
+#   --peer-port:       listen address for inter-PD Raft communication
+#   --client-cluster:  client-facing addresses (ID=HOST:PORT,...) for leader forwarding
+
+# Node 1
+./gookv-pd --addr 127.0.0.1:2379 --data-dir /tmp/gookv-pd1 \
+  --pd-id 1 \
+  --initial-cluster "1=127.0.0.1:2380,2=127.0.0.1:2382,3=127.0.0.1:2384" \
+  --peer-port 127.0.0.1:2380 \
+  --client-cluster "1=127.0.0.1:2379,2=127.0.0.1:2381,3=127.0.0.1:2383" &
+
+# Node 2
+./gookv-pd --addr 127.0.0.1:2381 --data-dir /tmp/gookv-pd2 \
+  --pd-id 2 \
+  --initial-cluster "1=127.0.0.1:2380,2=127.0.0.1:2382,3=127.0.0.1:2384" \
+  --peer-port 127.0.0.1:2382 \
+  --client-cluster "1=127.0.0.1:2379,2=127.0.0.1:2381,3=127.0.0.1:2383" &
+
+# Node 3
+./gookv-pd --addr 127.0.0.1:2383 --data-dir /tmp/gookv-pd3 \
+  --pd-id 3 \
+  --initial-cluster "1=127.0.0.1:2380,2=127.0.0.1:2382,3=127.0.0.1:2384" \
+  --peer-port 127.0.0.1:2384 \
+  --client-cluster "1=127.0.0.1:2379,2=127.0.0.1:2381,3=127.0.0.1:2383" &
+```
+
+Notes:
+- `--initial-cluster` must have an **odd** number of nodes (1, 3, 5) for proper Raft quorum.
+- Each node persists Raft state to `<data-dir>/pd-raft/`, so nodes can be restarted and rejoin the cluster.
+- If `--initial-cluster` is omitted, PD runs in single-node mode (backward compatible, no Raft overhead).
+- The PD cluster topology is fixed at startup. Adding or removing PD nodes at runtime is not supported.
+
+### Multi-Node PD Port Layout
+
+| Component | Client Address | Peer Address | Description |
+|-----------|---------------|--------------|-------------|
+| PD 1 | 127.0.0.1:2379 | 127.0.0.1:2380 | PD node (client + Raft peer) |
+| PD 2 | 127.0.0.1:2381 | 127.0.0.1:2382 | PD node (client + Raft peer) |
+| PD 3 | 127.0.0.1:2383 | 127.0.0.1:2384 | PD node (client + Raft peer) |
+
+### PD Server CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--addr` | `0.0.0.0:2379` | Client-facing gRPC listen address |
+| `--data-dir` | `/tmp/gookv-pd` | Data directory for metadata and Raft logs |
+| `--cluster-id` | `1` | Cluster ID |
+| `--log-level` | `info` | Log level: debug, info, warn, error |
+| `--log-file` | `<data-dir>/log/pd.log` | Log file path |
+| `--pd-id` | `0` | PD node ID (required with `--initial-cluster`) |
+| `--initial-cluster` | `""` | PD Raft cluster topology: `ID=HOST:PORT,...` (peer addresses) |
+| `--peer-port` | `0.0.0.0:2380` | Listen address for PD-to-PD Raft peer communication |
+| `--client-cluster` | `""` | PD client addresses: `ID=HOST:PORT,...` (for follower-to-leader forwarding) |
 
 ## Logging
 
@@ -138,6 +202,8 @@ make pd-cluster-stop
 sleep 1
 
 # 2. Start 5 nodes (each connected to PD via --pd-endpoints)
+#    When using a replicated PD cluster, list all PD client addresses:
+#    PD="127.0.0.1:2379,127.0.0.1:2381,127.0.0.1:2383"
 CLUSTER="1=127.0.0.1:20160,2=127.0.0.1:20161,3=127.0.0.1:20162,4=127.0.0.1:20163,5=127.0.0.1:20164"
 PD="127.0.0.1:2379"
 

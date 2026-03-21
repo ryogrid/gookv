@@ -20,7 +20,7 @@ gookv reproduces the core architecture of TiKV in Go:
 - **Raft consensus** — etcd/raft integration with region-based routing and inter-node transport
 - **Raft lifecycle** — log compaction, snapshot generation/transfer/application, configuration changes (AddNode/RemoveNode), store worker for dynamic peer creation
 - **Region management** — region split (PD-coordinated, size-based with midpoint key), region merge (prepare/commit/rollback)
-- **Placement Driver (PD)** — TSO allocation, cluster metadata, store/region heartbeats, split scheduling, replica repair and leader balance scheduling, GC safe point centralization, multi-endpoint failover with retry
+- **Placement Driver (PD)** — TSO allocation, cluster metadata, store/region heartbeats, split scheduling, replica repair and leader balance scheduling, GC safe point centralization, multi-endpoint failover with retry, Raft-replicated multi-node PD cluster for high availability
 - **Dynamic node addition** — join mode for adding new KVS nodes to a running cluster via PD, with automatic region rebalancing (balance scheduler, excess replica shedding, 3-step move protocol)
 - **Coprocessor** — push-down execution with RPN expressions, table scan, selection, aggregation
 - **gRPC server** — TiKV-compatible RPC interface via `pingcap/kvproto`
@@ -47,7 +47,7 @@ pkg/                      # Public packages (importable by external code)
 internal/                 # Private implementation packages
   config/                 # TOML config loading, validation, ReadableSize/Duration types
   log/                    # Structured logging, LogDispatcher, SlowLogHandler, file rotation
-  pd/                     # PD server (TSO allocator, metadata store, 16 gRPC RPCs, move_tracker.go for multi-step region moves)
+  pd/                     # PD server (TSO allocator, metadata store, 16 gRPC RPCs, Raft replication for HA, move tracker)
   engine/
     traits/               # KvEngine, Snapshot, WriteBatch, Iterator interfaces
     rocks/                # Pebble-backed engine with CF emulation via key prefixing
@@ -240,6 +240,7 @@ func main() {
 │              │                │  - Scheduling (replica/leader)       │
 │              │                │  - GC safe point                     │
 │              │                │  - Multi-endpoint failover           │
+│              │                │  - Raft replication (multi-node HA)  │
 ├──────────────┴────────────────┴──────────────────────────────────────┤
 │                    Engine (traits.KvEngine)                           │
 │               Pebble backend with CF emulation                       │
@@ -316,6 +317,7 @@ func main() {
 | IMPL-061 | Store identity persistence | Done |
 | IMPL-062 | Snapshot send semaphore | Done |
 | IMPL-063 | gookv-ctl store commands + GetAllStores | Done |
+| IMPL-064 | PD Raft replication (multi-node HA, command-based state machine, follower forwarding, buffered allocation, log compaction) | Done |
 
 ## Known Limitations
 
@@ -339,6 +341,7 @@ The following features are intentionally deferred or not yet fully connected. Se
 |---------|--------|-------|
 | Periodic PD leader refresh | Not implemented | `Config.UpdateInterval` is defined but not consumed. The client relies on connection-time endpoint discovery and error-driven reconnection. |
 | Store heartbeat capacity/available/used_size fields | Not populated | Capacity/Available/UsedSize not yet populated in store heartbeat. |
+| PD Raft dynamic membership | Not implemented | PD cluster topology is fixed at startup via `--initial-cluster`. Adding or removing PD nodes at runtime is not supported. |
 
 ### Raftstore
 

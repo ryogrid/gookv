@@ -68,6 +68,26 @@ A fifth implementation round (branch `feat/add-node`) added **dynamic node addit
 | 9 | `GetAllStores` pdclient method (`pkg/pdclient/client.go`) | Done |
 | 10 | E2E tests for node addition (`e2e/add_node_test.go`) | Done |
 
+A sixth implementation round (branch `feat/pd-replication-design` + `master`, commits `5a7ece43e` through `fc690c0bb`) added **PD server Raft replication** — multi-node PD clusters with Raft consensus for high availability:
+
+| # | Feature | Status |
+|---|---------|--------|
+| 1 | PDCommand encoding (12 command types, 1-byte type + JSON wire format) (`internal/pd/command.go`) | Done |
+| 2 | PDRaftStorage (`raft.Storage` impl, Pebble CF_RAFT, entry cache) (`internal/pd/raft_storage.go`) | Done |
+| 3 | PDRaftPeer (event loop, propose-and-wait, leader change, log GC) (`internal/pd/raft_peer.go`) | Done |
+| 4 | Apply (12-command state machine dispatcher) (`internal/pd/apply.go`) | Done |
+| 5 | Snapshot (full-state GenerateSnapshot/ApplySnapshot) (`internal/pd/snapshot.go`) | Done |
+| 6 | PDTransport (lazy gRPC connection pool, raftpb/eraftpb conversion) (`internal/pd/transport.go`) | Done |
+| 7 | PDPeerService (hand-coded gRPC for SendPDRaftMessage) (`internal/pd/peer_service.go`) | Done |
+| 8 | Follower forwarding (7 unary + 2 streaming RPC proxy) (`internal/pd/forward.go`) | Done |
+| 9 | TSOBuffer (batch 1000, Raft-amortized TSO allocation) (`internal/pd/tso_buffer.go`) | Done |
+| 10 | IDBuffer (batch 100, Raft-amortized ID allocation) (`internal/pd/id_buffer.go`) | Done |
+| 11 | PDServer Raft integration (initRaft, startRaft, replayRaftLog, 3-way routing) (`internal/pd/server.go`) | Done |
+| 12 | gookv-pd CLI flags (--pd-id, --initial-cluster, --peer-port, --client-cluster) (`cmd/gookv-pd/main.go`) | Done |
+| 13 | PD client leader discovery (discoverLeader, enhanced reconnect) (`pkg/pdclient/client.go`) | Done |
+| 14 | Async commit prewrite routing fix (propose all to primary region) (`internal/server/server.go`) | Done |
+| 15 | E2E test suite (16 PD replication tests) (`e2e/pd_replication_test.go`) | Done |
+
 ## 2. Remaining Items
 
 | # | Category | Feature | Status | Notes |
@@ -77,9 +97,16 @@ A fifth implementation round (branch `feat/add-node`) added **dynamic node addit
 | 3 | Raftstore | Streaming snapshot generation | Not implemented | Current implementation holds all region data in memory; may OOM for large regions. |
 | 4 | Raftstore | Region epoch validation in handleScheduleMessage | Not implemented | Currently relies on Raft's built-in rejection. |
 | 5 | PD | Store heartbeat capacity fields | Not implemented | Capacity/Available/UsedSize not yet populated. |
+| 6 | PD | PD Raft dynamic membership change | Not implemented | PD cluster topology is fixed at startup via `--initial-cluster`. Adding or removing PD nodes at runtime requires a full cluster restart with updated topology. |
 
 ### 2.1 BatchCoprocessor
 
 `BatchCoprocessor` is a server-streaming RPC that dispatches a coprocessor request across multiple regions in a single call. Only `Coprocessor` (unary) and `CoprocessorStream` (server-streaming, single region) are currently implemented. `BatchCoprocessor` falls through to `UnimplementedTikvServer`.
 
 This is a low-priority item since the single-region `Coprocessor` and `CoprocessorStream` RPCs cover the core functionality. `BatchCoprocessor` would primarily be a performance optimization for multi-region queries.
+
+### 2.2 PD Raft Dynamic Membership Change
+
+The current PD Raft implementation uses a fixed cluster topology specified via `--initial-cluster` at startup. All PD nodes must be configured with the same initial cluster map. There is no mechanism for runtime PD node addition or removal (unlike KVS nodes, which support join mode via PD).
+
+To change the PD cluster topology, all PD nodes must be stopped and restarted with updated `--initial-cluster` flags. This is acceptable for the typical 3-or-5-node PD deployment but prevents online PD scaling.

@@ -331,7 +331,7 @@ KvPrewrite(ctx, PrewriteRequest) -> PrewriteResponse
 4. Call `coord.ProposeModifies(regionID, modifies, 10s timeout)` to propose directly to the single target region. This works because the client library groups mutations by region before sending each `PrewriteRequest`.
 5. On proposal error, call `proposeErrorToRegionError(err, regionID)` to convert to a structured `regionError` (NotLeader, RegionNotFound, or timeout). Return the response.
 
-**Note:** The async commit path still uses `proposeModifiesToRegionsWithRegionError` because async commit secondaries may span multiple regions. The 1PC path uses `resolveRegionID(primary)` with direct `ProposeModifies`.
+**Note:** The async commit path also uses `req.GetContext().GetRegionId()` with direct `ProposeModifies`, matching the standard 2PC pattern. All mutations in a single async commit `PrewriteRequest` are proposed to the primary key's region. The 1PC path similarly uses `resolveRegionID(primary)` with direct `ProposeModifies`.
 
 **Standalone mode** (when `coordinator == nil`):
 1. Call `storage.Prewrite(mutations, primary, startTS, lockTTL)` -- this performs MVCC checks, computes modifications, and applies them directly to the engine in a single `WriteBatch.Commit`.
@@ -385,7 +385,8 @@ For `PrewriteModifies`, `CommitModifies`:
 Steps 1-4 are identical to the standalone path, but step 5 is skipped. Instead:
 - The method returns `[]mvcc.Modify` to the caller (the gRPC handler).
 - **For `KvPrewrite` (standard 2PC) and `KvCommit`:** The handler extracts the region ID from the request context (`req.GetContext().GetRegionId()`) and calls `coord.ProposeModifies(regionID, modifies, timeout)` directly to the single target region. This works because the client library groups mutations by region before sending each request.
-- **For `KvPrewrite` (async commit), `KvBatchRollback`, `KvPessimisticLock`, and `KvResolveLock`:** The handler calls `proposeModifiesToRegionsWithRegionError(coord, modifies, timeout)` which groups modifications by region via `groupModifiesByRegion()` and proposes to each region's leader separately.
+- **For `KvPrewrite` (async commit):** The handler uses the same `req.GetContext().GetRegionId()` extraction as standard 2PC, calling `coord.ProposeModifies(regionID, modifies, timeout)` directly. All async commit mutations in a single request are proposed to the primary key's region.
+- **For `KvBatchRollback`, `KvPessimisticLock`, and `KvResolveLock`:** The handler calls `proposeModifiesToRegionsWithRegionError(coord, modifies, timeout)` which groups modifications by region via `groupModifiesByRegion()` and proposes to each region's leader separately.
 - `ProposeModifies` converts modifies to `[]*raft_cmdpb.Request` via `ModifiesToRequests`, wraps them in a `RaftCmdRequest`, and sends a `PeerMsgTypeRaftCommand` to the peer's mailbox via the router.
 - The peer proposes the entry to Raft. After consensus, the `applyFunc` callback fires.
 - `applyEntries` unmarshals each committed entry back to `RaftCmdRequest`, converts the requests to modifies via `RequestsToModifies`, and calls `storage.ApplyModifies`.
@@ -488,21 +489,21 @@ Used by `proposeModifiesToRegionsWithRegionError`, the direct proposal paths in 
 flowchart LR
     subgraph "Direct Proposal (context RegionId)"
         KvPrewrite2PC["KvPrewrite\n(standard 2PC)"]
+        KvPrewriteAC["KvPrewrite\n(async commit)"]
         KvCommit["KvCommit"]
         KvPrewrite1PC["KvPrewrite\n(1PC)"]
     end
     subgraph "Multi-Region Grouping (groupModifiesByRegion)"
-        KvPrewriteAC["KvPrewrite\n(async commit)"]
         KvBatchRollback["KvBatchRollback"]
         KvPessimisticLock["KvPessimisticLock"]
         KvResolveLock["KvResolveLock"]
     end
 
     KvPrewrite2PC --> ProposeModifies
+    KvPrewriteAC --> ProposeModifies
     KvCommit --> ProposeModifies
     KvPrewrite1PC --> ProposeModifies
 
-    KvPrewriteAC --> proposeModifiesToRegions
     KvBatchRollback --> proposeModifiesToRegions
     KvPessimisticLock --> proposeModifiesToRegions
     KvResolveLock --> proposeModifiesToRegions

@@ -56,7 +56,7 @@
 | `internal/raftstore/conf_change.go` | Raft configuration changes: `applyConfChangeEntry`, `processConfChange`, `ProposeConfChange`. |
 | `internal/raftstore/merge.go` | Region merge: `ExecPrepareMerge` / `ExecCommitMerge` / `ExecRollbackMerge`. |
 | `internal/raftstore/store_worker.go` | Region data cleanup: `CleanupRegionData` removes all Raft state for destroyed regions. |
-| `internal/pd` | Embedded PD server: TSO allocation, metadata store, ID allocation, GC safe point management. Implements `pdpb.PD` gRPC service. Includes `move_tracker.go` for multi-step region move tracking (AddLearner → PromoteLearner → RemovePeer). |
+| `internal/pd` | Embedded PD server with optional Raft-based replication for multi-node HA. Core components: TSO allocation, metadata store, ID allocation, GC safe point management, scheduling, move tracking. Raft replication adds: `raft_peer.go` (PDRaftPeer event loop), `raft_storage.go` (Pebble-backed raft.Storage), `command.go` (12 replicated command types), `apply.go` (state machine dispatcher), `forward.go` (follower-to-leader RPC forwarding), `tso_buffer.go`/`id_buffer.go` (batched allocation), `snapshot.go` (full-state snapshots), `transport.go`/`peer_service.go` (inter-PD Raft transport). Implements `pdpb.PD` gRPC service. See [`09_pd_replication.md`](09_pd_replication.md) for details. |
 | `internal/server/pd_worker.go` | PDWorker: store heartbeat loop, region heartbeat forwarding, batch split reporting. |
 | `internal/server/raw_storage.go` | Non-transactional Raw KV storage layer bypassing MVCC. Supports TTL encoding, CAS, batch scan, checksum computation. |
 | `internal/server` | gRPC server (`tikvpb.Tikv` service): `Server` (gRPC lifecycle with optional PD client for TSO), `tikvService` (implements KvGet, KvScan, KvPrewrite, KvCommit, KvBatchGet, KvBatchRollback, KvCleanup, KvCheckTxnStatus, KvCheckSecondaryLocks, KvScanLock, KvPessimisticLock, KvResolveLock, KvTxnHeartBeat, RawBatchScan, RawGetKeyTTL, RawCompareAndSwap, RawChecksum, BatchCommands, Raft, BatchRaft), `Storage` (transaction-aware bridge between engine/MVCC/txn layers with latch-based serialization, async commit, and 1PC support), `StoreCoordinator` (Raft peer lifecycle management, proposal routing, entry application, PD-coordinated split detection and execution), `StaticStoreResolver` (storeID-to-address mapping), `PDStoreResolver` (`pd_resolver.go` — PD-based store resolver for dynamic node discovery), `StoreIdent` (`store_ident.go` — store identity persistence for join mode), `ModifiesToRequests`/`RequestsToModifies` (MVCC modify <-> raft_cmdpb conversion). Region-aware request validation via `validateRegionContext()`. |
@@ -73,7 +73,7 @@
 |---|---|
 | `cmd/gookv-server` | Main server entry point. Parses CLI flags, loads TOML config, opens Pebble engine, creates Storage and gRPC Server, optionally bootstraps Raft cluster mode, starts HTTP status server, handles graceful shutdown on SIGINT/SIGTERM. |
 | `cmd/gookv-ctl` | Admin CLI. Subcommands: `scan` (range scan by CF), `get` (point read), `mvcc` (MVCC info as JSON), `dump` (raw hex dump with `--decode` and `--sst` for direct SST file parsing), `size` (per-CF key count and size), `compact` (LSM compaction with `CompactAll`/`CompactCF` and `--flush-only` flag), `region` (metadata inspection with `--id`, `--all`, `--limit`). Opens Pebble engine directly. |
-| `cmd/gookv-pd` | PD server entry point. Parses `--addr`, `--data-dir`, `--cluster-id` flags. |
+| `cmd/gookv-pd` | PD server entry point. Parses `--addr`, `--data-dir`, `--cluster-id` flags for single-node mode, plus `--pd-id`, `--initial-cluster`, `--peer-port`, `--client-cluster` for Raft-replicated cluster mode. |
 
 ---
 
@@ -122,7 +122,11 @@ graph TB
     end
 
     subgraph "PD Layer"
-        PD_SERVER["PDServer<br/>(TSO, Metadata,<br/>GC SafePoint)"]
+        PD_SERVER["PDServer<br/>(TSO, Metadata,<br/>GC SafePoint,<br/>Scheduling)"]
+        PD_RAFT["PDRaftPeer<br/>(Raft consensus,<br/>PDRaftStorage)"]
+        PD_TRANSPORT["PDTransport<br/>(inter-PD gRPC)"]
+        PD_BUFFERS["TSOBuffer / IDBuffer<br/>(batched allocation)"]
+        PD_FORWARD["Follower Forwarding<br/>(7 unary + 2 streaming)"]
     end
 
     subgraph "Engine Layer"
@@ -189,6 +193,12 @@ graph TB
 
     COORD --> PD_WORKER
     PD_WORKER --> PD_SERVER
+
+    PD_SERVER --> PD_RAFT
+    PD_SERVER --> PD_BUFFERS
+    PD_BUFFERS --> PD_RAFT
+    PD_RAFT --> PD_TRANSPORT
+    PD_FORWARD --> PD_SERVER
 ```
 
 ---
@@ -342,7 +352,7 @@ graph LR
     subgraph "cmd"
         SERVER["gookv-server"]
         CTL["gookv-ctl"]
-        PD_CMD["gookv-pd"]
+        PD_BIN["gookv-pd"]
     end
 
     subgraph "internal/server"
@@ -396,7 +406,14 @@ graph LR
     end
 
     subgraph "internal/pd"
-        PD_SRV["pd.Server"]
+        PD_SRV["pd.PDServer"]
+        PD_RAFT_PEER["pd.PDRaftPeer"]
+        PD_RAFT_STORAGE["pd.PDRaftStorage"]
+        PD_TRANSPORT_PD["pd.PDTransport"]
+        PD_CMD["pd.PDCommand"]
+        PD_SNAP["pd.PDSnapshot"]
+        PD_FWD["pd.forward"]
+        PD_BUF["pd.TSOBuffer<br/>pd.IDBuffer"]
     end
 
     subgraph "internal/storage/gc"
@@ -534,11 +551,23 @@ graph LR
     SRV --> GC_WORKER
 
     %% pd deps
-    PD_CMD --> PD_SRV
+    PD_BIN --> PD_SRV
     PD_SRV --> TXNTYPES
     PD_WORKER --> PDCLIENT
     PD_WORKER --> COORD
     COORD --> PD_WORKER
+
+    %% pd internal deps
+    PD_SRV --> PD_RAFT_PEER
+    PD_SRV --> PD_BUF
+    PD_SRV --> PD_FWD
+    PD_RAFT_PEER --> PD_RAFT_STORAGE
+    PD_RAFT_PEER --> PD_CMD
+    PD_RAFT_PEER --> PD_SNAP
+    PD_RAFT_PEER --> PD_TRANSPORT_PD
+    PD_RAFT_STORAGE --> TRAITS
+    PD_RAFT_STORAGE --> KEYS
+    PD_BUF --> PD_RAFT_PEER
 
     %% scheduler deps
     TXN_SCHED --> LATCH

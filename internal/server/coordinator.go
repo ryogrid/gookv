@@ -678,10 +678,13 @@ func (sc *StoreCoordinator) sendRaftMessage(regionID uint64, region *metapb.Regi
 		return
 	}
 
-	if err := sc.client.Send(toStoreID, raftMessage); err != nil {
-		slog.Warn("raft send failed", "to_store", toStoreID, "err", err)
-		sc.reportUnreachable(regionID, msg.To)
-	}
+	// Send asynchronously so the peer loop is not blocked by slow/dead stores.
+	go func() {
+		if err := sc.client.Send(toStoreID, raftMessage); err != nil {
+			slog.Debug("raft send failed", "to_store", toStoreID, "err", err)
+			sc.reportUnreachable(regionID, msg.To)
+		}
+	}()
 }
 
 // reportSnapshotStatus sends a snapshot status report back to the source peer.

@@ -166,7 +166,6 @@ func main() {
 		if cfg.RaftStore.PdHeartbeatTickInterval.Duration > 0 {
 			peerCfg.PdHeartbeatTickInterval = cfg.RaftStore.PdHeartbeatTickInterval.Duration
 		}
-
 		// Connect to PD if endpoints are configured.
 		var pdTaskCh chan<- interface{}
 		var pdClient pdclient.Client

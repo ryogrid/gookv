@@ -309,7 +309,7 @@ make scale-demo-stop
 
 1. **Initial Cluster State**: Verifies the cluster starts with a single region `["", "")` spanning all keys, hosted on 3 bootstrap nodes. Prints store and region topology.
 
-2. **Add Nodes + Region Split**: Starts 3 new KVS nodes in **join mode** (`--pd-endpoints` only, no `--initial-cluster`). Each node automatically receives a store ID from PD and registers itself. After confirming 6 stores are registered, the demo writes data via `RawKVClient` to exceed the 1KB split threshold. It then polls PD until a region split is detected, and prints the resulting layout showing two regions with different key ranges and (typically) different leaders.
+2. **Add Nodes + Region Split + Leader Failover**: Starts 3 new KVS nodes in **join mode** (`--pd-endpoints` only, no `--initial-cluster`). Each node automatically receives a store ID from PD and registers itself. After confirming 6 stores are registered, the demo writes data via `RawKVClient` to exceed the 1KB split threshold, polls PD until a region split is detected, then writes a test value into each region. Finally, it kills the leader store of one region and verifies that the data remains readable through the surviving peers via Raft leader re-election — demonstrating fault tolerance after horizontal scaling.
 
 Join mode works because `gookv-server` detects that `--pd-endpoints` is provided without `--initial-cluster`, connects to PD, allocates a store ID via `AllocID()`, and starts with an empty region set — PD then schedules region replicas onto the new node via heartbeat responses.
 

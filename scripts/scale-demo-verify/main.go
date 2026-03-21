@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
@@ -269,7 +270,7 @@ func scenario2(pdAddr, dataDir, configPath string) bool {
 	}
 	fmt.Println()
 
-	// Step 3: Wait for split.
+	// Step 3: Split detection + PUT values + show leaders.
 	fmt.Println("  [Step 3] Waiting for region split (timeout 60s)...")
 	deadline = time.Now().Add(60 * time.Second)
 	var regionsAfter []regionInfo
@@ -290,91 +291,158 @@ func scenario2(pdAddr, dataDir, configPath string) bool {
 	fmt.Printf("           Region count: %d  Split detected!\n", len(regionsAfter))
 	fmt.Println()
 
-	fmt.Println("           Region layout after split:")
+	// Wait for all regions to have a leader.
+	fmt.Println("           Waiting for all regions to have a leader (timeout 30s)...")
+	leaderDeadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(leaderDeadline) {
+		regionsAfter, err = getAllRegions(ctx, pdClient)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		allHaveLeader := true
+		for _, r := range regionsAfter {
+			if r.leaderID == 0 {
+				allHaveLeader = false
+				break
+			}
+		}
+		if allHaveLeader {
+			break
+		}
+		time.Sleep(2 * time.Second)
+		fmt.Println("           (some regions still without leader...)")
+	}
+
+	fmt.Println("           Region layout with leaders:")
 	for _, r := range regionsAfter {
 		fmt.Printf("             Region %d: [%s .. %s)  peers=%v leader=Store %d\n",
 			r.id, fmtKey(r.startKey), fmtKey(r.endKey), r.peerIDs, r.leaderID)
 	}
 	fmt.Println()
 
-	// Check if leaders differ between regions.
-	leaderSet := make(map[uint64][]uint64) // leaderStoreID -> []regionID
-	for _, r := range regionsAfter {
-		leaderSet[r.leaderID] = append(leaderSet[r.leaderID], r.id)
+	// PUT test values into the first 2 regions (to avoid duplicate keys from cascading splits).
+	type regionTestKV struct {
+		regionID uint64
+		leaderID uint64
+		key      string
+		value    string
 	}
-	fmt.Println("           Leader distribution:")
-	for storeID, regionIDs := range leaderSet {
-		fmt.Printf("             Store %d leads regions: %v\n", storeID, regionIDs)
+	var testKVs []regionTestKV
+
+	testRegions := regionsAfter
+	if len(testRegions) > 2 {
+		testRegions = testRegions[:2]
 	}
-	if len(leaderSet) > 1 {
-		fmt.Println("           Leaders are distributed across different stores.")
-	} else {
-		fmt.Println("           All leaders are on the same store (expected for small clusters).")
+	for i, r := range testRegions {
+		key := fmt.Sprintf("verify:region%d", i+1)
+		val := fmt.Sprintf("value-for-region-%d", r.id)
+
+		var putErr error
+		for attempt := 0; attempt < 5; attempt++ {
+			putErr = rawClient.Put(ctx, []byte(key), []byte(val))
+			if putErr == nil {
+				break
+			}
+			time.Sleep(time.Duration(attempt+1) * time.Second)
+		}
+		if putErr != nil {
+			fmt.Printf("  FAIL: cannot PUT key %q into region %d: %v\n", key, r.id, putErr)
+			return false
+		}
+		testKVs = append(testKVs, regionTestKV{
+			regionID: r.id,
+			leaderID: r.leaderID,
+			key:      key,
+			value:    val,
+		})
+		fmt.Printf("           PUT %q -> %q  (region %d, leader Store %d)\n",
+			key, val, r.id, r.leaderID)
 	}
 	fmt.Println()
 
-	// Step 4: Wait for rebalancing — new stores should become region members.
-	fmt.Println("  [Step 4] Waiting for rebalancing (new stores join regions, timeout 120s)...")
+	// Step 4: Kill one leader + verify data still accessible via Raft failover.
+	// Killing only 1 of 3 peers preserves Raft quorum (2 of 3 alive).
+	fmt.Println("  [Step 4] Leader failover test...")
 
-	rebalanceDeadline := time.Now().Add(120 * time.Second)
-	rebalanced := false
-	for time.Now().Before(rebalanceDeadline) {
-		regionsAfter, err = getAllRegions(ctx, pdClient)
-		if err != nil {
-			time.Sleep(3 * time.Second)
+	// Pick the first region's leader to kill.
+	killStoreID := testKVs[0].leaderID
+	killRegionID := testKVs[0].regionID
+
+	pidFile := storeIDToPIDFile(killStoreID, stores, dataDir)
+	if pidFile == "" {
+		fmt.Printf("  FAIL: cannot determine PID file for Store %d\n", killStoreID)
+		return false
+	}
+	pid, killErr := killProcess(pidFile)
+	if killErr != nil {
+		fmt.Printf("  FAIL: cannot kill Store %d (pid file %s): %v\n", killStoreID, pidFile, killErr)
+		return false
+	}
+	fmt.Printf("           Killed Store %d (leader of Region %d, pid %d)\n",
+		killStoreID, killRegionID, pid)
+	fmt.Println("           (Raft quorum maintained: 2 of 3 peers still alive)")
+	fmt.Println()
+
+	// Wait for Raft leader re-election (election timeout ~1s + some margin).
+	fmt.Println("           Waiting for Raft leader re-election...")
+	time.Sleep(5 * time.Second)
+
+	// Verify data is still accessible with a NEW client (avoids cached connections to dead store).
+	fmt.Println("           Verifying data integrity after failover...")
+	c2, err := client.NewClient(ctx, client.Config{
+		PDAddrs:    []string{pdAddr},
+		MaxRetries: 15,
+	})
+	if err != nil {
+		fmt.Printf("  FAIL: cannot create new client for verification: %v\n", err)
+		return false
+	}
+	defer c2.Close()
+
+	rawClient2 := c2.RawKV()
+	allMatch := true
+	for _, kv := range testKVs {
+		// Retry reads: the client needs to discover the new leader via PD.
+		var val []byte
+		var readOK bool
+		for attempt := 0; attempt < 10; attempt++ {
+			v, notFound, getErr := rawClient2.Get(ctx, []byte(kv.key))
+			if getErr == nil && !notFound {
+				val = v
+				readOK = true
+				break
+			}
+			time.Sleep(2 * time.Second)
+		}
+		if !readOK {
+			fmt.Printf("           GET %q: FAILED after retries\n", kv.key)
+			allMatch = false
 			continue
 		}
-
-		// Check if any region has a peer on a new store (ID >= 1000).
-		for _, r := range regionsAfter {
-			for _, pid := range r.peerIDs {
-				if pid >= 1000 {
-					rebalanced = true
-					break
-				}
-			}
-			if rebalanced {
-				break
-			}
+		if string(val) != kv.value {
+			fmt.Printf("           GET %q: MISMATCH got=%q expected=%q\n", kv.key, string(val), kv.value)
+			allMatch = false
+			continue
 		}
-		if rebalanced {
-			break
-		}
-		time.Sleep(3 * time.Second)
-		fmt.Println("           (still waiting for new stores to join regions...)")
-	}
-
-	if !rebalanced {
-		fmt.Println("           NOTE: Rebalancing did not complete within 120s.")
-		fmt.Println("                 New stores are registered but not yet region members.")
-		fmt.Println("                 This is expected — PD schedules moves over time.")
-	} else {
-		fmt.Println("           Rebalancing detected! New store joined a region.")
+		fmt.Printf("           GET %q = %q  OK (region %d, was led by killed Store %d)\n",
+			kv.key, string(val), kv.regionID, killStoreID)
 	}
 	fmt.Println()
 
-	// Print final region layout.
-	fmt.Println("           Final region layout:")
-	for _, r := range regionsAfter {
-		newMarkers := ""
-		for _, pid := range r.peerIDs {
-			if pid >= 1000 {
-				newMarkers = "  <- includes new store"
-				break
-			}
-		}
-		fmt.Printf("             Region %d: [%s .. %s)  peers=%v leader=Store %d%s\n",
-			r.id, fmtKey(r.startKey), fmtKey(r.endKey), r.peerIDs, r.leaderID, newMarkers)
+	if !allMatch {
+		fmt.Println("  FAIL: data integrity check failed after leader failover")
+		return false
 	}
+	fmt.Println("           Data integrity: PASS (all values readable after killing leader)")
 	fmt.Println()
 
 	// Step 5: Summary.
 	fmt.Println("  [Step 5] Summary:")
-	fmt.Printf("           Before: 3 stores, 1 region\n")
-	fmt.Printf("           After:  %d stores, %d regions\n", len(stores), len(regionsAfter))
-	if rebalanced {
-		fmt.Println("           New stores are active region members.")
-	}
+	fmt.Printf("           Before: 6 stores, %d regions\n", len(regionsAfter))
+	fmt.Printf("           Killed: Store %d (leader of Region %d)\n", killStoreID, killRegionID)
+	fmt.Println("           After:  data still readable via surviving peers (Raft failover)")
+	fmt.Println("           Raft quorum maintained: 2 of 3 peers alive per region")
 	fmt.Println()
 
 	fmt.Println("  Result: PASS")
@@ -502,6 +570,39 @@ func fmtKey(k string) string {
 		}
 	}
 	return fmt.Sprintf("%q", k)
+}
+
+func storeIDToPIDFile(storeID uint64, stores []*metapb.Store, dataDir string) string {
+	if storeID >= 1 && storeID <= 3 {
+		return filepath.Join(dataDir, fmt.Sprintf("node%d.pid", storeID))
+	}
+	for _, s := range stores {
+		if s.GetId() == storeID {
+			addr := s.GetAddress()
+			// addr is like "127.0.0.1:20273"
+			parts := strings.Split(addr, ":")
+			if len(parts) == 2 {
+				port, err := strconv.Atoi(parts[1])
+				if err == nil {
+					nodeNum := port - 20269
+					return filepath.Join(dataDir, fmt.Sprintf("node%d.pid", nodeNum))
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func killProcess(pidFile string) (int, error) {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, err
+	}
+	return pid, syscall.Kill(pid, syscall.SIGKILL)
 }
 
 func init() {

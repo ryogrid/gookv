@@ -21,6 +21,7 @@ gookv reproduces the core architecture of TiKV in Go:
 - **Raft lifecycle** — log compaction, snapshot generation/transfer/application, configuration changes (AddNode/RemoveNode), store worker for dynamic peer creation
 - **Region management** — region split (PD-coordinated, size-based with midpoint key), region merge (prepare/commit/rollback)
 - **Placement Driver (PD)** — TSO allocation, cluster metadata, store/region heartbeats, split scheduling, replica repair and leader balance scheduling, GC safe point centralization, multi-endpoint failover with retry
+- **Dynamic node addition** — join mode for adding new KVS nodes to a running cluster via PD, with automatic region rebalancing (balance scheduler, excess replica shedding, 3-step move protocol)
 - **Coprocessor** — push-down execution with RPN expressions, table scan, selection, aggregation
 - **gRPC server** — TiKV-compatible RPC interface via `pingcap/kvproto`
 - **HTTP status server** — pprof, Prometheus metrics, health checks
@@ -34,7 +35,7 @@ gookv reproduces the core architecture of TiKV in Go:
 ```
 cmd/
   gookv-server/          # Server binary entry point
-  gookv-ctl/             # Admin CLI (scan, get, mvcc, dump, size, compact, region, SST parsing)
+  gookv-ctl/             # Admin CLI (scan, get, mvcc, dump, size, compact, region, SST parsing, store list/status)
   gookv-pd/              # Placement Driver server binary
 pkg/                      # Public packages (importable by external code)
   codec/                  # Memcomparable byte/number encoding
@@ -46,7 +47,7 @@ pkg/                      # Public packages (importable by external code)
 internal/                 # Private implementation packages
   config/                 # TOML config loading, validation, ReadableSize/Duration types
   log/                    # Structured logging, LogDispatcher, SlowLogHandler, file rotation
-  pd/                     # PD server (TSO allocator, metadata store, 16 gRPC RPCs)
+  pd/                     # PD server (TSO allocator, metadata store, 16 gRPC RPCs, move_tracker.go for multi-step region moves)
   engine/
     traits/               # KvEngine, Snapshot, WriteBatch, Iterator interfaces
     rocks/                # Pebble-backed engine with CF emulation via key prefixing
@@ -68,7 +69,9 @@ internal/                 # Private implementation packages
     merge.go              # Region merge (PrepareMerge, CommitMerge, RollbackMerge)
     store_worker.go       # Store worker utilities (CleanupRegionData)
   server/                 # gRPC server, TikvService implementation, Storage bridge
-    coordinator.go        # StoreCoordinator (peer lifecycle, region bootstrap, PD-coordinated split)
+    coordinator.go        # StoreCoordinator (peer lifecycle, region bootstrap, PD-coordinated split, snapshot send semaphore)
+    pd_resolver.go        # PD-based store resolver for dynamic node discovery
+    store_ident.go        # Store identity persistence for join mode
     storage.go            # Transaction-aware storage bridge (2PC, async commit, 1PC, pessimistic, scan lock)
     raw_storage.go        # Raw KV storage (non-transactional API with TTL, CAS, checksum)
     pd_worker.go          # PD heartbeat worker (store/region heartbeats, split reporting)
@@ -305,6 +308,14 @@ func main() {
 | IMPL-053 | KvDeleteRange (ModifyTypeDeleteRange, gRPC handler, Raft serialization) | Done |
 | IMPL-054 | PD scheduling (Scheduler, replica repair, leader balance, PDWorker delivery) | Done |
 | IMPL-055 | pkg/client (cross-region TxnClient, LockResolver, 2PC committer) | Done |
+| IMPL-056 | Dynamic node addition (join mode) | Done |
+| IMPL-057 | Store state machine (Up/Disconnected/Down/Tombstone) | Done |
+| IMPL-058 | Region balance scheduler | Done |
+| IMPL-059 | Excess replica shedding scheduler | Done |
+| IMPL-060 | MoveTracker (3-step region move) | Done |
+| IMPL-061 | Store identity persistence | Done |
+| IMPL-062 | Snapshot send semaphore | Done |
+| IMPL-063 | gookv-ctl store commands + GetAllStores | Done |
 
 ## Known Limitations
 
@@ -327,12 +338,15 @@ The following features are intentionally deferred or not yet fully connected. Se
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Periodic PD leader refresh | Not implemented | `Config.UpdateInterval` is defined but not consumed. The client relies on connection-time endpoint discovery and error-driven reconnection. |
+| Store heartbeat capacity/available/used_size fields | Not populated | Capacity/Available/UsedSize not yet populated in store heartbeat. |
 
 ### Raftstore
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Casual / Start messages | Not implemented | `PeerMsgTypeCasual` and `PeerMsgTypeStart` are defined but ignored in `handleMessage`. |
+| Streaming snapshot generation | Not implemented | Current implementation holds all region data in memory; may OOM for large regions. |
+| Region epoch validation in schedule messages | Not implemented | Currently relies on Raft's built-in rejection. |
 
 ## Acknowledgments
 

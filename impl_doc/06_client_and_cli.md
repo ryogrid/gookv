@@ -24,8 +24,8 @@ In addition, the public package `pkg/pdclient` provides a reusable Go client lib
 | `--status-addr` | string | (from config) | HTTP status listen address; overrides config value |
 | `--data-dir` | string | (from config) | Storage data directory; overrides config value |
 | `--pd-endpoints` | string | (from config) | Comma-separated PD endpoint addresses; overrides config value |
-| `--store-id` | uint64 | `0` | Store ID for this node. A non-zero value enables cluster (multi-node Raft) mode |
-| `--initial-cluster` | string | `""` | Initial cluster topology in `storeID=addr,storeID=addr,...` format |
+| `--store-id` | uint64 | `0` | Store ID for this node. Required for bootstrap mode; optional in join mode (allocated from PD via `AllocID` if omitted) |
+| `--initial-cluster` | string | `""` | Initial cluster topology in `storeID=addr,storeID=addr,...` format. Required for bootstrap mode, not needed for join mode |
 
 ### 2.2 Startup Sequence
 
@@ -45,9 +45,11 @@ The `main()` function proceeds through these steps in order:
 
 7. **gRPC Server creation** -- `server.NewServer(srvCfg, storage)` creates the gRPC server and registers the TiKV-compatible service (tikvService).
 
-8. **Cluster mode branch** -- If `--store-id > 0` AND `--initial-cluster` is non-empty, cluster (multi-node Raft) mode activates:
+8. **Cluster mode branch** -- Two cluster startup modes exist: bootstrap mode and join mode.
+
+   **Bootstrap mode** (`--store-id > 0` AND `--initial-cluster` is non-empty):
    - `parseInitialCluster()` parses the `"storeID=addr,storeID=addr,..."` string into a `map[uint64]string`.
-   - `server.NewStaticStoreResolver(clusterMap)` creates a resolver that maps store IDs to network addresses.
+   - `server.NewStaticStoreResolver(clusterMap)` creates a resolver that maps store IDs to network addresses. `StaticStoreResolver` is used in bootstrap mode even when PD is available.
    - `transport.NewRaftClient(resolver, config)` creates a Raft transport client for inter-node communication.
    - `raftrouter.New(256)` creates the Raft message router with 256 shards.
    - A `PeerConfig` is built from `cfg.RaftStore`, including `SplitCheckTickInterval` (propagated from the TOML `split-check-tick-interval` field, default 10s).
@@ -56,6 +58,19 @@ The `main()` function proceeds through these steps in order:
    - **Region bootstrap**: A single region (ID=1) is created spanning all stores. Each store ID doubles as a peer ID (`Peer{Id: storeID, StoreId: storeID}`). `coord.BootstrapRegion()` initializes the Raft group.
    - If PD client is configured, `go coord.RunSplitResultHandler(ctx)` is started to handle PD-coordinated splits.
    - `go coord.RunStoreWorker(storeWorkerCtx)` is started to handle dynamic peer creation/destruction via the store-level message channel.
+
+   **Join mode** (`--pd-endpoints` is set AND `--initial-cluster` is empty):
+   - Connects to PD via `pdclient.NewClient(pdEndpoints)`.
+   - **Store ID resolution**: Attempts to load the store ID from the `store_ident` file in the data directory via `LoadStoreIdent()`. If the file does not exist: uses the `--store-id` flag if provided, otherwise allocates a new ID from PD via `AllocID()`. The resolved store ID is persisted via `SaveStoreIdent()`.
+   - Registers the store with PD via `PutStore()`.
+   - `server.NewPDStoreResolver(pdClient, 30*time.Second)` creates a TTL-cached resolver for dynamic store discovery.
+   - `transport.NewRaftClient(resolver, config)` creates a Raft transport client.
+   - `raftrouter.New(256)` creates the Raft message router.
+   - `server.NewStoreCoordinator(...)` creates the coordinator with an empty peer set (no regions are pre-created).
+   - The coordinator is attached to the server via `srv.SetCoordinator(coord)`.
+   - **No `BootstrapRegion`** is called -- the new node starts with no regions and receives region data via Raft snapshots as PD schedules peers to it.
+   - `go coord.RunPDWorker(ctx)` is started for heartbeat reporting and scheduling command processing.
+   - `go coord.RunStoreWorker(storeWorkerCtx)` is started to handle dynamic peer creation/destruction.
 
 9. **gRPC server start** -- `srv.Start()` begins accepting gRPC connections.
 
@@ -97,9 +112,16 @@ func openDB(path string) traits.KvEngine
 
 This opens a Pebble database at the given path via `rocks.Open()` and exits on error. The returned engine provides column-family-aware iterators, point reads, and snapshots.
 
-### 3.3 Commands
+### 3.3 Command Categories
 
-#### 3.3.1 `scan` -- Range scan within a column family
+Commands fall into two categories based on whether they require a running cluster:
+
+- **Offline commands** (`scan`, `get`, `mvcc`, `dump`, `size`, `compact`, `region`): Operate on a KVS node's local data directory or PD data directory. Take `--db <data-dir>` to read directly from disk. The cluster does not need to be running.
+- **Online commands** (`store list`, `store status`): Communicate with a running PD server. Take `--pd <addr>` to specify the PD endpoint.
+
+### 3.4 Commands
+
+#### 3.4.1 `scan` -- Range scan within a column family
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -111,7 +133,7 @@ This opens a Pebble database at the given path via `rocks.Open()` and exits on e
 
 Creates an iterator with `LowerBound`/`UpperBound` options, seeks to first, and prints each key-value pair. Values are displayed as printable ASCII when possible, otherwise as hex.
 
-#### 3.3.2 `get` -- Single key lookup
+#### 3.4.2 `get` -- Single key lookup
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -121,7 +143,7 @@ Creates an iterator with `LowerBound`/`UpperBound` options, seeks to first, and 
 
 Performs a point read via `eng.Get(cf, key)`. Prints the column family, key (hex), and value. Reports "Key not found" when `ErrNotFound` is returned.
 
-#### 3.3.3 `mvcc` -- MVCC information for a user key
+#### 3.4.3 `mvcc` -- MVCC information for a user key
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -138,7 +160,7 @@ This command inspects the multi-version concurrency control state for a single u
    - `LockInfo` -- lock details (type, primary, timestamps, TTL, async-commit).
    - `WriteInfo` -- write record details (commit/start timestamps, type, short value).
 
-#### 3.3.4 `dump` -- Raw hex dump
+#### 3.4.4 `dump` -- Raw hex dump
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -156,7 +178,7 @@ When `--decode` is set, the output includes decoded MVCC information:
 
 When `--sst` is provided, the command parses an SST file directly using Pebble's `sstable` package (`cmdDumpSST`), bypassing the need for a running database. This enables offline debugging of individual SST files.
 
-#### 3.3.5 `size` -- Approximate data size per column family
+#### 3.4.5 `size` -- Approximate data size per column family
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -168,7 +190,7 @@ Iterates all four column families (`default`, `lock`, `write`, `raft`) and compu
 
 Sizes are formatted with human-readable units (B, KB, MB, GB) via the `formatSize()` helper.
 
-#### 3.3.6 `compact` -- Trigger compaction
+#### 3.4.6 `compact` -- Trigger compaction
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -178,7 +200,7 @@ Sizes are formatted with human-readable units (B, KB, MB, GB) via the `formatSiz
 
 When `--flush-only` is set, calls `eng.SyncWAL()` to ensure WAL durability. Otherwise, calls `CompactAll()` (all CFs) or `CompactCF(cf)` (specific CF) to trigger full LSM-tree compaction.
 
-#### 3.3.7 `region` -- Region metadata inspection
+#### 3.4.7 `region` -- Region metadata inspection
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
@@ -192,7 +214,28 @@ Reads region metadata from the `CF_RAFT` column family:
 - **`--all`**: Iterates all keys in `CF_RAFT`, filters for region state keys using `isRegionStateKey()`, and prints each region's metadata via `printRegionState()`. Stops after `--limit` regions.
 - With no flags, prints usage information.
 
-### 3.4 Utility Functions
+#### 3.4.8 `store` -- Store management (online)
+
+The `store` subcommand communicates with a running PD server to inspect registered stores.
+
+**`store list`** -- List all stores registered with PD
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--pd` | string | (required) | PD server address |
+
+Connects to PD via `pdclient.NewClient` and calls `GetAllStores()`. Prints a table of all registered stores with columns: StoreID, Address, State.
+
+**`store status`** -- Show details for a specific store
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--pd` | string | (required) | PD server address |
+| `--store-id` | uint64 | (required) | Store ID to inspect |
+
+Connects to PD and calls `GetStore(storeID)`. Displays detailed store metadata including StoreID, Address, State, and any additional attributes reported by PD.
+
+### 3.5 Utility Functions
 
 - **`tryPrintable(data []byte) string`** -- Returns the data as a plain string if all bytes are printable ASCII (0x20-0x7E), otherwise returns hex encoding. Used for human-friendly value display.
 - **`formatSize(bytes int64) string`** -- Converts byte counts to human-readable format (B/KB/MB/GB).
@@ -206,7 +249,7 @@ The `pdclient` package is a public Go library for interacting with the Placement
 
 ### 4.1 Client Interface
 
-The `Client` interface defines 15 methods:
+The `Client` interface defines 16 methods:
 
 | Method | Purpose |
 |---|---|
@@ -214,6 +257,7 @@ The `Client` interface defines 15 methods:
 | `GetRegion` | Look up the region containing a given key, plus its leader |
 | `GetRegionByID` | Look up a region by ID |
 | `GetStore` | Get store metadata by store ID |
+| `GetAllStores` | List all stores registered with PD |
 | `Bootstrap` | Bootstrap the cluster with an initial store and region |
 | `IsBootstrapped` | Check if the cluster has been bootstrapped |
 | `PutStore` | Register or update a store in PD |
@@ -266,9 +310,9 @@ flowchart TD
     F --> G[Open Pebble engine]
     G --> H[Create Storage layer]
     H --> I[Create gRPC Server]
-    I --> J{--store-id > 0 AND\n--initial-cluster set?}
+    I --> J{Cluster mode?}
 
-    J -- Yes: Cluster Mode --> K[Parse initial-cluster map]
+    J -- "Bootstrap: --store-id > 0\nAND --initial-cluster set" --> K[Parse initial-cluster map]
     K --> L[Create StaticStoreResolver]
     L --> M[Create RaftClient]
     M --> N[Create Router 256 shards]
@@ -277,7 +321,17 @@ flowchart TD
     P --> Q[Bootstrap Region 1\nwith all peers]
     Q --> R[Start gRPC server]
 
-    J -- No: Standalone Mode --> R
+    J -- "Join: --pd-endpoints set\nAND no --initial-cluster" --> JM1[Connect to PD]
+    JM1 --> JM2[Load or allocate store ID\nPersist via SaveStoreIdent]
+    JM2 --> JM3[Register with PD via PutStore]
+    JM3 --> JM4[Create PDStoreResolver]
+    JM4 --> JM5[Create RaftClient]
+    JM5 --> JM6[Create Router 256 shards]
+    JM6 --> JM7[Create StoreCoordinator\nempty peer set]
+    JM7 --> JM8[Start PDWorker\nand StoreWorker]
+    JM8 --> R
+
+    J -- "Standalone: neither\ncondition met" --> R
 
     R --> S[Start HTTP status server]
     S --> T[Block on SIGINT / SIGTERM]
@@ -656,6 +710,8 @@ sequenceDiagram
 | CLI: `size` | Implemented | Per-CF key count and byte size |
 | CLI: `compact` | Implemented | Full LSM compaction via `CompactAll()`/`CompactCF()` with `--flush-only` flag for WAL-only sync |
 | CLI: `region` | Implemented | Region metadata inspection with `--id`, `--all`, `--limit` flags |
+| CLI: `store list` | Implemented | Lists all stores registered with PD |
+| CLI: `store status` | Implemented | Shows details for a specific store via PD |
 | CLI: `dump --decode` | Implemented | MVCC key/value decoding for write and lock CFs |
 | PD client library | Implemented | Full gRPC client with multi-endpoint failover and retry + mock for testing |
 | Client library (`pkg/client`) | Implemented | Multi-region RawKVClient, RegionCache, PDStoreResolver, RegionRequestSender |

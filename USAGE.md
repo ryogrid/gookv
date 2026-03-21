@@ -187,12 +187,29 @@ pkill -f gookv-pd
 rm -rf /tmp/gookv-pd-cluster
 ```
 
+### Adding a Node to an Existing Cluster
+
+```bash
+# Start a new node that joins an existing cluster via PD.
+# No --initial-cluster needed. Store ID is allocated from PD automatically.
+./gookv-server \
+  --pd-endpoints 127.0.0.1:2379 \
+  --addr 127.0.0.1:20165 \
+  --status-addr 127.0.0.1:20185 \
+  --data-dir /tmp/gookv-pd-cluster/node6
+
+# Verify the new node is registered:
+./gookv-ctl store list --pd 127.0.0.1:2379
+```
+
+PD will automatically schedule region replicas onto the new node. Use `gookv-ctl store list` to monitor the process.
+
 ### PD Cluster CLI Flags
 
 | Flag | Description |
 |------|-------------|
-| `--store-id` | Unique store ID for this node (required for cluster mode) |
-| `--initial-cluster` | Cluster topology: `storeID=addr,...` |
+| `--store-id` | Unique store ID for this node (required for bootstrap cluster mode; optional in join mode — allocated from PD automatically) |
+| `--initial-cluster` | Cluster topology: `storeID=addr,...` (required for bootstrap; not needed for join mode) |
 | `--pd-endpoints` | Comma-separated PD addresses (e.g., `127.0.0.1:2379`) |
 
 ## Cross-Region Transaction Demo
@@ -256,6 +273,8 @@ The demo prints structured output with scenario banners (`--- Scenario 1/3: ...`
 
 ## Using the Admin CLI
 
+gookv-ctl commands fall into two categories: **offline commands** (`scan`, `get`, `mvcc`, `dump`, `size`, `compact`, `region`) that read directly from a data directory via `--db` and work without a running cluster, and **online commands** (`store list`, `store status`) that communicate with a running PD server via `--pd`.
+
 ```bash
 # Scan keys in the default column family
 ./gookv-ctl scan --db /tmp/gookv-data --cf default --limit 20
@@ -283,6 +302,12 @@ The demo prints structured output with scenario banners (`--- Scenario 1/3: ...`
 
 # List regions
 ./gookv-ctl region --db /tmp/gookv-data
+
+# List all stores in the cluster (requires running PD)
+./gookv-ctl store list --pd 127.0.0.1:2379
+
+# Show details for a specific store (requires running PD)
+./gookv-ctl store status --pd 127.0.0.1:2379 --store-id 1
 ```
 
 ## Running Tests

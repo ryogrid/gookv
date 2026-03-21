@@ -53,12 +53,30 @@ A subsequent fix (branch `new-demo-impl`, commit `e09c358fe`) resolved 6 infrast
 - **Context RegionId in KvPrewrite/KvCommit** — Standard 2PC `KvPrewrite` and `KvCommit` use `req.GetContext().GetRegionId()` directly instead of multi-region grouping, since the client groups mutations by region.
 - **Proposal timeout as retriable error** — `proposeErrorToRegionError()` treats timeout errors as `NotLeader`, enabling client retry.
 
+A fifth implementation round (branch `feat/add-node`) added **dynamic node addition** — joining new KVS nodes to a running cluster via PD, with automatic region rebalancing:
+
+| # | Feature | Status |
+|---|---------|--------|
+| 1 | Server-side PDStoreResolver (`internal/server/pd_resolver.go`) | Done |
+| 2 | Join mode startup with store ID persistence (`internal/server/store_ident.go`) | Done |
+| 3 | Store state machine — Up/Disconnected/Down/Tombstone (`internal/pd/server.go`) | Done |
+| 4 | Region balance scheduler (`internal/pd/scheduler.go:scheduleRegionBalance`) | Done |
+| 5 | Excess replica shedding scheduler (`internal/pd/scheduler.go:scheduleExcessReplicaShedding`) | Done |
+| 6 | MoveTracker — 3-step region move protocol (`internal/pd/move_tracker.go`) | Done |
+| 7 | Snapshot send semaphore — concurrent limit of 3 (`internal/server/coordinator.go`) | Done |
+| 8 | gookv-ctl `store list` and `store status` commands (`cmd/gookv-ctl/main.go`) | Done |
+| 9 | `GetAllStores` pdclient method (`pkg/pdclient/client.go`) | Done |
+| 10 | E2E tests for node addition (`e2e/add_node_test.go`) | Done |
+
 ## 2. Remaining Items
 
 | # | Category | Feature | Status | Notes |
 |---|----------|---------|--------|-------|
 | 1 | gRPC / Coprocessor | BatchCoprocessor | Not implemented | Only `Coprocessor` and `CoprocessorStream` are wired. `BatchCoprocessor` remains a stub. |
 | 2 | Client Library | TSO batching | Not implemented | Batch `GetTS` calls and dispense from local buffer. Low priority optimization. |
+| 3 | Raftstore | Streaming snapshot generation | Not implemented | Current implementation holds all region data in memory; may OOM for large regions. |
+| 4 | Raftstore | Region epoch validation in handleScheduleMessage | Not implemented | Currently relies on Raft's built-in rejection. |
+| 5 | PD | Store heartbeat capacity fields | Not implemented | Capacity/Available/UsedSize not yet populated. |
 
 ### 2.1 BatchCoprocessor
 

@@ -56,10 +56,10 @@
 | `internal/raftstore/conf_change.go` | Raft configuration changes: `applyConfChangeEntry`, `processConfChange`, `ProposeConfChange`. |
 | `internal/raftstore/merge.go` | Region merge: `ExecPrepareMerge` / `ExecCommitMerge` / `ExecRollbackMerge`. |
 | `internal/raftstore/store_worker.go` | Region data cleanup: `CleanupRegionData` removes all Raft state for destroyed regions. |
-| `internal/pd` | Embedded PD server: TSO allocation, metadata store, ID allocation, GC safe point management. Implements `pdpb.PD` gRPC service. |
+| `internal/pd` | Embedded PD server: TSO allocation, metadata store, ID allocation, GC safe point management. Implements `pdpb.PD` gRPC service. Includes `move_tracker.go` for multi-step region move tracking (AddLearner → PromoteLearner → RemovePeer). |
 | `internal/server/pd_worker.go` | PDWorker: store heartbeat loop, region heartbeat forwarding, batch split reporting. |
 | `internal/server/raw_storage.go` | Non-transactional Raw KV storage layer bypassing MVCC. Supports TTL encoding, CAS, batch scan, checksum computation. |
-| `internal/server` | gRPC server (`tikvpb.Tikv` service): `Server` (gRPC lifecycle with optional PD client for TSO), `tikvService` (implements KvGet, KvScan, KvPrewrite, KvCommit, KvBatchGet, KvBatchRollback, KvCleanup, KvCheckTxnStatus, KvCheckSecondaryLocks, KvScanLock, KvPessimisticLock, KvResolveLock, KvTxnHeartBeat, RawBatchScan, RawGetKeyTTL, RawCompareAndSwap, RawChecksum, BatchCommands, Raft, BatchRaft), `Storage` (transaction-aware bridge between engine/MVCC/txn layers with latch-based serialization, async commit, and 1PC support), `StoreCoordinator` (Raft peer lifecycle management, proposal routing, entry application, PD-coordinated split detection and execution), `StaticStoreResolver` (storeID-to-address mapping), `ModifiesToRequests`/`RequestsToModifies` (MVCC modify <-> raft_cmdpb conversion). Region-aware request validation via `validateRegionContext()`. |
+| `internal/server` | gRPC server (`tikvpb.Tikv` service): `Server` (gRPC lifecycle with optional PD client for TSO), `tikvService` (implements KvGet, KvScan, KvPrewrite, KvCommit, KvBatchGet, KvBatchRollback, KvCleanup, KvCheckTxnStatus, KvCheckSecondaryLocks, KvScanLock, KvPessimisticLock, KvResolveLock, KvTxnHeartBeat, RawBatchScan, RawGetKeyTTL, RawCompareAndSwap, RawChecksum, BatchCommands, Raft, BatchRaft), `Storage` (transaction-aware bridge between engine/MVCC/txn layers with latch-based serialization, async commit, and 1PC support), `StoreCoordinator` (Raft peer lifecycle management, proposal routing, entry application, PD-coordinated split detection and execution), `StaticStoreResolver` (storeID-to-address mapping), `PDStoreResolver` (`pd_resolver.go` — PD-based store resolver for dynamic node discovery), `StoreIdent` (`store_ident.go` — store identity persistence for join mode), `ModifiesToRequests`/`RequestsToModifies` (MVCC modify <-> raft_cmdpb conversion). Region-aware request validation via `validateRegionContext()`. |
 | `internal/server/transport` | Inter-node Raft message transport over gRPC: `RaftClient` (connection pooling, `Send`/`BatchSend`/`SendSnapshot`), `MessageBatcher` (batch accumulation), `StoreResolver` interface. |
 | `internal/server/status` | HTTP diagnostics server: `/debug/pprof/*`, `/metrics` (Prometheus), `/config`, `/status`, `/health`. |
 | `internal/server/flow` | Flow control and backpressure: `ReadPool` (EWMA-based busy detection, worker pool), `FlowController` (probabilistic request dropping based on compaction pressure), `MemoryQuota` (lock-free scheduler memory enforcement). |
@@ -218,6 +218,10 @@ When `--store-id N --initial-cluster "1=addr1,2=addr2,..."` is provided:
 4. A `StoreCoordinator` is created and attached to the `Server`.
 5. A single region (region 1) is bootstrapped spanning all stores. Each store gets one `Peer` goroutine.
 
+### Join Mode
+
+A node can join an existing cluster with only `--pd-endpoints` (no `--initial-cluster` needed). In this mode the node allocates a store ID from PD automatically, persists the identity to disk via `store_ident.go`, and waits for PD to schedule region replicas onto it. The `PDStoreResolver` (`pd_resolver.go`) resolves peer addresses dynamically from PD instead of using a static cluster map. PD's region balance scheduler and excess replica shedding scheduler automatically distribute replicas to the new node.
+
 **Write path in cluster mode:**
 1. gRPC handler calls `Storage.PrewriteModifies(mutations, ...)` to compute MVCC modifications without applying them.
 2. The handler calls `StoreCoordinator.ProposeModifies(regionID, modifies, timeout)`.
@@ -293,6 +297,21 @@ main()
   |          go coord.RunSplitResultHandler(ctx)
   |          -> Processes split check results, coordinates with PD for new IDs,
   |             executes ExecBatchSplit, bootstraps child regions, reports to PD
+  |
+  +-- 6b. [Join mode] Create Raft infrastructure (alternative to 6)
+  |     if --pd-endpoints provided && --initial-cluster not provided:
+  |       a. Allocate or load store ID (store_ident.go)
+  |          If data-dir has persisted identity, reuse it; otherwise call
+  |          pdClient.AllocID() and persist to disk.
+  |       b. PDStoreResolver(pdClient) — resolves storeID→addr via PD
+  |       c. transport.NewRaftClient(pdResolver, config)
+  |       d. router.New(256)
+  |       e. StoreCoordinator(storeID, engine, storage, router, client, peerCfg)
+  |       f. srv.SetCoordinator(coord)
+  |       g. Register store with PD: pdClient.PutStore(storeID, addr)
+  |       h. Create and start PDWorker (heartbeats trigger scheduling)
+  |       i. Node starts empty; PD schedules region replicas via heartbeat
+  |          responses, which the coordinator handles as AddPeer commands.
   |
   +-- 7. Start gRPC server
   |     srv.Start()

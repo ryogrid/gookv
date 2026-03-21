@@ -129,6 +129,7 @@ type StoreCoordinator struct {
     snapTaskCh       chan raftstore.GenSnapTask         // snapshot task channel shared with peers
     snapStopCh       chan struct{}                      // stops the snap worker
     pdTaskCh         chan<- interface{}                 // channel to PDWorker for heartbeats
+    snapSemaphore    chan struct{}                      // capacity 3; limits concurrent outbound snapshots
 }
 ```
 
@@ -157,14 +158,54 @@ Helper functions in `internal/server/raftcmd.go` provide the serialization bridg
 **`sendRaftMessage` behavior:**
 
 The `sendRaftMessage` function converts `raftpb.Message` to `raft_serverpb.RaftMessage` and dispatches based on message type:
-- **`MsgSnap`** (snapshot): Uses `RaftClient.SendSnapshot(storeID, raftMsg, snapData)` for streaming transfer. On failure, calls `reportSnapshotStatus` with `SnapshotFailure`.
+- **`MsgSnap`** (snapshot): Acquires the `snapSemaphore` before sending, then uses `RaftClient.SendSnapshot(storeID, raftMsg, snapData)` for streaming transfer. The semaphore is released after the send completes (whether successful or not). This limits concurrent outbound snapshots to 3, preventing snapshot storms when many regions are scheduled to a new store simultaneously. On failure, calls `reportSnapshotStatus` with `SnapshotFailure`.
 - **Other messages**: Uses `RaftClient.Send(storeID, raftMsg)`. On failure, calls `reportUnreachable(regionID, peerID)` to notify the leader.
 
 **`HandleRaftMessage` fallback:**
 
 When `HandleRaftMessage` receives a Raft message for an unknown region (router returns `ErrRegionNotFound`), it falls back to sending a `StoreMsgTypeRaftMessage` to `router.StoreCh()`. The `RunStoreWorker` goroutine processes this by calling `maybeCreatePeerForMessage`, which creates a new peer if the message is valid (e.g., a snapshot from a leader for a region this node should join).
 
-### 2.5 Helper: errToKeyError (`internal/server/server.go`)
+### 2.5 PDStoreResolver (`internal/server/pd_resolver.go`)
+
+`PDStoreResolver` implements the `transport.StoreResolver` interface for dynamic store discovery. It resolves store IDs to network addresses by querying PD, with TTL-based caching to avoid excessive RPC calls.
+
+```go
+type PDStoreResolver struct {
+    pdClient pdclient.Client
+    ttl      time.Duration           // default: 30s
+    mu       sync.RWMutex
+    cache    map[uint64]cacheEntry   // storeID -> {addr, expiry}
+}
+```
+
+Because the `StoreResolver` interface does not accept a `context.Context` parameter, `PDStoreResolver` creates an internal `context.WithTimeout(context.Background(), 5*time.Second)` for each PD query.
+
+**Methods**:
+
+| Method | Description |
+|---|---|
+| `NewPDStoreResolver(pdClient, ttl)` | Creates a new resolver with the given PD client and cache TTL |
+| `ResolveStore(storeID) (string, error)` | Returns the cached address if still valid, otherwise queries PD via `GetStore()` and caches the result |
+| `InvalidateStore(storeID)` | Removes the cached entry for a store, forcing the next `ResolveStore` call to query PD |
+
+`PDStoreResolver` is used in join mode for dynamic store discovery, where new stores can appear at any time. In bootstrap mode, `StaticStoreResolver` is used instead since the full cluster topology is known at startup.
+
+### 2.6 Store Identity Persistence (`internal/server/store_ident.go`)
+
+Store identity persistence ensures that a node retains its store ID across restarts. The store ID is stored as a decimal text file at `<dataDir>/store_ident`.
+
+**Functions**:
+
+| Function | Description |
+|---|---|
+| `SaveStoreIdent(dataDir string, storeID uint64) error` | Writes the store ID as decimal text to `<dataDir>/store_ident` |
+| `LoadStoreIdent(dataDir string) (uint64, error)` | Reads and parses the persisted store ID from `<dataDir>/store_ident` |
+
+In join mode, the store identity lifecycle works as follows:
+- **First start**: The store ID is either provided via `--store-id` or allocated from PD via `AllocID()`. The ID is then persisted via `SaveStoreIdent()`.
+- **Restart**: The store ID is loaded from disk via `LoadStoreIdent()`, ensuring the node re-registers with PD using the same identity.
+
+### 2.7 Helper: errToKeyError (`internal/server/server.go`)
 
 Converts internal Go errors to protobuf `kvrpcpb.KeyError` structures:
 

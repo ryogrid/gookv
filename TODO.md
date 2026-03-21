@@ -1,63 +1,54 @@
-# Dynamic Node Addition — Implementation TODO
+# PD Server Raft Replication — Implementation Tracking
 
-## Phase 1: Server-Side PDStoreResolver
-- [x] Create `internal/server/pd_resolver.go` — PDStoreResolver implementing transport.StoreResolver with TTL cache
-- [x] Create `internal/server/pd_resolver_test.go` — Unit tests (cache hit, cache miss/TTL, unknown store)
-- [x] Modify `cmd/gookv-server/main.go` — Use PDStoreResolver when PD available
-- [x] Run `go vet` and fix any issues
-- [x] Run unit tests and verify pass
+## Phase 1: PD Raft Core (~800 LOC)
 
-## Phase 2: Join Mode Startup
-- [x] Create `internal/server/store_ident.go` — SaveStoreIdent/LoadStoreIdent for store ID persistence
-- [x] Create `internal/server/store_ident_test.go` — Unit tests (save/load/missing file)
-- [x] Modify `cmd/gookv-server/main.go` — Add join mode detection and joinCluster() function
-- [x] Run `go vet` and fix any issues
-- [x] Run unit tests and verify pass
-- [x] Verify build succeeds
+- [ ] Step 1: PD Command Encoding (`internal/pd/command.go` + tests)
+- [ ] Step 2: PD Raft Storage (`internal/pd/raft_storage.go` + tests)
+- [ ] Step 3: PD Raft Peer (`internal/pd/raft_peer.go` + tests)
+- [ ] Step 4: Apply Function (`internal/pd/apply.go` + tests)
 
-## Phase 3: Store State Machine in PD
-- [x] Modify `internal/pd/server.go` — Add StoreState enum, storeStates map, state methods, config fields, runStoreStateWorker()
-- [x] Modify `internal/pd/scheduler.go` — Use GetStoreState/IsStoreSchedulable instead of IsStoreAlive
-- [x] Create `internal/pd/store_state_test.go` — State transition tests
-- [x] Modify `internal/pd/scheduler_test.go` — Update for state-aware scheduling
-- [x] Run `go vet` and fix any issues
-- [x] Run unit tests and verify pass
+## Phase 2: PD-to-PD Transport (~300 LOC)
 
-## Phase 4: Region Balance + Excess Shedding Schedulers
-- [x] Modify `internal/pd/scheduler.go` — Add scheduleExcessReplicaShedding(), scheduleRegionBalance(), update Schedule() priority chain, extend Scheduler struct
-- [x] Modify `internal/pd/server.go` — Add GetRegionCountPerStore(), config fields, update constructor
-- [x] Modify `internal/pd/scheduler_test.go` — Tests for new schedulers
-- [x] Run `go vet` and fix any issues
-- [x] Run unit tests and verify pass
+- [ ] Step 5: PD Peer gRPC Service (`internal/pd/peer_service.go`)
+- [ ] Step 6: PD Transport Client (`internal/pd/transport.go`)
+- [ ] Step 7: Wire Transport into PDRaftPeer
 
-## Phase 5: Multi-Step Move Tracking (MoveTracker)
-- [x] Create `internal/pd/move_tracker.go` — MoveTracker, PendingMove, MoveState, Advance() logic
-- [x] Create `internal/pd/move_tracker_test.go` — Full cycle, skip transfer, stale cleanup, rate limit
-- [x] Modify `internal/pd/scheduler.go` — Wire moveTracker, call Advance() in Schedule()
-- [x] Modify `internal/pd/server.go` — Create MoveTracker, wire into Scheduler, cleanup goroutine
-- [x] Modify `internal/server/coordinator.go` — Add snapSemaphore for concurrent snapshot limit
-- [x] Run `go vet` and fix any issues
-- [x] Run unit tests and verify pass
+## Phase 3: Server Integration (~700 LOC)
 
-## Phase 6: E2E Testing
-- [x] Create `e2e/add_node_test.go` — E2E tests for node join, scheduling, move lifecycle, multi-join
-- [x] Run E2E tests and verify pass
+- [ ] Step 8: Embed Raft in PDServer (modify `internal/pd/server.go`)
+- [ ] Step 8a: TSO and ID Pre-allocation Buffers (`tso_buffer.go`, `id_buffer.go` + tests)
+- [ ] Step 9: Convert RPC Handlers to Raft-Aware
+- [ ] Step 10: Leader Forwarding (`internal/pd/forward.go`)
+- [ ] Step 11: Enhanced GetMembers
 
-## Phase 7: gookv-ctl Extensions
-- [x] Modify `pkg/pdclient/client.go` — Add GetAllStores to Client interface and grpcClient implementation
-- [x] Modify `cmd/gookv-ctl/main.go` — Add store subcommand (list, status)
-- [x] Run `go vet` and fix any issues
-- [x] Verify build succeeds
+## Phase 4: Snapshot & Recovery (~300 LOC)
 
-## Final Quality Gates
-- [x] `go vet ./...` passes with no issues (fixed pre-existing self-assignment in peer.go)
-- [x] `go build ./...` succeeds
-- [x] All TODO.md items marked [x]
-- [x] No leftover TODO/FIXME/HACK/XXX comments in scope (one pre-existing TODO in coordinator.go:330 is out of scope)
-- [x] Deferred items documented and reported (see below)
+- [ ] Step 12: Snapshot Generation (`internal/pd/snapshot.go`)
+- [ ] Step 13: Snapshot Application
+- [ ] Step 14: Recovery on Restart
 
-## Deferred Items
-- **Streaming snapshot generation**: Current snapshot holds all region data in memory. For regions near RegionMaxSize (144MB), this may cause OOM. Streaming generation deferred as follow-up.
-- **Region epoch validation in handleScheduleMessage()**: Currently relies on Raft's built-in rejection. Explicit epoch comparison deferred.
-- **Store heartbeat capacity fields**: `Capacity`, `Available`, `UsedSize` fields in store heartbeat not yet populated (design doc 02 mentions these as MODIFY items). Functional without them.
-- **E2E test for full data verification**: Current E2E tests verify scheduling and registration but do not verify end-to-end data consistency after rebalancing (read-back all keys). Deferred due to complexity.
+## Phase 5: CLI & Configuration (~200 LOC)
+
+- [ ] Step 15: New CLI Flags (modify `cmd/gookv-pd/main.go`)
+- [ ] Step 16: PDRaftConfig Construction
+- [ ] Step 17: Backward-Compatible Startup
+
+## Tests
+
+- [ ] Unit tests: command_test.go
+- [ ] Unit tests: raft_storage_test.go
+- [ ] Unit tests: raft_peer_test.go
+- [ ] Unit tests: apply_test.go
+- [ ] Unit tests: tso_buffer_test.go
+- [ ] Unit tests: id_buffer_test.go
+- [ ] Unit tests: snapshot_test.go
+- [ ] E2E tests: e2e/pd_replication_test.go
+
+## Final Verification
+
+- [ ] go vet passes
+- [ ] All unit tests pass
+- [ ] All e2e tests pass (including existing)
+- [ ] TODO.md fully checked
+- [ ] No TODO/FIXME/HACK/XXX comments in new files
+- [ ] Deferred items reported

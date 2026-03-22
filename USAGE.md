@@ -382,6 +382,58 @@ Join mode works because `gookv-server` detects that `--pd-endpoints` is provided
 
 The demo prints structured output with scenario banners (`--- Scenario 1/2: ...`), numbered steps, store/region topology tables, and explicit PASS/FAIL per scenario. The program exits with code 0 on full success, 1 if any scenario fails.
 
+## PD Leader Failover Demo
+
+Demonstrates PD server high availability: when the PD Raft leader is killed, a surviving follower is elected as the new leader and the cluster continues operating without interruption. The client library (`pdclient`) automatically discovers the new leader and reconnects.
+
+### Prerequisites
+
+- Go installed
+- Ports 2409-2414, 20370-20372, 20390-20392 available
+
+### Running
+
+```bash
+# Build and start 3-PD Raft cluster + 3 KVS nodes
+make pd-failover-demo-start
+
+# Run the failover demo (4 phases)
+make pd-failover-demo-verify
+
+# Stop and clean up
+make pd-failover-demo-stop
+```
+
+### PD Cluster Ports
+
+| Component | Client Address | Peer Address |
+|-----------|---------------|--------------|
+| PD 1 | 127.0.0.1:2409 | 127.0.0.1:2410 |
+| PD 2 | 127.0.0.1:2411 | 127.0.0.1:2412 |
+| PD 3 | 127.0.0.1:2413 | 127.0.0.1:2414 |
+
+### KVS Node Ports
+
+| Component | gRPC Address | Status Address |
+|-----------|-------------|----------------|
+| KVS Node 1 | 127.0.0.1:20370 | 127.0.0.1:20390 |
+| KVS Node 2 | 127.0.0.1:20371 | 127.0.0.1:20391 |
+| KVS Node 3 | 127.0.0.1:20372 | 127.0.0.1:20392 |
+
+### What Each Phase Demonstrates
+
+1. **Baseline (Phase 1)**: Connects to the 3-PD Raft cluster via `GetMembers` RPC, discovers the current leader and all followers. Writes 5 test keys and reads them back. Shows KVS store and region topology.
+
+2. **Kill PD Leader (Phase 2)**: Sends SIGKILL to the PD leader process via its PID file, simulating a hard node failure.
+
+3. **Failover Verification (Phase 3)**: Polls surviving PD nodes until a new leader is elected (~1-5 seconds). Creates a new client using ALL PD endpoints (including the dead one) to demonstrate automatic failover. Reads back pre-failure data, writes new data, and verifies cluster metadata (stores, regions) is intact.
+
+4. **Final Status (Phase 4)**: Prints the final PD cluster state showing which node is the new leader, which are followers, and which is dead.
+
+### Expected Output
+
+Structured output with phase banners (`--- Phase 1/4: ...`), numbered steps, and PASS/FAIL per phase. Exit code 0 on full success, 1 if any phase fails.
+
 ## Using the Admin CLI
 
 gookv-ctl commands fall into two categories: **offline commands** (`scan`, `get`, `mvcc`, `dump`, `size`, `compact`, `region`) that read directly from a data directory via `--db` and work without a running cluster, and **online commands** (`store list`, `store status`) that communicate with a running PD server via `--pd`.

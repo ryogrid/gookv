@@ -1,4 +1,4 @@
-.PHONY: test build vet proto test-e2e cluster-start cluster-stop cluster-verify pd-cluster-start pd-cluster-stop pd-cluster-verify txn-demo-start txn-demo-stop txn-demo-verify scale-demo-start scale-demo-stop scale-demo-verify
+.PHONY: test build vet proto test-e2e cluster-start cluster-stop cluster-verify pd-cluster-start pd-cluster-stop pd-cluster-verify txn-demo-start txn-demo-stop txn-demo-verify scale-demo-start scale-demo-stop scale-demo-verify pd-failover-demo-start pd-failover-demo-stop pd-failover-demo-verify
 
 CLUSTER_DIR = /tmp/gookv-cluster
 CLUSTER_NODES = 5
@@ -247,3 +247,99 @@ scale-demo-stop:
 	fi
 	@rm -rf $(SCALE_DEMO_DIR)
 	@echo "Scale demo cluster stopped and data cleaned up."
+
+# --- PD Leader Failover Demo ---
+PD_FAILOVER_DIR = /tmp/gookv-pd-failover-demo
+PD_FAILOVER_PD_NODES = 3
+PD_FAILOVER_KVS_NODES = 3
+PD_FAILOVER_INITIAL_CLUSTER = 1=127.0.0.1:2410,2=127.0.0.1:2412,3=127.0.0.1:2414
+PD_FAILOVER_CLIENT_CLUSTER = 1=127.0.0.1:2409,2=127.0.0.1:2411,3=127.0.0.1:2413
+PD_FAILOVER_PD_ENDPOINTS = 127.0.0.1:2409,127.0.0.1:2411,127.0.0.1:2413
+PD_FAILOVER_KVS_TOPOLOGY = 1=127.0.0.1:20370,2=127.0.0.1:20371,3=127.0.0.1:20372
+
+pd-failover-demo-start: build
+	@echo "Starting 3-PD Raft cluster + 3 KVS nodes for failover demo..."
+	@# Ensure no stale processes from a previous run.
+	@for PID_FILE in $(PD_FAILOVER_DIR)/*.pid; do \
+		if [ -f "$$PID_FILE" ]; then \
+			PID=$$(cat "$$PID_FILE"); \
+			kill -9 $$PID 2>/dev/null || true; \
+		fi; \
+	done
+	@sleep 1
+	@rm -rf $(PD_FAILOVER_DIR)
+	@for i in 1 2 3; do \
+		CLIENT_PORT=$$((2407 + $$i * 2)); \
+		PEER_PORT=$$((2408 + $$i * 2)); \
+		DATA_DIR=$(PD_FAILOVER_DIR)/pd$$i; \
+		PID_FILE=$(PD_FAILOVER_DIR)/pd$$i.pid; \
+		LOG_FILE=$(PD_FAILOVER_DIR)/pd$$i.log; \
+		mkdir -p $$DATA_DIR; \
+		./gookv-pd \
+			--pd-id $$i \
+			--initial-cluster $(PD_FAILOVER_INITIAL_CLUSTER) \
+			--peer-port 127.0.0.1:$$PEER_PORT \
+			--client-cluster $(PD_FAILOVER_CLIENT_CLUSTER) \
+			--addr 127.0.0.1:$$CLIENT_PORT \
+			--data-dir $$DATA_DIR \
+			--cluster-id 1 \
+			> $$LOG_FILE 2>&1 & \
+		echo $$! > $$PID_FILE; \
+		echo "  PD $$i: client=127.0.0.1:$$CLIENT_PORT peer=127.0.0.1:$$PEER_PORT pid=$$(cat $$PID_FILE)"; \
+	done
+	@echo "  Waiting for PD leader election..."
+	@sleep 3
+	@for i in $$(seq 1 $(PD_FAILOVER_KVS_NODES)); do \
+		GRPC_PORT=$$((20369 + $$i)); \
+		STATUS_PORT=$$((20389 + $$i)); \
+		DATA_DIR=$(PD_FAILOVER_DIR)/node$$i; \
+		PID_FILE=$(PD_FAILOVER_DIR)/node$$i.pid; \
+		LOG_FILE=$(PD_FAILOVER_DIR)/node$$i.log; \
+		mkdir -p $$DATA_DIR; \
+		./gookv-server \
+			--store-id $$i \
+			--addr 127.0.0.1:$$GRPC_PORT \
+			--status-addr 127.0.0.1:$$STATUS_PORT \
+			--data-dir $$DATA_DIR \
+			--pd-endpoints $(PD_FAILOVER_PD_ENDPOINTS) \
+			--initial-cluster $(PD_FAILOVER_KVS_TOPOLOGY) \
+			> $$LOG_FILE 2>&1 & \
+		echo $$! > $$PID_FILE; \
+		echo "  Node $$i: gRPC=127.0.0.1:$$GRPC_PORT status=127.0.0.1:$$STATUS_PORT pid=$$(cat $$PID_FILE)"; \
+	done
+	@echo "PD failover demo cluster started. Use 'make pd-failover-demo-verify' to run the demo."
+
+pd-failover-demo-verify:
+	@echo "Running PD leader failover demo..."
+	@go run scripts/pd-failover-demo-verify/main.go --pd $(PD_FAILOVER_PD_ENDPOINTS) --data-dir $(PD_FAILOVER_DIR)
+
+pd-failover-demo-stop:
+	@echo "Stopping PD failover demo cluster..."
+	@for i in $$(seq 1 $(PD_FAILOVER_KVS_NODES)); do \
+		PID_FILE=$(PD_FAILOVER_DIR)/node$$i.pid; \
+		if [ -f $$PID_FILE ]; then \
+			PID=$$(cat $$PID_FILE); \
+			if kill -0 $$PID 2>/dev/null; then \
+				kill $$PID; \
+				echo "  Node $$i (pid $$PID): stopped"; \
+			else \
+				echo "  Node $$i (pid $$PID): already stopped"; \
+			fi; \
+			rm -f $$PID_FILE; \
+		fi; \
+	done
+	@for i in 1 2 3; do \
+		PID_FILE=$(PD_FAILOVER_DIR)/pd$$i.pid; \
+		if [ -f $$PID_FILE ]; then \
+			PID=$$(cat $$PID_FILE); \
+			if kill -0 $$PID 2>/dev/null; then \
+				kill $$PID; \
+				echo "  PD $$i (pid $$PID): stopped"; \
+			else \
+				echo "  PD $$i (pid $$PID): already stopped"; \
+			fi; \
+			rm -f $$PID_FILE; \
+		fi; \
+	done
+	@rm -rf $(PD_FAILOVER_DIR)
+	@echo "PD failover demo cluster stopped and data cleaned up."

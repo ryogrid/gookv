@@ -266,10 +266,17 @@ func (c *twoPhaseCommitter) commitSecondaries(ctx context.Context) {
 					return resp.GetRegionError(), nil
 				}
 				if resp.GetError() != nil {
-					// Log but don't retry — secondary commit errors are expected
-					// when lock resolver already committed/rolled back the lock.
-					slog.Info("commitSecondary: key error (lock likely already resolved)",
-						"startTS", c.startTS, "err", resp.GetError().String())
+					if resp.GetError().GetTxnLockNotFound() != nil {
+						// Lock was resolved by another transaction's lock resolver.
+						// Ensure the secondary is properly committed by resolving it ourselves.
+						// Primary is already committed, so ResolveLock will commit.
+						lockInfo := &kvrpcpb.LockInfo{
+							PrimaryLock: c.primary,
+							LockVersion: uint64(c.startTS),
+							Key:         group.Keys[0],
+						}
+						_ = c.client.resolver.ResolveLocks(ctx, []*kvrpcpb.LockInfo{lockInfo})
+					}
 				}
 				return nil, nil
 			})

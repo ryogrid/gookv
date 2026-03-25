@@ -545,4 +545,23 @@ All VERIFY MISMATCHes have `errVF=<nil> errVT=<nil>` — commit succeeds, verifi
 - Lock resolution works (no blocked reads)
 - Conflict detection misses some concurrent writes
 
-The miss is likely in the **Prewrite's SeekWrite** call: it reads from a snapshot that doesn't include a concurrent commit from another region. Since the latch only covers keys within a single KvPrewrite RPC (one region), commits to the same key from different transactions via different RPCs can race.
+### Bug 12: Commit sent to wrong node after split (ROOT CAUSE IDENTIFIED)
+
+Server-side trace with `GOOKV_TRACE_PREWRITE=1` revealed the exact sequence:
+
+```
+Node2: [PREWRITE] key=acct:0858 startTS=...683009 OK     ← TxnA prewrite
+Node2: [COMMIT]   key=acct:0858 startTS=...683009 OK     ← TxnA commit (same node)
+Node2: [PREWRITE] key=acct:0858 startTS=...630145 OK     ← TxnB prewrite (no conflict: commitTS < startTS)
+Node1: [COMMIT]   key=acct:0858 startTS=...630145 LOCK_NOT_FOUND  ← TxnB commit on WRONG NODE
+```
+
+TxnB's Prewrite succeeded on Node2 (the leader), but the Commit was sent to Node1 (not the leader). Node1 doesn't have the prewrite lock (Raft replication delay) → LOCK_NOT_FOUND. The commit silently fails.
+
+**Root cause**: `commitSecondaries` uses `GroupKeysByRegion` → `LocateKey` → region cache. After a region split, the cache may point to a different leader than where the prewrite was applied. The KvCommit RPC goes to the wrong node.
+
+In TiKV, this is handled by the region error retry: the wrong node returns `NotLeader`, the client retries on the correct node. But in gookv, `commitSecondaries` ignores all errors including LOCK_NOT_FOUND.
+
+**Fix needed**: Either:
+1. Make `commitSecondaries` retry on `LOCK_NOT_FOUND` (not just region errors)
+2. Or ensure the region cache is consistent between Prewrite and Commit (use the same RegionInfo)

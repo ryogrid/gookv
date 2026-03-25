@@ -179,14 +179,14 @@ Finds the first write record for `key` with `commitTS <= ts`. Creates an iterato
 func (r *MvccReader) GetWrite(key Key, ts TimeStamp) (*txntypes.Write, TimeStamp, error)
 ```
 
-Finds the latest **data-changing** write (Put or Delete) visible at `ts`. Internally calls `SeekWrite` in a loop, skipping Lock and Rollback records. Two skip strategies:
+Finds the latest **data-changing** write (Put or Delete) visible at `ts`. Uses a single iterator on CF_WRITE that scans downward through all write records for the key. The iterator seeks to `EncodeKey(key, ts)` and then advances via `iter.Next()`, checking each record's write type:
 
-1. **LastChange optimization**: If `write.LastChange.EstimatedVersions >= SeekBound` and the LastChange timestamp is non-zero, jump directly to `write.LastChange.TS`.
-2. **Sequential scan**: Otherwise, seek to `commitTS.Prev()` and continue.
+- **Put** or **Delete**: Returns immediately (data-changing write found). For `WriteTypeDelete`, returns `(nil, 0, nil)` — the key is considered deleted at that version.
+- **Lock** or **Rollback** (non-data-changing): Two skip strategies:
+  1. **LastChange optimization**: If `write.LastChange.EstimatedVersions >= SeekBound` and the LastChange timestamp is non-zero, jumps directly via `iter.Seek(EncodeKey(key, write.LastChange.TS))` to skip many stale versions.
+  2. **Sequential scan**: Otherwise, calls `iter.Next()` to check the next older version.
 
-The loop is bounded to `SeekBound * 2` iterations as a safety limit.
-
-When a `WriteTypeDelete` is found, returns `(nil, 0, nil)` -- the key is considered deleted at that version.
+The loop continues until a data-changing write is found or the scan exhausts all records for the key (iterator moves past the key's encoded user-key prefix). Unlike the previous `SeekWrite`-based loop, there is no fixed iteration limit — this eliminates the issue where excessive rollback/lock records could prevent finding the correct data-changing write.
 
 ### GetTxnCommitRecord
 
@@ -577,7 +577,7 @@ func Prewrite(txn *MvccTxn, reader *MvccReader, props PrewriteProps, mutation Mu
 Phase 1 of 2PC for a single key:
 
 1. **Lock check:** Load existing lock. If a lock exists with the same `StartTS`, treat as idempotent (return nil). If a lock exists with a different `StartTS`, return `ErrKeyIsLocked`.
-2. **Write conflict check:** `SeekWrite(key, TSMax)` to find the newest write. If `commitTS > StartTS` and the write is a data-changing type (not Rollback/Lock), return `ErrWriteConflict`.
+2. **Write conflict check:** Loop through write records in descending `commitTS` order via repeated `SeekWrite(key, seekTS)` calls, skipping Rollback and Lock records to find the most recent data-changing write (matching TiKV's `check_for_newer_version` logic). If a data-changing write (Put or Delete) is found with `commitTS > StartTS`, return `ErrWriteConflict`. The loop is bounded to `SeekBound * 2` iterations. Debug logging is available via the `GOOKV_TRACE_PREWRITE=1` environment variable.
 3. **Write lock:** Create a `Lock` with the appropriate `LockType` (derived from `MutationOp`). If the value is <= `ShortValueMaxLen` (255 bytes), inline it in the lock's `ShortValue` field. Call `txn.PutLock(key, lock)`.
 4. **Write value:** If the mutation is a Put with a large value, call `txn.PutValue(key, startTS, value)` to store in CF_DEFAULT.
 

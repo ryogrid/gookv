@@ -131,12 +131,26 @@ At high concurrency (4+ concurrent writer goroutines), cross-region transactions
 
 1. **Secondary commit misrouting:** `KvCommit` for secondary keys in cross-region 2PC can misroute Raft proposals when the client's `RegionCache` or the server's `ResolveRegionForKey` returns a stale or incorrect region after splits.
 2. **Lock resolution routing:** `KvResolveLock` suffers from the same region routing issue, preventing automatic cleanup of orphan locks.
+3. **Split key encoding mismatch (Bug 12):** Split keys were stored as raw MVCC-encoded bytes, but PD and client routing compared raw user keys — causing region boundary mismatches after splits. Commit secondary was sent to the wrong node after split.
 
-**Mitigations applied:**
+**Mitigations applied (rounds 1-2):**
 
 - `RegionCache.LocateKey()` now encodes raw user keys via `codec.EncodeBytes()` before comparing with region boundaries (which are MVCC-encoded).
 - `groupModifiesByRegion()` now uses encoded modify keys directly for region routing instead of decoding back to raw keys.
 - `commitSecondaries` is now synchronous (not background) to ensure secondary commits complete before the transaction handle is released.
 - `Rollback()` in pessimistic mode now calls both `pessimisticRollback` and `batchRollback` to clean up both lock types.
 
-Despite these fixes, the issue persists at high concurrency due to residual routing edge cases. At low concurrency (≤2 goroutines), cross-region transaction integrity is reliably maintained. Single-region transactions are unaffected at any concurrency level.
+**Additional mitigations (round 3 — `txn-integrity-demo-region-idx-and-epoch` branch):**
+
+- **Split key re-encoding:** `scanRegionSize()` now decodes MVCC keys via `mvcc.DecodeKey()` and re-encodes as `mvcc.EncodeLockKey()` (memcomparable, no timestamp), ensuring region boundaries use a consistent format across all routing operations.
+- **PD `GetRegionByKey` key encoding:** Now encodes raw keys via `codec.EncodeBytes()` before comparing with region boundaries.
+- **PD `ReportBatchSplit` leader assignment:** Now sets the first peer as leader when storing split regions (previously passed nil).
+- **Prewrite conflict check:** Now loops through write records, skipping Rollback/Lock records to find actual data-changing write conflicts (matching TiKV's `check_for_newer_version` logic).
+- **GetWrite single-iterator scan:** Rewritten from a `SeekWrite`-based loop with `SeekBound*2` limit to a single iterator that scans all records — eliminates missed writes when many rollback records exist.
+- **CleanupModifies restructured:** Now checks lock existence first; if no lock exists, returns early. If lock exists, checks primary status, then either commits (ResolveLock) or directly removes lock and writes rollback record.
+- **LockResolver premature rollback prevention:** `resolveSingleLock` now returns nil if the primary is still locked (LockTtl > 0, CommitVersion == 0), avoiding premature rollback of in-progress transactions.
+- **commitSecondaries TxnLockNotFound handling:** Now calls `ResolveLocks` when encountering `TxnLockNotFound` (lock was resolved by another txn's lock resolver), ensuring the secondary is properly committed.
+- **SendToRegion retry backoff:** 100ms backoff between retries to allow region state to stabilize after splits. No longer closes gRPC connections on error (prevents cascading failures).
+- **Immediate Raft tick after split:** `handleSplitCheckResult` sends `PeerMsgTypeTick` to new regions to force immediate `MsgVote`, accelerating peer creation on other nodes.
+
+Despite these fixes, the issue persists at high concurrency due to the fundamental lack of Region Epoch validation and linearizable reads (reads bypass Raft). See `design_doc/region_index_and_epoch/` for the planned fix. At low concurrency (≤2 goroutines), cross-region transaction integrity is reliably maintained. Single-region transactions are unaffected at any concurrency level.

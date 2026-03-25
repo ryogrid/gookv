@@ -416,10 +416,12 @@ Steps 1-4 are identical to the standalone path, but step 5 is skipped. Instead:
 
 **`CheckTxnStatusWithCleanup(primaryKey, startTS, callerStartTS, rollbackIfNotExist)`** -- Write-capable. Acquires latches on the primary key. Creates a snapshot, reader, and `MvccTxn` accumulator, then delegates to `txn.CheckTxnStatusWithCleanup`. Returns `(*TxnStatus, []mvcc.Modify, error)`. The modifies are non-empty when the function cleaned up an expired lock (TTL-based rollback) or wrote a protective rollback record (`rollbackIfNotExist`). See `03_transaction.md` Section "CheckTxnStatusWithCleanup" for the algorithm details.
 
-**`Cleanup(key, startTS)`** -- Resolves a single key's lock by checking the **primary key's** transaction status. Acquires latches. If the key has no lock or already has a commit/rollback record, returns early. Otherwise, loads the lock to find its `Primary` field, then calls `CheckTxnStatus` on the primary key:
-1. If primary committed → commits this key via `ResolveLock(key, startTS, primaryCommitTS)`.
-2. If primary rolled back or not found → rolls back this key via `Rollback(key, startTS)`.
-3. Applies modifications directly via `ApplyModifies`.
+**`Cleanup(key, startTS)`** (renamed to `CleanupModifies` internally) -- Resolves a single key's lock by checking the **primary key's** transaction status. Acquires latches. The algorithm is lock-existence-first:
+1. **Check lock:** Load the lock for `key`. If no lock exists or the lock's `StartTS` does not match, check the transaction status via `CheckTxnStatus` and return early (idempotent — the lock was already resolved).
+2. **Lock exists:** Extract the `Primary` field from the lock and call `CheckTxnStatus` on the primary key.
+3. **Primary committed** → commits this key via `ResolveLock(key, startTS, primaryCommitTS)`.
+4. **Primary rolled back, not found, or error** → directly removes the lock via `UnlockKey`, deletes the large value from CF_DEFAULT if applicable (non-short-value Put lock), and writes a `WriteTypeRollback` record via `PutWrite(key, startTS, rollbackWrite)`. This avoids calling the generic `Rollback` function.
+5. Returns the collected modifications for Raft proposal (cluster mode) or direct application (standalone mode).
 
 ### 5.5 Pessimistic Lock and Resolve Lock Methods
 

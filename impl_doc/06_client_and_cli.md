@@ -482,7 +482,7 @@ gRPC connection pool with automatic retry on region errors. Manages a `map[strin
 | `HandleRegionError(ctx, info, regionErr)` | Processes `NotLeader`, `EpochNotMatch`, `RegionNotFound`, `StoreNotMatch` errors and invalidates cache |
 | `Close()` | Closes all gRPC connections |
 
-**Retry behavior**: On `NotLeader`, updates the cached leader and retries. On `EpochNotMatch`, `RegionNotFound`, or `StoreNotMatch`, invalidates the region cache entry and retries with fresh PD data. Max retries configurable (default 3).
+**Retry behavior**: On `NotLeader`, updates the cached leader and retries. On `EpochNotMatch`, `RegionNotFound`, or `StoreNotMatch`, invalidates the region cache entry and retries with fresh PD data. On gRPC-level errors, invalidates the region cache but does **not** close the gRPC connection — gRPC handles reconnection automatically, and closing shared connections would cause cascading errors in other goroutines. A 100ms backoff is applied between retries to allow region state to stabilize (e.g., after splits). Error messages include the last region error for diagnostics. Max retries configurable (default 3).
 
 ### 6.8 Request Flow
 
@@ -617,8 +617,9 @@ type LockResolver struct {
 2. Check the `resolving` map — if another goroutine is already resolving this lock, wait on the channel.
 3. Otherwise, register a channel in `resolving` and proceed.
 4. Call `checkTxnStatus(ctx, primaryKey, lockTS)` — sends `KvCheckTxnStatus` RPC to the primary key's region with `RollbackIfNotExist = true`.
-5. Call `resolveLock(ctx, lock, commitTS)` — sends `KvResolveLock` RPC to the locked key's region. If `commitTS > 0`, the lock is committed; if `commitTS == 0`, it is rolled back.
-6. Close the channel and remove from `resolving` to wake waiters.
+5. **Primary still locked check:** If the primary is still locked (`LockTtl > 0` and `CommitVersion == 0`), return nil without resolving — the transaction may still commit. The caller's retry loop will encounter the lock again on the next attempt.
+6. Call `resolveLock(ctx, lock, commitTS)` — sends `KvResolveLock` RPC to the locked key's region. If `commitTS > 0`, the lock is committed; if `commitTS == 0`, it is rolled back.
+7. Close the channel and remove from `resolving` to wake waiters.
 
 ### 6.12 twoPhaseCommitter
 
@@ -644,7 +645,7 @@ type twoPhaseCommitter struct {
 4. **`getCommitTS`** — allocates a new timestamp from PD via `pdClient.GetTS()`.
 5. **`commitPrimary(ctx)`** — sends `KvCommit` RPC for the primary key synchronously. Skips if 1PC already committed (commitTS set during prewrite).
 6. On commit failure: calls `rollback()` and returns the error.
-7. **`commitSecondaries(ctx)`** — commits all secondary keys **synchronously** (not in a background goroutine). Groups by region and sends `KvCommit` for each group in parallel within `commitSecondaries`. Best-effort (errors are ignored since the primary is already committed). Changed from background to synchronous to prevent orphan prewrite locks when the calling goroutine exits before secondaries are committed.
+7. **`commitSecondaries(ctx)`** — commits all secondary keys **synchronously** (not in a background goroutine). Groups by region and sends `KvCommit` for each group in parallel within `commitSecondaries`. If a secondary commit returns `TxnLockNotFound` (the lock was cleaned up by another transaction's lock resolver), `commitSecondaries` calls `ResolveLocks` to re-resolve the lock — since the primary is already committed, resolution will commit the secondary. Other errors are logged via `slog.Warn`. Changed from background to synchronous to prevent orphan prewrite locks when the calling goroutine exits before secondaries are committed.
 8. Returns success after primary commit and synchronous secondary commits.
 
 **Rollback on failure:** `rollback()` groups all mutation keys by region and sends `KvBatchRollback` for each region group in parallel.

@@ -652,7 +652,7 @@ The split subsystem detects oversized regions and executes boundary splits.
 
 **Check Policy** — `CheckPolicyScan` iterates all three data CFs to measure exact region size; `CheckPolicyApproximate` is defined but defaults to scan.
 
-**Size Scanning** — `scanRegionSize(task)` iterates entries across `CF_DEFAULT`, `CF_LOCK`, `CF_WRITE` within `[StartKey, EndKey)`. It accumulates key-value sizes and records a midpoint split key. If the total exceeds `SplitSize`, the midpoint is returned as `SplitKey`.
+**Size Scanning** — `scanRegionSize(task)` iterates entries across `CF_DEFAULT`, `CF_LOCK`, `CF_WRITE` within `[StartKey, EndKey)`. It accumulates key-value sizes and records a midpoint split key. When selecting a split key at approximately the midpoint, the scanner decodes the MVCC-encoded key via `mvcc.DecodeKey()` to extract the raw user key, then re-encodes it as `mvcc.EncodeLockKey()` (memcomparable encoding, without timestamp). This ensures region boundaries use a consistent format that matches all routing operations (PD key lookup, client region cache, modify grouping). If decoding fails, the raw key bytes are used as a fallback. If the total size exceeds `SplitSize`, the midpoint split key is returned as `SplitKey`.
 
 **Split Execution** — `ExecBatchSplit(region, splitKeys, newRegionIDs, newPeerIDs)` creates new region metadata:
 1. Validates that split keys fall within the region's range and are in order.
@@ -789,7 +789,7 @@ This is used after a peer is removed via conf change or region merge.
 - **Significant messages** — All three `SignificantMsgType` values are fully handled in `handleSignificantMessage()`: `Unreachable` → `rawNode.ReportUnreachable`, `SnapshotStatus` → `rawNode.ReportSnapshot`, `MergeResult` → `stopped = true`.
 - **PD scheduling messages** — `PeerMsgTypeSchedule` (value 8) dispatches to `handleScheduleMessage()`. Only the leader executes; routes `TransferLeader`, `ChangePeer`, and `Merge` commands from PD's scheduler.
 - **Snapshot transfer** — Fully wired end-to-end: `PeerStorage.Snapshot()` → `SnapWorker` generation → `handleReady` applies snapshots → `sendRaftMessage` detects `MsgSnap` → `SendSnapshot` streaming → remote `Snapshot` gRPC handler → `HandleSnapshotMessage` → `ApplySnapshot` → `reportSnapshotStatus`.
-- **PD-coordinated split** — Wired end-to-end. Peers call `onSplitCheckTick()` at a configurable interval (`SplitCheckTickInterval`, default 10s) when acting as leader, sending `SplitCheckTask` to the `SplitCheckWorker` via `splitCheckCh`. The `StoreCoordinator.RunSplitResultHandler()` processes results: calls `AskBatchSplit` on PD for new IDs, executes `ExecBatchSplit`, bootstraps child regions via `CreatePeer`, and reports splits to PD via `ReportBatchSplit`.
+- **PD-coordinated split** — Wired end-to-end. Peers call `onSplitCheckTick()` at a configurable interval (`SplitCheckTickInterval`, default 10s) when acting as leader, sending `SplitCheckTask` to the `SplitCheckWorker` via `splitCheckCh`. The `StoreCoordinator.RunSplitResultHandler()` processes results: calls `AskBatchSplit` on PD for new IDs, executes `ExecBatchSplit`, bootstraps child regions via `CreatePeer` (on bootstrap failure, continues to the next region), sends a `PeerMsgTypeTick` to each new region to force immediate Raft activity (triggering `MsgVote` to followers for prompt peer creation on other nodes), and reports splits to PD via `ReportBatchSplit`.
 
 ### Not Implemented
 

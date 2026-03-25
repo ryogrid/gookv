@@ -586,7 +586,14 @@ func (sc *StoreCoordinator) handleSplitCheckResult(result split.SplitCheckResult
 		if err := sc.BootstrapRegion(newRegion, raftPeers); err != nil {
 			slog.Warn("split: failed to bootstrap child region",
 				"region", newRegion.GetId(), "err", err)
+			continue
 		}
+
+		// Force immediate Raft activity on the new peer so it sends MsgVote
+		// to followers promptly (triggering peer creation on other nodes).
+		_ = sc.router.Send(newRegion.GetId(), raftstore.PeerMsg{
+			Type: raftstore.PeerMsgTypeTick,
+		})
 	}
 
 	// 6. Report all regions (parent + children) to PD.

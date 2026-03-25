@@ -69,9 +69,11 @@ func (s *RegionRequestSender) SendToRegion(ctx context.Context, key []byte, rpcF
 		regionErr, err := rpcFn(client, info)
 
 		if err != nil {
-			// gRPC-level error: invalidate and retry.
+			// gRPC-level error: invalidate region cache and retry.
+			// Do NOT close the connection — it may be shared by other goroutines,
+			// and closing it causes cascading "connection is closing" errors.
+			// gRPC handles reconnection automatically.
 			s.cache.InvalidateRegion(info.Region.GetId())
-			s.closeConn(info.StoreAddr)
 			lastRegionErr = fmt.Sprintf("grpc: %v", err)
 			continue
 		}

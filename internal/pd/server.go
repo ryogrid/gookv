@@ -839,8 +839,14 @@ func (s *PDServer) AskBatchSplit(ctx context.Context, req *pdpb.AskBatchSplitReq
 func (s *PDServer) ReportBatchSplit(ctx context.Context, req *pdpb.ReportBatchSplitRequest) (*pdpb.ReportBatchSplitResponse, error) {
 	if s.raftPeer == nil {
 		// Single-node mode: existing direct code.
+		// Set the first peer of each region as the leader. The caller is the
+		// leader that executed the split, and it's typically the first peer.
 		for _, region := range req.GetRegions() {
-			s.meta.PutRegion(region, nil)
+			var leader *metapb.Peer
+			if len(region.GetPeers()) > 0 {
+				leader = region.GetPeers()[0]
+			}
+			s.meta.PutRegion(region, leader)
 		}
 		return &pdpb.ReportBatchSplitResponse{Header: s.header()}, nil
 	}

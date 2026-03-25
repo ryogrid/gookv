@@ -465,3 +465,27 @@ If the lock resolver resolves Transfer 1's prewrite lock as "committed" (primary
 **The fundamental issue**: In cross-region 2PC, the commit of the primary key does NOT prevent another transaction from reading the secondary key at a stale timestamp. The secondary's prewrite lock should block the read, but if the lock is resolved (because the primary is committed), the read succeeds with the committed value. However, if the resolution commits the secondary, the subsequent prewrite's conflict check should detect it.
 
 The remaining question is: why does the conflict check miss the committed write?
+
+---
+
+## Bugs Found and Fixed (Latest)
+
+### Bug 4: GetWrite loop limit causes $0 balances (FIXED)
+
+`GetWrite` in `reader.go` used a `SeekBound*2` (64) iteration limit. When many Rollback records accumulated on a key (from concurrent transaction retries), the loop exhausted without reaching the underlying Put record → returned nil → balance = $0.
+
+**Fix**: Replaced the loop with a single-iterator scan that walks all write records without an artificial limit.
+
+### Bug 5: Lock resolver prematurely rollbacks secondaries (FIXED)
+
+`lock_resolver.go:resolveSingleLock()` called `checkTxnStatus(primary)` then always called `resolveLock(lock, commitTS)`. When the primary was still locked (transaction in progress), `commitTS=0` caused the secondary to be rolled back even though the primary might still commit.
+
+**Fix**: Added check — if primary is still locked (`lockTtl > 0 && commitVersion == 0`), return nil without resolving. The caller's retry loop will re-encounter the lock and try again later.
+
+### Bug 6: commitSecondary ignores KeyError in response (IDENTIFIED)
+
+`committer.go:commitSecondaries()` checked `resp.GetRegionError()` but not `resp.GetError()` (KeyError). When the server returned `txn_lock_not_found` (because lock resolver already resolved the lock), the error was silently ignored. This is mostly benign (lock was already resolved) but indicates the lock resolver's decision may have been wrong.
+
+### Remaining issue
+
+Balance still diverges ($10-$30 range) after all fixes. Per-transfer verification (VERIFY MISMATCH) shows credit amounts that don't match — `actual > expected` for the to-account, suggesting a prior committed value is visible instead of the new one. Root cause investigation continues.

@@ -82,6 +82,13 @@ func (lr *LockResolver) resolveSingleLock(ctx context.Context, lock *kvrpcpb.Loc
 		return fmt.Errorf("check txn status: %w", err)
 	}
 
+	// If the primary is still locked (transaction in progress), do NOT resolve
+	// the secondary — the transaction may still commit. Return nil to let the
+	// caller retry later (the Get retry loop will encounter the lock again).
+	if statusResp.GetLockTtl() > 0 && statusResp.GetCommitVersion() == 0 {
+		return nil // Primary still locked; wait for it to complete.
+	}
+
 	commitTS := txntypes.TimeStamp(statusResp.GetCommitVersion())
 
 	// Resolve the lock on this key.

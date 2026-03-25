@@ -265,6 +265,12 @@ func (c *twoPhaseCommitter) commitSecondaries(ctx context.Context) {
 				if resp.GetRegionError() != nil {
 					return resp.GetRegionError(), nil
 				}
+				if resp.GetError() != nil {
+					// Log but don't retry — secondary commit errors are expected
+					// when lock resolver already committed/rolled back the lock.
+					slog.Info("commitSecondary: key error (lock likely already resolved)",
+						"startTS", c.startTS, "err", resp.GetError().String())
+				}
 				return nil, nil
 			})
 			if err != nil {

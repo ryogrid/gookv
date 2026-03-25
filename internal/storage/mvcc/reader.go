@@ -74,33 +74,54 @@ func (r *MvccReader) SeekWrite(key Key, ts txntypes.TimeStamp) (*txntypes.Write,
 // GetWrite finds the latest data-changing write (Put or Delete) for key visible at ts.
 // Skips Lock and Rollback records, using the LastChange optimization when available.
 func (r *MvccReader) GetWrite(key Key, ts txntypes.TimeStamp) (*txntypes.Write, txntypes.TimeStamp, error) {
-	seekTS := ts
-	for i := 0; i < SeekBound*2; i++ { // Safety limit to prevent infinite loops.
-		write, commitTS, err := r.SeekWrite(key, seekTS)
+	// Use a single iterator to scan all write records for this key,
+	// skipping Rollback and Lock records to find the latest data-changing write.
+	// This avoids the SeekBound limit issue when many rollback records exist.
+	encodedUserKey := EncodeLockKey(key)
+	seekKey := EncodeKey(key, ts)
+
+	iter := r.snapshot.NewIterator(cfnames.CFWrite, traits.IterOptions{})
+	defer iter.Close()
+
+	iter.Seek(seekKey)
+	for iter.Valid() {
+		foundKey := iter.Key()
+		foundUserKey := TruncateToUserKey(foundKey)
+		if !bytes.Equal(foundUserKey, encodedUserKey) {
+			break // Moved past this key's write records.
+		}
+
+		_, commitTS, err := DecodeKey(foundKey)
 		if err != nil {
 			return nil, 0, err
 		}
-		if write == nil {
-			return nil, 0, nil
+
+		write, err := txntypes.UnmarshalWrite(iter.Value())
+		if err != nil {
+			return nil, 0, err
 		}
 
 		switch write.WriteType {
 		case txntypes.WriteTypePut:
 			return write, commitTS, nil
 		case txntypes.WriteTypeDelete:
-			return nil, 0, nil // Deleted.
+			return nil, 0, nil
 		case txntypes.WriteTypeLock, txntypes.WriteTypeRollback:
 			// Skip non-data-changing records.
 			if write.LastChange.EstimatedVersions >= SeekBound && !write.LastChange.TS.IsZero() {
 				// Use LastChange optimization: jump directly to last data version.
-				seekTS = write.LastChange.TS
-			} else {
-				seekTS = commitTS.Prev()
+				jumpKey := EncodeKey(key, write.LastChange.TS)
+				iter.Seek(jumpKey)
+				continue
 			}
+			iter.Next()
 			continue
 		default:
 			return nil, 0, nil
 		}
+	}
+	if err := iter.Error(); err != nil {
+		return nil, 0, err
 	}
 	return nil, 0, nil
 }

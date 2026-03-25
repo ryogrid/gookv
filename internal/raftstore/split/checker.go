@@ -8,6 +8,7 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/ryogrid/gookv/internal/engine/traits"
+	"github.com/ryogrid/gookv/internal/storage/mvcc"
 	"github.com/ryogrid/gookv/pkg/cfnames"
 )
 
@@ -159,8 +160,17 @@ func (w *SplitCheckWorker) scanRegionSize(startKey, endKey []byte) (uint64, []by
 			totalSize += entrySize
 
 			// Record the split key at approximately the midpoint.
+			// Decode the MVCC-encoded key to extract the raw user key,
+			// then re-encode as EncodeLockKey (memcomparable, no timestamp).
+			// This ensures region boundaries use a consistent format
+			// that matches all routing operations.
 			if splitKey == nil && totalSize >= halfSize {
-				splitKey = append([]byte(nil), key...)
+				rawKey, _, decErr := mvcc.DecodeKey(key)
+				if decErr == nil && rawKey != nil {
+					splitKey = mvcc.EncodeLockKey(rawKey)
+				} else {
+					splitKey = append([]byte(nil), key...)
+				}
 			}
 
 			// Early exit if we exceed max size.

@@ -458,57 +458,54 @@ func (s *Storage) CleanupModifies(key []byte, startTS txntypes.TimeStamp) (txnty
 	reader := mvcc.NewMvccReader(snap)
 	defer reader.Close()
 
-	status, err := txn.CheckTxnStatus(reader, key, startTS)
-	if err != nil {
-		return 0, nil, err, guard
-	}
-	if status.CommitTS != 0 {
-		// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x ALREADY_COMMITTED commitTS=%d\n", key, status.CommitTS)
-		return status.CommitTS, nil, nil, guard
-	}
-	if status.IsRolledBack {
-		// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x ALREADY_ROLLED_BACK\n", key)
-		return 0, nil, nil, guard
-	}
-
+	// Check if a lock still exists on this key.
 	keyLock, err := reader.LoadLock(key)
 	if err != nil {
 		return 0, nil, err, guard
 	}
 	if keyLock == nil || keyLock.StartTS != startTS {
-		// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x NO_LOCK lockExists=%v\n", key, keyLock != nil)
-		return 0, nil, nil, guard
+		// No lock to clean — check if already resolved.
+		status, err := txn.CheckTxnStatus(reader, key, startTS)
+		if err != nil {
+			return 0, nil, err, guard
+		}
+		return status.CommitTS, nil, nil, guard
 	}
-	// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x LOCK_FOUND lockTS=%d primary=%x\n", key, keyLock.StartTS, keyLock.Primary)
 
+	// Lock exists. Check primary key's status to determine commit vs rollback.
 	primaryKey := keyLock.Primary
 	mvccTxn := mvcc.NewMvccTxn(startTS)
 
 	primaryStatus, err := txn.CheckTxnStatus(reader, primaryKey, startTS)
 	if err != nil {
-		// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x PRIMARY_CHECK_ERR=%v\n", key, err)
-		if rbErr := txn.Rollback(mvccTxn, reader, key, startTS); rbErr != nil {
-			return 0, nil, rbErr, guard
-		}
+		// Primary check failed — force-remove the lock.
+		mvccTxn.UnlockKey(key, keyLock.LockType == txntypes.LockTypePessimistic)
 		return 0, mvccTxn.Modifies, nil, guard
 	}
 
-	// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x PRIMARY_STATUS locked=%v committed=%d rolledBack=%v\n",
-	//	key, primaryStatus.IsLocked, primaryStatus.CommitTS, primaryStatus.IsRolledBack)
-
 	if primaryStatus.CommitTS != 0 {
+		// Primary was committed — commit this secondary.
+		// Use ResolveLock which handles lock→commit conversion.
 		if err := txn.ResolveLock(mvccTxn, reader, key, startTS, primaryStatus.CommitTS); err != nil {
-			// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x RESOLVE_ERR=%v\n", key, err)
 			return 0, nil, err, guard
 		}
-		// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x RESOLVED_COMMIT modifies=%d\n", key, len(mvccTxn.Modifies))
 		return primaryStatus.CommitTS, mvccTxn.Modifies, nil, guard
 	}
 
-	if err := txn.Rollback(mvccTxn, reader, key, startTS); err != nil {
-		return 0, nil, err, guard
+	// Primary was rolled back, not found, or still locked — rollback this key.
+	// Directly remove the lock and write rollback record, bypassing Rollback's
+	// idempotency check which would skip lock removal if a rollback record
+	// already exists from a previous partial rollback.
+	isPessimistic := keyLock.LockType == txntypes.LockTypePessimistic
+	mvccTxn.UnlockKey(key, isPessimistic)
+	if keyLock.ShortValue == nil && keyLock.LockType == txntypes.LockTypePut {
+		mvccTxn.DeleteValue(key, startTS)
 	}
-	// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x ROLLED_BACK modifies=%d\n", key, len(mvccTxn.Modifies))
+	rollbackWrite := &txntypes.Write{
+		WriteType: txntypes.WriteTypeRollback,
+		StartTS:   startTS,
+	}
+	mvccTxn.PutWrite(key, startTS, rollbackWrite)
 	return 0, mvccTxn.Modifies, nil, guard
 }
 

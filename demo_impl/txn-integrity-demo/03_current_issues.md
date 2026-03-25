@@ -381,3 +381,35 @@ The issue must be in the server-side transaction processing. Possible causes:
 **Most likely**: Item 3 + the `CleanupModifies` making wrong commit/rollback decisions for orphan locks. When `CleanupModifies` finds a locked secondary whose primary is "still locked" (another transaction hasn't finished), it currently **rollbacks the secondary**. But the primary may subsequently commit, resulting in: primary committed (debit applied) but secondary rolled back (credit lost).
 
 This matches the observed +$X deviation: credits are lost when secondaries are prematurely rolled back.
+
+---
+
+## Status After Isolation Testing
+
+### Test matrix (commit `642607d5e`)
+
+| Workers | Regions | Transfers | Balance | Result |
+|---------|---------|-----------|---------|--------|
+| 1 | 3+ (split) | 507 | $100,000 | **PASS** |
+| 1 | 1 (no split) | — | $100,000 | **PASS** |
+| 2 | 1 (no split) | 532 | $100,000 | **PASS** |
+| 2 | 3+ (split) | 536 | $99,966 | **FAIL** |
+| 32 | 3+ (split) | 555 | $100,022 | **FAIL** |
+
+### Conclusion
+
+**The bug is exclusively in cross-region transactions under concurrency.** Single-region transactions work correctly at any concurrency level. Single-worker cross-region transactions also work correctly. The combination of concurrency + cross-region triggers the bug.
+
+### What this means
+
+The cross-region 2PC protocol involves:
+1. Prewrite to Region A (primary key) — separate KvPrewrite RPC
+2. Prewrite to Region B (secondary key) — separate KvPrewrite RPC
+3. Commit primary to Region A — separate KvCommit RPC
+4. Commit secondary to Region B — separate KvCommit RPC (best-effort)
+
+Between steps 1 and 2, or between 3 and 4, another transaction can interleave. The Prewrite conflict check should detect this, and the lock resolution protocol should handle orphan locks. But something is failing in the combination.
+
+### Next investigation step
+
+Add per-transaction trace logging to identify which specific transaction(s) cause balance divergence, then cross-reference with server-side Raft proposal outcomes.

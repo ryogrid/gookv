@@ -157,8 +157,110 @@ flowchart TD
     style G fill:#dfd,stroke:#0a0
 ```
 
-**Option C (most targeted)**: Modify `CleanupModifies` to not rely on `Rollback`'s idempotency check. Instead, directly check CF_LOCK for the lock and generate a delete modify regardless of whether a rollback record exists. This ensures the lock is always cleaned up even if a previous partial rollback left the rollback record but not the lock deletion.
+**Option A+E applied** (commit `452017305`): Both the split checker fix and CleanupModifies fix were implemented. See results below.
 
-**Option A (most correct)**: Fix the split checker to produce raw-key boundaries (matching TiKV behavior). This would fix all routing issues at the root but is a larger change.
+---
 
-**Option F (most practical for demo)**: Make the demo's `cleanupOrphanLocks` send proper `RegionId` in the request context by querying PD for the key's region first.
+## Status After Split Checker + CleanupModifies Fix
+
+### What was fixed
+
+1. **Split checker** (`internal/raftstore/split/checker.go`): `scanRegionSize` now decodes the MVCC-encoded key from the engine iterator to a raw user key, then re-encodes as `EncodeLockKey` (memcomparable, no timestamp). Region boundaries now use a consistent format.
+
+2. **CleanupModifies** (`internal/server/storage.go`): No longer checks rollback records first. Instead, checks CF_LOCK for the lock directly. If a lock exists, always generates lock-removal modifies regardless of whether a rollback record already exists.
+
+### What improved
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Orphan lock cleanup | Loops forever (same locks each pass) | Completes in 1 pass |
+| SI read in Phase 3 | Fails (lock resolution exhausted) | Succeeds |
+| RC fallback needed | Always | Never |
+| Region boundary format | `EncodeLockKey + timestamp` | `EncodeLockKey` (no timestamp) |
+
+### What still fails
+
+**Balance diverges by $100–$200 in both directions** (sometimes over, sometimes under $100,000):
+
+```
+Run 1: Total = $100,018 (+$18)
+Run 2: Total = $99,844  (-$156)
+```
+
+This is NOT a lock/cleanup issue (those are resolved). The divergence indicates a **write conflict detection or atomicity failure** during Phase 2 concurrent transfers.
+
+---
+
+## Remaining Issue: Write Conflict Detection Under Concurrency
+
+### Symptom
+
+With 32 workers performing ~300 transfers in 30 seconds, the final balance is off by $18–$200. The direction (over/under) varies between runs.
+
+### Hypothesis: Latch-Raft Window Allows Lost Updates
+
+The LatchGuard fix holds the latch from snapshot creation through Raft proposal completion. However, there may still be a window where two transactions on **different nodes** (different region leaders) can both read the same stale value and produce conflicting writes.
+
+```mermaid
+sequenceDiagram
+    participant TxnA as Txn A (Node 1)
+    participant TxnB as Txn B (Node 2)
+    participant Region as Region Leader (Node 1)
+
+    Note over TxnA,TxnB: Both read acct:0500 = $80
+
+    TxnA->>Region: KvPrewrite(acct:0500 = $60)
+    Note over Region: Latch acquired, snapshot, prewrite OK
+    Region->>Region: ProposeModifies → Raft apply
+    Note over Region: Latch released
+
+    TxnB->>Region: KvPrewrite(acct:0500 = $50)
+    Note over Region: Latch acquired, NEW snapshot
+    Note over Region: Sees TxnA's lock → KeyLockedError
+    Region-->>TxnB: error: key locked
+
+    TxnB->>TxnB: Resolve lock? Retry?
+```
+
+In this scenario, the latch correctly serializes access. TxnB sees TxnA's lock and gets `KeyLockedError`. The client retries with `ErrWriteConflict`.
+
+**But what if TxnA's prewrite lock is on a DIFFERENT region's leader?**
+
+```mermaid
+sequenceDiagram
+    participant TxnA as Txn A
+    participant Node1 as Node 1 (Region A leader)
+    participant Node2 as Node 2 (Region B leader)
+
+    Note over TxnA: Transfer: acct:0100 (Region A) → acct:0500 (Region B)
+    Note over TxnA: primary = acct:0100
+
+    TxnA->>Node1: KvPrewrite(acct:0100 = $60) [Region A]
+    Note over Node1: Latch on acct:0100 held
+    Node1->>Node1: Raft propose + apply
+    Note over Node1: Latch released
+
+    TxnA->>Node2: KvPrewrite(acct:0500 = $120) [Region B]
+    Note over Node2: Latch on acct:0500 held
+    Node2->>Node2: Raft propose + apply
+    Note over Node2: Latch released
+
+    Note over TxnA: Both prewrites succeed
+    Note over TxnA: But between prewrite and commit...
+    Note over TxnA: another txn may have committed acct:0100
+    Note over TxnA: TxnA's commit checks lock ownership → fails?
+```
+
+The Prewrite conflict check (`SeekWrite` for commitTS > startTS) relies on the **snapshot** taken at prewrite time. If the snapshot is stale (doesn't include a concurrent commit), the prewrite succeeds but produces an incorrect value.
+
+### Investigation needed
+
+1. **Is the Prewrite write-conflict check correct?** Compare `SeekWrite(key, TSMax)` logic with TiKV's implementation.
+2. **Can two transactions both prewrite the same key?** The latch prevents this on the same node/region, but what about across regions for different keys in the same transaction?
+3. **Is the read value used for balance computation stale?** The `Get()` reads at `startTS`, and `Set()` uses the computed balance. If another transaction commits between the read and the prewrite, the prewrite's conflict check should catch it. But does it?
+
+### Next steps
+
+- Add per-transaction logging in Phase 2 to capture: startTS, keys, read values, computed amounts, commit result
+- Cross-reference with the actual final balances to identify which transaction(s) caused the discrepancy
+- Compare `Prewrite` conflict detection with TiKV's `check_for_newer_version` implementation

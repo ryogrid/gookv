@@ -180,7 +180,11 @@ func (c *twoPhaseCommitter) prewriteRegion(ctx context.Context, muts []mutationW
 				return nil, ErrWriteConflict
 			}
 			if keyErr.GetLocked() != nil {
-				return nil, fmt.Errorf("key locked during prewrite: %s", keyErr.String())
+				// Resolve the conflicting lock, then signal retry.
+				if lockInfo := keyErr.GetLocked(); lockInfo.GetLockVersion() > 0 {
+					_ = c.client.resolver.ResolveLocks(ctx, []*kvrpcpb.LockInfo{lockInfo})
+				}
+				return nil, ErrWriteConflict
 			}
 			return nil, fmt.Errorf("prewrite error: %s", keyErr.String())
 		}

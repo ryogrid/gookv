@@ -280,7 +280,8 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 			// On PD error, fall back to startTS+1.
 		}
 		if coord := svc.server.coordinator; coord != nil {
-			modifies, errs, onePCCommitTS := svc.server.storage.Prewrite1PCModifies(mutations, primary, startTS, commitTS, lockTTL)
+			modifies, errs, onePCCommitTS, guard := svc.server.storage.Prewrite1PCModifies(mutations, primary, startTS, commitTS, lockTTL)
+			defer svc.server.storage.ReleaseLatch(guard)
 			for _, err := range errs {
 				if err != nil {
 					resp.Errors = append(resp.Errors, errToKeyError(err))
@@ -325,7 +326,8 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 			// On PD error, proceed with maxCommitTS=0 (fallback behavior).
 		}
 		if coord := svc.server.coordinator; coord != nil {
-			modifies, errs, minCommitTS := svc.server.storage.PrewriteAsyncCommitModifies(mutations, primary, startTS, lockTTL, secondaries, maxCommitTS)
+			modifies, errs, minCommitTS, guard := svc.server.storage.PrewriteAsyncCommitModifies(mutations, primary, startTS, lockTTL, secondaries, maxCommitTS)
+			defer svc.server.storage.ReleaseLatch(guard)
 			for _, err := range errs {
 				if err != nil {
 					resp.Errors = append(resp.Errors, errToKeyError(err))
@@ -365,7 +367,8 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 	// All mutations in a single prewrite request belong to the same region
 	// (the client groups by region). Use the request's region context.
 	if coord := svc.server.coordinator; coord != nil {
-		modifies, errs := svc.server.storage.PrewriteModifies(mutations, primary, startTS, lockTTL)
+		modifies, errs, guard := svc.server.storage.PrewriteModifies(mutations, primary, startTS, lockTTL)
+		defer svc.server.storage.ReleaseLatch(guard)
 		for _, err := range errs {
 			if err != nil {
 				keyErr := errToKeyError(err)
@@ -412,7 +415,8 @@ func (svc *tikvService) KvCommit(ctx context.Context, req *kvrpcpb.CommitRequest
 	// Cluster mode: compute modifications then propose via Raft.
 	// All keys in a commit request belong to the same region (client groups by region).
 	if coord := svc.server.coordinator; coord != nil {
-		modifies, err := svc.server.storage.CommitModifies(keys, startTS, commitTS)
+		modifies, err, guard := svc.server.storage.CommitModifies(keys, startTS, commitTS)
+		defer svc.server.storage.ReleaseLatch(guard)
 		if err != nil {
 			resp.Error = errToKeyError(err)
 			return resp, nil
@@ -482,17 +486,25 @@ func (svc *tikvService) KvBatchRollback(ctx context.Context, req *kvrpcpb.BatchR
 	startTS := txntypes.TimeStamp(req.GetStartVersion())
 
 	if coord := svc.server.coordinator; coord != nil {
-		modifies, err := svc.server.storage.BatchRollbackModifies(keys, startTS)
+		modifies, err, guard := svc.server.storage.BatchRollbackModifies(keys, startTS)
+		defer svc.server.storage.ReleaseLatch(guard)
 		if err != nil {
 			resp.Error = errToKeyError(err)
 			return resp, nil
 		}
 		if len(modifies) > 0 {
-			if regErr, propErr := svc.proposeModifiesToRegionsWithRegionError(coord, modifies, 10*time.Second); regErr != nil {
-				resp.RegionError = regErr
-				return resp, nil
-			} else if propErr != nil {
-				return nil, status.Errorf(codes.Internal, "raft propose failed: %v", propErr)
+			// The client groups keys by region, so all keys belong to the same region.
+			// Use the request's region context for direct proposal (same as KvPrewrite/KvCommit).
+			regionID := req.GetContext().GetRegionId()
+			if regionID == 0 {
+				regionID = svc.resolveRegionID(keys[0])
+			}
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
+					resp.RegionError = regErr
+					return resp, nil
+				}
+				return nil, status.Errorf(codes.Internal, "raft propose failed: %v", err)
 			}
 		}
 		return resp, nil
@@ -509,6 +521,40 @@ func (svc *tikvService) KvBatchRollback(ctx context.Context, req *kvrpcpb.BatchR
 // KvCleanup implements lock cleanup.
 func (svc *tikvService) KvCleanup(ctx context.Context, req *kvrpcpb.CleanupRequest) (*kvrpcpb.CleanupResponse, error) {
 	resp := &kvrpcpb.CleanupResponse{}
+
+	if coord := svc.server.coordinator; coord != nil {
+		commitTS, modifies, err, guard := svc.server.storage.CleanupModifies(
+			req.GetKey(),
+			txntypes.TimeStamp(req.GetStartVersion()),
+		)
+		defer svc.server.storage.ReleaseLatch(guard)
+		if err != nil {
+			// fmt.Fprintf(os.Stderr, "[DEBUG KvCleanup] key=%x err=%v\n", req.GetKey(), err)
+			resp.Error = errToKeyError(err)
+			return resp, nil
+		}
+		if len(modifies) > 0 {
+			// Cleanup is a single-key operation. Use request region context for direct proposal.
+			regionID := req.GetContext().GetRegionId()
+			if regionID == 0 {
+				regionID = svc.resolveRegionID(req.GetKey())
+			}
+			if regionID == 0 {
+				regionID = 1
+			}
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
+					resp.RegionError = regErr
+					return resp, nil
+				}
+				return nil, status.Errorf(codes.Internal, "raft propose failed: %v", err)
+			}
+		}
+		if commitTS != 0 {
+			resp.CommitVersion = uint64(commitTS)
+		}
+		return resp, nil
+	}
 
 	commitTS, err := svc.server.storage.Cleanup(
 		req.GetKey(),
@@ -533,9 +579,10 @@ func (svc *tikvService) KvCheckTxnStatus(ctx context.Context, req *kvrpcpb.Check
 	callerStartTS := txntypes.TimeStamp(req.GetCallerStartTs())
 	rollbackIfNotExist := req.GetRollbackIfNotExist()
 
-	txnStatus, modifies, err := svc.server.storage.CheckTxnStatusWithCleanup(
+	txnStatus, modifies, err, guard := svc.server.storage.CheckTxnStatusWithCleanup(
 		req.GetPrimaryKey(), startTS, callerStartTS, rollbackIfNotExist,
 	)
+	defer svc.server.storage.ReleaseLatch(guard)
 	if err != nil {
 		resp.Error = errToKeyError(err)
 		return resp, nil
@@ -545,11 +592,20 @@ func (svc *tikvService) KvCheckTxnStatus(ctx context.Context, req *kvrpcpb.Check
 	// apply them through Raft in cluster mode, or directly in standalone mode.
 	if len(modifies) > 0 {
 		if coord := svc.server.coordinator; coord != nil {
-			if regErr, propErr := svc.proposeModifiesToRegionsWithRegionError(coord, modifies, 10*time.Second); regErr != nil {
-				resp.RegionError = regErr
-				return resp, nil
-			} else if propErr != nil {
-				return nil, status.Errorf(codes.Internal, "raft propose failed: %v", propErr)
+			// CheckTxnStatus is a single-key operation. Use request region context.
+			regionID := req.GetContext().GetRegionId()
+			if regionID == 0 {
+				regionID = svc.resolveRegionID(req.GetPrimaryKey())
+			}
+			if regionID == 0 {
+				regionID = 1
+			}
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
+					resp.RegionError = regErr
+					return resp, nil
+				}
+				return nil, status.Errorf(codes.Internal, "raft propose failed: %v", err)
 			}
 		} else {
 			if err := svc.server.storage.ApplyModifies(modifies); err != nil {
@@ -589,7 +645,8 @@ func (svc *tikvService) KvPessimisticLock(ctx context.Context, req *kvrpcpb.Pess
 	lockTTL := req.GetLockTtl()
 
 	if coord := svc.server.coordinator; coord != nil {
-		modifies, errs := svc.server.storage.PessimisticLockModifies(keys, primary, startTS, forUpdateTS, lockTTL)
+		modifies, errs, guard := svc.server.storage.PessimisticLockModifies(keys, primary, startTS, forUpdateTS, lockTTL)
+		defer svc.server.storage.ReleaseLatch(guard)
 		for _, err := range errs {
 			if err != nil {
 				resp.Errors = append(resp.Errors, errToKeyError(err))
@@ -651,17 +708,28 @@ func (svc *tikvService) KvResolveLock(ctx context.Context, req *kvrpcpb.ResolveL
 	commitTS := txntypes.TimeStamp(req.GetCommitVersion())
 
 	if coord := svc.server.coordinator; coord != nil {
-		modifies, err := svc.server.storage.ResolveLockModifies(startTS, commitTS, req.GetKeys())
+		modifies, err, guard := svc.server.storage.ResolveLockModifies(startTS, commitTS, req.GetKeys())
+		defer svc.server.storage.ReleaseLatch(guard)
 		if err != nil {
 			resp.Error = errToKeyError(err)
 			return resp, nil
 		}
 		if len(modifies) > 0 {
-			if regErr, propErr := svc.proposeModifiesToRegionsWithRegionError(coord, modifies, 10*time.Second); regErr != nil {
-				resp.RegionError = regErr
-				return resp, nil
-			} else if propErr != nil {
-				return nil, status.Errorf(codes.Internal, "raft propose failed: %v", propErr)
+			// The client sends keys belonging to a single region.
+			// Use the request's region context for direct proposal.
+			regionID := req.GetContext().GetRegionId()
+			if regionID == 0 && len(req.GetKeys()) > 0 {
+				regionID = svc.resolveRegionID(req.GetKeys()[0])
+			}
+			if regionID == 0 {
+				regionID = 1
+			}
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
+					resp.RegionError = regErr
+					return resp, nil
+				}
+				return nil, status.Errorf(codes.Internal, "raft propose failed: %v", err)
 			}
 		}
 	} else {
@@ -828,11 +896,14 @@ func (svc *tikvService) RawGet(ctx context.Context, req *kvrpcpb.RawGetRequest) 
 }
 
 // resolveRegionID returns the region ID for the given key using the coordinator's
-// region routing. Falls back to region ID 1 if the coordinator has no ResolveRegionForKey
-// or if the key doesn't match any region.
+// region routing. The key is a raw user key; it is encoded via EncodeLockKey before
+// comparison with region boundaries (which are MVCC-encoded).
+// Falls back to region ID 1 if no matching region is found.
 func (svc *tikvService) resolveRegionID(key []byte) uint64 {
 	if coord := svc.server.coordinator; coord != nil {
-		if rid := coord.ResolveRegionForKey(key); rid != 0 {
+		// Encode raw user key to match region boundary format.
+		encodedKey := mvcc.EncodeLockKey(key)
+		if rid := coord.ResolveRegionForKey(encodedKey); rid != 0 {
 			return rid
 		}
 	}
@@ -845,9 +916,17 @@ func (svc *tikvService) resolveRegionID(key []byte) uint64 {
 func (svc *tikvService) groupModifiesByRegion(modifies []mvcc.Modify) map[uint64][]mvcc.Modify {
 	groups := make(map[uint64][]mvcc.Modify)
 	for _, m := range modifies {
-		// Use the encoded key directly for region routing. Region boundaries
-		// also use encoded keys, so matching is correct.
-		regionID := svc.resolveRegionID(m.Key)
+		// Decode the modify key to the raw user key, then re-encode as
+		// EncodeLockKey (without timestamp) for consistent region routing.
+		// This ensures CF_LOCK keys and CF_WRITE keys (which have a timestamp
+		// suffix) route to the same region for the same user key.
+		rawKey, _, _ := mvcc.DecodeKey(m.Key)
+		routingKey := m.Key // fallback: use as-is if decode fails
+		if rawKey != nil {
+			routingKey = mvcc.EncodeLockKey(rawKey)
+		}
+		regionID := svc.resolveRegionID(routingKey)
+		// fmt.Fprintf(os.Stderr, "[DEBUG groupModifies] cf=%s rawKey=%s routingKey=%x regionID=%d\n", m.CF, rawKey, routingKey, regionID)
 		groups[regionID] = append(groups[regionID], m)
 	}
 	return groups
@@ -866,15 +945,28 @@ func (svc *tikvService) proposeModifiesToRegions(coord *StoreCoordinator, modifi
 
 // proposeModifiesToRegionsWithRegionError is like proposeModifiesToRegions but returns
 // a structured region error instead of a plain error when the failure is a routing error.
+// It attempts to propose to ALL regions even if some fail (best-effort for multi-region
+// operations like BatchRollback where this node may not be leader for all target regions).
+// Returns the LAST region error encountered, or nil if all succeeded.
 func (svc *tikvService) proposeModifiesToRegionsWithRegionError(coord *StoreCoordinator, modifies []mvcc.Modify, timeout time.Duration) (*errorpb.Error, error) {
 	groups := svc.groupModifiesByRegion(modifies)
+	var lastRegErr *errorpb.Error
+	var lastErr error
 	for regionID, regionModifies := range groups {
 		if err := coord.ProposeModifies(regionID, regionModifies, timeout); err != nil {
 			if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
-				return regErr, nil
+				lastRegErr = regErr
+				continue // try remaining regions
 			}
-			return nil, err
+			lastErr = err
+			continue // try remaining regions
 		}
+	}
+	if lastRegErr != nil {
+		return lastRegErr, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
 	}
 	return nil, nil
 }
@@ -1540,7 +1632,25 @@ func errToKeyError(err error) *kvrpcpb.KeyError {
 
 	switch {
 	case errors.Is(err, txn.ErrKeyIsLocked):
-		keyErr.Locked = &kvrpcpb.LockInfo{}
+		var kle *txn.KeyLockedError
+		var lockErr *mvcc.LockError
+		if errors.As(err, &kle) && kle.Lock != nil {
+			keyErr.Locked = &kvrpcpb.LockInfo{
+				PrimaryLock: kle.Lock.Primary,
+				LockVersion: uint64(kle.Lock.StartTS),
+				Key:         kle.Key,
+				LockTtl:     kle.Lock.TTL,
+			}
+		} else if errors.As(err, &lockErr) && lockErr.Lock != nil {
+			keyErr.Locked = &kvrpcpb.LockInfo{
+				PrimaryLock: lockErr.Lock.Primary,
+				LockVersion: uint64(lockErr.Lock.StartTS),
+				Key:         lockErr.Key,
+				LockTtl:     lockErr.Lock.TTL,
+			}
+		} else {
+			keyErr.Locked = &kvrpcpb.LockInfo{}
+		}
 	case errors.Is(err, txn.ErrWriteConflict):
 		keyErr.Conflict = &kvrpcpb.WriteConflict{}
 	case errors.Is(err, txn.ErrTxnLockNotFound):

@@ -44,6 +44,23 @@ func (s *Storage) allocCmdID() uint64 {
 	return id
 }
 
+// LatchGuard holds a latch that must be released after the caller finishes
+// proposing modifications to Raft. This ensures the latch is held across
+// the Raft proposal, preventing concurrent transactions from reading stale
+// snapshots before the modifications are applied.
+type LatchGuard struct {
+	lock  *latch.Lock
+	cmdID uint64
+}
+
+// ReleaseLatch releases a LatchGuard obtained from a *Modifies method.
+// Safe to call with nil (no-op).
+func (s *Storage) ReleaseLatch(g *LatchGuard) {
+	if g != nil {
+		s.latches.Release(g.lock, g.cmdID)
+	}
+}
+
 // ApplyModifies writes the accumulated MVCC modifications to the engine atomically.
 // Exported so coordinator can call it from applyFunc.
 func (s *Storage) ApplyModifies(modifies []mvcc.Modify) error {
@@ -156,7 +173,8 @@ func (s *Storage) BatchGet(keys [][]byte, version txntypes.TimeStamp) ([]*KvPair
 
 // PrewriteModifies performs the first phase of 2PC and returns the MVCC modifications
 // without applying them to the engine. Used in cluster mode to propose via Raft.
-func (s *Storage) PrewriteModifies(mutations []txn.Mutation, primary []byte, startTS txntypes.TimeStamp, lockTTL uint64) ([]mvcc.Modify, []error) {
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) PrewriteModifies(mutations []txn.Mutation, primary []byte, startTS txntypes.TimeStamp, lockTTL uint64) ([]mvcc.Modify, []error, *LatchGuard) {
 	keys := make([][]byte, len(mutations))
 	for i, m := range mutations {
 		keys[i] = m.Key
@@ -166,7 +184,7 @@ func (s *Storage) PrewriteModifies(mutations []txn.Mutation, primary []byte, sta
 	lock := s.latches.GenLock(keys)
 	for !s.latches.Acquire(lock, cmdID) {
 	}
-	defer s.latches.Release(lock, cmdID)
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
 	reader := mvcc.NewMvccReader(snap)
@@ -193,21 +211,22 @@ func (s *Storage) PrewriteModifies(mutations []txn.Mutation, primary []byte, sta
 
 	for _, err := range errs {
 		if err != nil {
-			return nil, errs
+			return nil, errs, guard
 		}
 	}
 
-	return mvccTxn.Modifies, errs
+	return mvccTxn.Modifies, errs, guard
 }
 
 // CommitModifies performs the second phase of 2PC and returns the MVCC modifications
 // without applying them to the engine. Used in cluster mode to propose via Raft.
-func (s *Storage) CommitModifies(keys [][]byte, startTS, commitTS txntypes.TimeStamp) ([]mvcc.Modify, error) {
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) CommitModifies(keys [][]byte, startTS, commitTS txntypes.TimeStamp) ([]mvcc.Modify, error, *LatchGuard) {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
 	for !s.latches.Acquire(lock, cmdID) {
 	}
-	defer s.latches.Release(lock, cmdID)
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
 	reader := mvcc.NewMvccReader(snap)
@@ -217,11 +236,11 @@ func (s *Storage) CommitModifies(keys [][]byte, startTS, commitTS txntypes.TimeS
 
 	for _, key := range keys {
 		if err := txn.Commit(mvccTxn, reader, key, startTS, commitTS); err != nil {
-			return nil, err
+			return nil, err, guard
 		}
 	}
 
-	return mvccTxn.Modifies, nil
+	return mvccTxn.Modifies, nil, guard
 }
 
 // Prewrite performs the first phase of 2PC for multiple mutations.
@@ -335,12 +354,13 @@ func (s *Storage) BatchRollback(keys [][]byte, startTS txntypes.TimeStamp) error
 
 // BatchRollbackModifies rolls back a transaction's locks and returns MVCC modifications
 // without applying them to the engine. Used in cluster mode to propose via Raft.
-func (s *Storage) BatchRollbackModifies(keys [][]byte, startTS txntypes.TimeStamp) ([]mvcc.Modify, error) {
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) BatchRollbackModifies(keys [][]byte, startTS txntypes.TimeStamp) ([]mvcc.Modify, error, *LatchGuard) {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
 	for !s.latches.Acquire(lock, cmdID) {
 	}
-	defer s.latches.Release(lock, cmdID)
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
 	reader := mvcc.NewMvccReader(snap)
@@ -350,11 +370,11 @@ func (s *Storage) BatchRollbackModifies(keys [][]byte, startTS txntypes.TimeStam
 
 	for _, key := range keys {
 		if err := txn.Rollback(mvccTxn, reader, key, startTS); err != nil {
-			return nil, err
+			return nil, err, guard
 		}
 	}
 
-	return mvccTxn.Modifies, nil
+	return mvccTxn.Modifies, nil, guard
 }
 
 // Cleanup cleans up a transaction lock on a key (same as rollback for a single key).
@@ -423,6 +443,75 @@ func (s *Storage) Cleanup(key []byte, startTS txntypes.TimeStamp) (txntypes.Time
 	return 0, s.ApplyModifies(mvccTxn.Modifies)
 }
 
+// CleanupModifies is like Cleanup but returns modifications instead of applying.
+// Used in cluster mode to propose via Raft.
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) CleanupModifies(key []byte, startTS txntypes.TimeStamp) (txntypes.TimeStamp, []mvcc.Modify, error, *LatchGuard) {
+	keys := [][]byte{key}
+	cmdID := s.allocCmdID()
+	lock := s.latches.GenLock(keys)
+	for !s.latches.Acquire(lock, cmdID) {
+	}
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
+
+	snap := s.engine.NewSnapshot()
+	reader := mvcc.NewMvccReader(snap)
+	defer reader.Close()
+
+	status, err := txn.CheckTxnStatus(reader, key, startTS)
+	if err != nil {
+		return 0, nil, err, guard
+	}
+	if status.CommitTS != 0 {
+		// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x ALREADY_COMMITTED commitTS=%d\n", key, status.CommitTS)
+		return status.CommitTS, nil, nil, guard
+	}
+	if status.IsRolledBack {
+		// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x ALREADY_ROLLED_BACK\n", key)
+		return 0, nil, nil, guard
+	}
+
+	keyLock, err := reader.LoadLock(key)
+	if err != nil {
+		return 0, nil, err, guard
+	}
+	if keyLock == nil || keyLock.StartTS != startTS {
+		// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x NO_LOCK lockExists=%v\n", key, keyLock != nil)
+		return 0, nil, nil, guard
+	}
+	// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x LOCK_FOUND lockTS=%d primary=%x\n", key, keyLock.StartTS, keyLock.Primary)
+
+	primaryKey := keyLock.Primary
+	mvccTxn := mvcc.NewMvccTxn(startTS)
+
+	primaryStatus, err := txn.CheckTxnStatus(reader, primaryKey, startTS)
+	if err != nil {
+		// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x PRIMARY_CHECK_ERR=%v\n", key, err)
+		if rbErr := txn.Rollback(mvccTxn, reader, key, startTS); rbErr != nil {
+			return 0, nil, rbErr, guard
+		}
+		return 0, mvccTxn.Modifies, nil, guard
+	}
+
+	// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x PRIMARY_STATUS locked=%v committed=%d rolledBack=%v\n",
+	//	key, primaryStatus.IsLocked, primaryStatus.CommitTS, primaryStatus.IsRolledBack)
+
+	if primaryStatus.CommitTS != 0 {
+		if err := txn.ResolveLock(mvccTxn, reader, key, startTS, primaryStatus.CommitTS); err != nil {
+			// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x RESOLVE_ERR=%v\n", key, err)
+			return 0, nil, err, guard
+		}
+		// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x RESOLVED_COMMIT modifies=%d\n", key, len(mvccTxn.Modifies))
+		return primaryStatus.CommitTS, mvccTxn.Modifies, nil, guard
+	}
+
+	if err := txn.Rollback(mvccTxn, reader, key, startTS); err != nil {
+		return 0, nil, err, guard
+	}
+	// fmt.Fprintf(os.Stderr, "[DEBUG CleanupModifies] key=%x ROLLED_BACK modifies=%d\n", key, len(mvccTxn.Modifies))
+	return 0, mvccTxn.Modifies, nil, guard
+}
+
 // CheckTxnStatus checks the status of a transaction (read-only, no cleanup).
 func (s *Storage) CheckTxnStatus(primaryKey []byte, startTS txntypes.TimeStamp) (*txn.TxnStatus, error) {
 	snap := s.engine.NewSnapshot()
@@ -433,14 +522,15 @@ func (s *Storage) CheckTxnStatus(primaryKey []byte, startTS txntypes.TimeStamp) 
 }
 
 // CheckTxnStatusWithCleanup checks status and handles expired lock cleanup / RollbackIfNotExist.
-// Returns (status, modifies, error). modifies is non-nil when writes occurred (expired lock cleanup
+// Returns (status, modifies, error, guard). modifies is non-nil when writes occurred (expired lock cleanup
 // or RollbackIfNotExist wrote a rollback record).
-func (s *Storage) CheckTxnStatusWithCleanup(primaryKey []byte, startTS, callerStartTS txntypes.TimeStamp, rollbackIfNotExist bool) (*txn.TxnStatus, []mvcc.Modify, error) {
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) CheckTxnStatusWithCleanup(primaryKey []byte, startTS, callerStartTS txntypes.TimeStamp, rollbackIfNotExist bool) (*txn.TxnStatus, []mvcc.Modify, error, *LatchGuard) {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock([][]byte{primaryKey})
 	for !s.latches.Acquire(lock, cmdID) {
 	}
-	defer s.latches.Release(lock, cmdID)
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
 	reader := mvcc.NewMvccReader(snap)
@@ -449,10 +539,10 @@ func (s *Storage) CheckTxnStatusWithCleanup(primaryKey []byte, startTS, callerSt
 	mvccTxn := mvcc.NewMvccTxn(startTS)
 	status, err := txn.CheckTxnStatusWithCleanup(mvccTxn, reader, primaryKey, startTS, callerStartTS, rollbackIfNotExist)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, err, guard
 	}
 
-	return status, mvccTxn.Modifies, nil
+	return status, mvccTxn.Modifies, nil, guard
 }
 
 // PessimisticLock acquires pessimistic locks on the given keys (standalone mode).
@@ -497,12 +587,13 @@ func (s *Storage) PessimisticLock(keys [][]byte, primary []byte, startTS, forUpd
 }
 
 // PessimisticLockModifies returns modifies for cluster mode.
-func (s *Storage) PessimisticLockModifies(keys [][]byte, primary []byte, startTS, forUpdateTS txntypes.TimeStamp, lockTTL uint64) ([]mvcc.Modify, []error) {
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) PessimisticLockModifies(keys [][]byte, primary []byte, startTS, forUpdateTS txntypes.TimeStamp, lockTTL uint64) ([]mvcc.Modify, []error, *LatchGuard) {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
 	for !s.latches.Acquire(lock, cmdID) {
 	}
-	defer s.latches.Release(lock, cmdID)
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
 	reader := mvcc.NewMvccReader(snap)
@@ -522,10 +613,10 @@ func (s *Storage) PessimisticLockModifies(keys [][]byte, primary []byte, startTS
 
 	for _, err := range errs {
 		if err != nil {
-			return nil, errs
+			return nil, errs, guard
 		}
 	}
-	return mvccTxn.Modifies, errs
+	return mvccTxn.Modifies, errs, guard
 }
 
 // PessimisticRollbackKeys removes pessimistic locks (standalone mode).
@@ -622,11 +713,12 @@ func (s *Storage) ResolveLock(startTS, commitTS txntypes.TimeStamp, keys [][]byt
 }
 
 // ResolveLockModifies returns modifies for cluster mode.
-func (s *Storage) ResolveLockModifies(startTS, commitTS txntypes.TimeStamp, keys [][]byte) ([]mvcc.Modify, error) {
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) ResolveLockModifies(startTS, commitTS txntypes.TimeStamp, keys [][]byte) ([]mvcc.Modify, error, *LatchGuard) {
 	if len(keys) == 0 {
 		keys = s.scanLocksForTxn(startTS)
 		if len(keys) == 0 {
-			return nil, nil
+			return nil, nil, nil
 		}
 	}
 
@@ -634,7 +726,7 @@ func (s *Storage) ResolveLockModifies(startTS, commitTS txntypes.TimeStamp, keys
 	lock := s.latches.GenLock(keys)
 	for !s.latches.Acquire(lock, cmdID) {
 	}
-	defer s.latches.Release(lock, cmdID)
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
 	reader := mvcc.NewMvccReader(snap)
@@ -643,11 +735,11 @@ func (s *Storage) ResolveLockModifies(startTS, commitTS txntypes.TimeStamp, keys
 	mvccTxn := mvcc.NewMvccTxn(startTS)
 	for _, key := range keys {
 		if err := txn.ResolveLock(mvccTxn, reader, key, startTS, commitTS); err != nil {
-			return nil, err
+			return nil, err, guard
 		}
 	}
 
-	return mvccTxn.Modifies, nil
+	return mvccTxn.Modifies, nil, guard
 }
 
 // scanLocksForTxn scans CF_LOCK for all keys locked by the given transaction.
@@ -741,7 +833,8 @@ func (s *Storage) PrewriteAsyncCommit(mutations []txn.Mutation, primary []byte, 
 
 // PrewriteAsyncCommitModifies performs async commit prewrite and returns MVCC modifications
 // without applying them to the engine. Used in cluster mode to propose via Raft.
-func (s *Storage) PrewriteAsyncCommitModifies(mutations []txn.Mutation, primary []byte, startTS txntypes.TimeStamp, lockTTL uint64, secondaries [][]byte, maxCommitTS txntypes.TimeStamp) ([]mvcc.Modify, []error, txntypes.TimeStamp) {
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) PrewriteAsyncCommitModifies(mutations []txn.Mutation, primary []byte, startTS txntypes.TimeStamp, lockTTL uint64, secondaries [][]byte, maxCommitTS txntypes.TimeStamp) ([]mvcc.Modify, []error, txntypes.TimeStamp, *LatchGuard) {
 	keys := make([][]byte, len(mutations))
 	for i, m := range mutations {
 		keys[i] = m.Key
@@ -751,7 +844,7 @@ func (s *Storage) PrewriteAsyncCommitModifies(mutations []txn.Mutation, primary 
 	lock := s.latches.GenLock(keys)
 	for !s.latches.Acquire(lock, cmdID) {
 	}
-	defer s.latches.Release(lock, cmdID)
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
 	reader := mvcc.NewMvccReader(snap)
@@ -779,7 +872,7 @@ func (s *Storage) PrewriteAsyncCommitModifies(mutations []txn.Mutation, primary 
 
 	for _, err := range errs {
 		if err != nil {
-			return nil, errs, 0
+			return nil, errs, 0, guard
 		}
 	}
 
@@ -789,7 +882,7 @@ func (s *Storage) PrewriteAsyncCommitModifies(mutations []txn.Mutation, primary 
 		minCommitTS = maxCommitTS + 1
 	}
 
-	return mvccTxn.Modifies, errs, minCommitTS
+	return mvccTxn.Modifies, errs, minCommitTS, guard
 }
 
 // Prewrite1PC performs prewrite and commit in a single step for 1PC transactions.
@@ -843,7 +936,8 @@ func (s *Storage) Prewrite1PC(mutations []txn.Mutation, primary []byte, startTS 
 
 // Prewrite1PCModifies performs 1PC prewrite+commit and returns MVCC modifications
 // without applying them to the engine. Used in cluster mode to propose via Raft.
-func (s *Storage) Prewrite1PCModifies(mutations []txn.Mutation, primary []byte, startTS txntypes.TimeStamp, commitTS txntypes.TimeStamp, lockTTL uint64) ([]mvcc.Modify, []error, txntypes.TimeStamp) {
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) Prewrite1PCModifies(mutations []txn.Mutation, primary []byte, startTS txntypes.TimeStamp, commitTS txntypes.TimeStamp, lockTTL uint64) ([]mvcc.Modify, []error, txntypes.TimeStamp, *LatchGuard) {
 	keys := make([][]byte, len(mutations))
 	for i, m := range mutations {
 		keys[i] = m.Key
@@ -853,7 +947,7 @@ func (s *Storage) Prewrite1PCModifies(mutations []txn.Mutation, primary []byte, 
 	lock := s.latches.GenLock(keys)
 	for !s.latches.Acquire(lock, cmdID) {
 	}
-	defer s.latches.Release(lock, cmdID)
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
 	reader := mvcc.NewMvccReader(snap)
@@ -871,11 +965,11 @@ func (s *Storage) Prewrite1PCModifies(mutations []txn.Mutation, primary []byte, 
 
 	for _, err := range errs {
 		if err != nil {
-			return nil, errs, 0
+			return nil, errs, 0, guard
 		}
 	}
 
-	return mvccTxn.Modifies, errs, commitTS
+	return mvccTxn.Modifies, errs, commitTS, guard
 }
 
 // CheckSecondaryLocks checks secondary keys for an async commit transaction.

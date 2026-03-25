@@ -20,6 +20,16 @@ var (
 	ErrAlreadyCommitted = errors.New("txn: already committed")
 )
 
+// KeyLockedError carries lock details for the ErrKeyIsLocked case.
+// errors.Is(err, ErrKeyIsLocked) returns true.
+type KeyLockedError struct {
+	Key  []byte
+	Lock *txntypes.Lock
+}
+
+func (e *KeyLockedError) Error() string { return ErrKeyIsLocked.Error() }
+func (e *KeyLockedError) Is(target error) bool { return target == ErrKeyIsLocked }
+
 // PrewriteProps holds parameters for a prewrite action.
 type PrewriteProps struct {
 	StartTS    txntypes.TimeStamp
@@ -59,7 +69,7 @@ func Prewrite(txn *mvcc.MvccTxn, reader *mvcc.MvccReader, props PrewriteProps, m
 			// Already prewrote by us (idempotent).
 			return nil
 		}
-		return ErrKeyIsLocked
+		return &KeyLockedError{Key: key, Lock: existingLock}
 	}
 
 	// 2. Check for write conflicts (newer writes since start_ts).

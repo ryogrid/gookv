@@ -31,7 +31,7 @@ const (
 	numAccounts    = 1000
 	initialBalance = 100
 	expectedTotal  = numAccounts * initialBalance // $100,000
-	numWorkers     = 2
+	numWorkers     = 32
 	duration       = 30 * time.Second
 	transferMax    = 50
 	initBatchSize  = 50
@@ -585,6 +585,7 @@ func isRetryable(err error) bool {
 		"epoch not match",
 		"lock resolution retries exhausted",
 		"resolve lock",
+		"key locked",
 	} {
 		if strings.Contains(msg, substr) {
 			return true

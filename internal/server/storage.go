@@ -485,7 +485,6 @@ func (s *Storage) CleanupModifies(key []byte, startTS txntypes.TimeStamp) (txnty
 
 	if primaryStatus.CommitTS != 0 {
 		// Primary was committed — commit this secondary.
-		// Use ResolveLock which handles lock→commit conversion.
 		if err := txn.ResolveLock(mvccTxn, reader, key, startTS, primaryStatus.CommitTS); err != nil {
 			return 0, nil, err, guard
 		}
@@ -493,9 +492,7 @@ func (s *Storage) CleanupModifies(key []byte, startTS txntypes.TimeStamp) (txnty
 	}
 
 	// Primary was rolled back, not found, or still locked — rollback this key.
-	// Directly remove the lock and write rollback record, bypassing Rollback's
-	// idempotency check which would skip lock removal if a rollback record
-	// already exists from a previous partial rollback.
+	// Directly remove the lock and write rollback record.
 	isPessimistic := keyLock.LockType == txntypes.LockTypePessimistic
 	mvccTxn.UnlockKey(key, isPessimistic)
 	if keyLock.ShortValue == nil && keyLock.LockType == txntypes.LockTypePut {

@@ -73,14 +73,27 @@ func Prewrite(txn *mvcc.MvccTxn, reader *mvcc.MvccReader, props PrewriteProps, m
 	}
 
 	// 2. Check for write conflicts (newer writes since start_ts).
-	write, commitTS, err := reader.SeekWrite(key, txntypes.TSMax)
-	if err != nil {
-		return err
-	}
-	if write != nil && commitTS > props.StartTS {
+	// Loop through write records in descending commitTS order, skipping
+	// non-data-changing records (Rollback, Lock) to find the most recent
+	// actual data write. This matches TiKV's check_for_newer_version logic.
+	seekTS := txntypes.TSMax
+	for i := 0; i < mvcc.SeekBound*2; i++ {
+		write, commitTS, err := reader.SeekWrite(key, seekTS)
+		if err != nil {
+			return err
+		}
+		if write == nil {
+			break // No more writes for this key.
+		}
+		if commitTS <= props.StartTS {
+			break // All remaining writes are older than our startTS — no conflict.
+		}
+		// commitTS > startTS: check if this is a data-changing write.
 		if write.WriteType != txntypes.WriteTypeRollback && write.WriteType != txntypes.WriteTypeLock {
 			return ErrWriteConflict
 		}
+		// Skip Rollback/Lock records and check older writes.
+		seekTS = commitTS.Prev()
 	}
 
 	// 3. Write the lock.

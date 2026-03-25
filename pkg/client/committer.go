@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 
@@ -251,7 +252,7 @@ func (c *twoPhaseCommitter) commitSecondaries(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = c.client.sender.SendToRegion(ctx, group.Keys[0], func(client tikvpb.TikvClient, info *RegionInfo) (*errorpb.Error, error) {
+			err := c.client.sender.SendToRegion(ctx, group.Keys[0], func(client tikvpb.TikvClient, info *RegionInfo) (*errorpb.Error, error) {
 				resp, err := client.KvCommit(ctx, &kvrpcpb.CommitRequest{
 					Context:       buildContext(info),
 					StartVersion:  uint64(c.startTS),
@@ -266,6 +267,9 @@ func (c *twoPhaseCommitter) commitSecondaries(ctx context.Context) {
 				}
 				return nil, nil
 			})
+			if err != nil {
+				slog.Warn("commitSecondary failed", "keys", len(group.Keys), "startTS", c.startTS, "err", err)
+			}
 		}()
 	}
 	wg.Wait()

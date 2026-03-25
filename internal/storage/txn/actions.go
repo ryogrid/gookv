@@ -4,10 +4,16 @@ package txn
 
 import (
 	"errors"
+	"fmt"
+	"os"
 
 	"github.com/ryogrid/gookv/internal/storage/mvcc"
 	"github.com/ryogrid/gookv/pkg/txntypes"
 )
+
+// tracePrewrite enables verbose logging for Prewrite conflict detection.
+// Set GOOKV_TRACE_PREWRITE=1 environment variable to enable.
+var tracePrewrite = os.Getenv("GOOKV_TRACE_PREWRITE") == "1"
 
 var (
 	// ErrWriteConflict is returned when a prewrite encounters a newer committed write.
@@ -69,6 +75,9 @@ func Prewrite(txn *mvcc.MvccTxn, reader *mvcc.MvccReader, props PrewriteProps, m
 			// Already prewrote by us (idempotent).
 			return nil
 		}
+		if tracePrewrite {
+			fmt.Fprintf(os.Stderr, "[PREWRITE] key=%s startTS=%d LOCKED by ts=%d\n", key, props.StartTS, existingLock.StartTS)
+		}
 		return &KeyLockedError{Key: key, Lock: existingLock}
 	}
 
@@ -77,6 +86,7 @@ func Prewrite(txn *mvcc.MvccTxn, reader *mvcc.MvccReader, props PrewriteProps, m
 	// non-data-changing records (Rollback, Lock) to find the most recent
 	// actual data write. This matches TiKV's check_for_newer_version logic.
 	seekTS := txntypes.TSMax
+	conflictFound := false
 	for i := 0; i < mvcc.SeekBound*2; i++ {
 		write, commitTS, err := reader.SeekWrite(key, seekTS)
 		if err != nil {
@@ -90,10 +100,17 @@ func Prewrite(txn *mvcc.MvccTxn, reader *mvcc.MvccReader, props PrewriteProps, m
 		}
 		// commitTS > startTS: check if this is a data-changing write.
 		if write.WriteType != txntypes.WriteTypeRollback && write.WriteType != txntypes.WriteTypeLock {
+			if tracePrewrite {
+				fmt.Fprintf(os.Stderr, "[PREWRITE] key=%s startTS=%d CONFLICT writeType=%d commitTS=%d\n", key, props.StartTS, write.WriteType, commitTS)
+			}
+			conflictFound = true
 			return ErrWriteConflict
 		}
 		// Skip Rollback/Lock records and check older writes.
 		seekTS = commitTS.Prev()
+	}
+	if tracePrewrite && !conflictFound {
+		fmt.Fprintf(os.Stderr, "[PREWRITE] key=%s startTS=%d OK (no conflict, no lock)\n", key, props.StartTS)
 	}
 
 	// 3. Write the lock.
@@ -129,7 +146,13 @@ func Commit(txn *mvcc.MvccTxn, reader *mvcc.MvccReader, key mvcc.Key, startTS, c
 		return err
 	}
 	if lock == nil || lock.StartTS != startTS {
+		if tracePrewrite {
+			fmt.Fprintf(os.Stderr, "[COMMIT] key=%s startTS=%d LOCK_NOT_FOUND lockExists=%v\n", key, startTS, lock != nil)
+		}
 		return ErrTxnLockNotFound
+	}
+	if tracePrewrite {
+		fmt.Fprintf(os.Stderr, "[COMMIT] key=%s startTS=%d commitTS=%d OK\n", key, startTS, commitTS)
 	}
 
 	// 2. Check min_commit_ts constraint.

@@ -367,6 +367,13 @@ func (s *PeerStorage) AppliedIndex() uint64 {
 	return s.applyState.AppliedIndex
 }
 
+// SetAppliedIndex updates the applied index after entries have been applied.
+func (s *PeerStorage) SetAppliedIndex(index uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyState.AppliedIndex = index
+}
+
 // CompactTo removes entries from the in-memory cache up to compactTo.
 // Entries before compactTo will no longer be served from cache.
 func (s *PeerStorage) CompactTo(compactTo uint64) {

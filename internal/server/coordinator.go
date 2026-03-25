@@ -326,6 +326,20 @@ func (sc *StoreCoordinator) HandleRaftMessage(msg *raft_serverpb.RaftMessage) er
 	}
 
 	err = sc.router.Send(regionID, peerMsg)
+	if err == router.ErrMailboxFull {
+		// Consensus messages must not be silently dropped. Retry briefly.
+		for i := 0; i < 3; i++ {
+			time.Sleep(time.Millisecond)
+			err = sc.router.Send(regionID, peerMsg)
+			if err != router.ErrMailboxFull {
+				break
+			}
+		}
+		if err == router.ErrMailboxFull {
+			slog.Debug("HandleRaftMessage: mailbox full after retries",
+				"region", regionID, "msgType", raftMsg.Type)
+		}
+	}
 	if err == router.ErrRegionNotFound {
 		// Route to store worker for potential peer creation.
 		storeMsg := raftstore.StoreMsg{
@@ -721,7 +735,14 @@ func (sc *StoreCoordinator) sendRaftMessage(regionID uint64, region *metapb.Regi
 			Type: raftstore.PeerMsgTypeRaftMessage,
 			Data: msg,
 		}
-		_ = sc.router.Send(regionID, peerMsg)
+		if err := sc.router.Send(regionID, peerMsg); err == router.ErrMailboxFull {
+			for i := 0; i < 3; i++ {
+				time.Sleep(time.Millisecond)
+				if err = sc.router.Send(regionID, peerMsg); err != router.ErrMailboxFull {
+					break
+				}
+			}
+		}
 		return
 	}
 

@@ -348,6 +348,22 @@ func (p *Peer) Run(ctx context.Context) {
 				return
 			}
 			p.handleMessage(msg)
+			// Drain additional queued messages (up to 63 more) before
+			// calling handleReady. This reduces mailbox pressure and
+			// ensures heartbeat responses are processed promptly.
+			for i := 0; i < 63; i++ {
+				select {
+				case msg, ok = <-p.Mailbox:
+					if !ok {
+						p.stopped.Store(true)
+						return
+					}
+					p.handleMessage(msg)
+				default:
+					goto drained
+				}
+			}
+		drained:
 		}
 
 		p.handleReady()
@@ -554,6 +570,9 @@ func (p *Peer) handleReady() {
 				delete(p.pendingProposals, e.Index)
 			}
 		}
+		// Update applied index so ReadIndex can confirm data is readable.
+		lastEntry := rd.CommittedEntries[len(rd.CommittedEntries)-1]
+		p.storage.SetAppliedIndex(lastEntry.Index)
 	}
 
 	// Process ReadStates from ReadIndex.
@@ -567,7 +586,8 @@ func (p *Peer) handleReady() {
 		key := string(rs.RequestCtx)
 		if pr, ok := p.pendingReads[key]; ok {
 			pr.readIndex = rs.Index
-			if p.storage.AppliedIndex() >= rs.Index {
+			appliedIdx := p.storage.AppliedIndex()
+			if appliedIdx >= rs.Index {
 				pr.callback(nil)
 				delete(p.pendingReads, key)
 			}
@@ -775,6 +795,12 @@ func (p *Peer) handleReadIndexRequest(req *ReadIndexRequest) {
 		req.Callback(fmt.Errorf("not leader for region %d", p.regionID))
 		return
 	}
+	// Propose a no-op entry to ensure committedEntryInCurrentTerm() is true.
+	// etcd raft postpones ReadIndex until the leader has committed at least
+	// one entry in the current term (raft.go:1083). After a leader transfer
+	// or split, this may not be the case yet. Proposing nil accelerates the
+	// first commit so ReadIndex can proceed.
+	_ = p.rawNode.Propose(nil)
 	p.rawNode.ReadIndex(req.RequestCtx)
 	p.pendingReads[string(req.RequestCtx)] = &pendingRead{
 		readIndex: 0,

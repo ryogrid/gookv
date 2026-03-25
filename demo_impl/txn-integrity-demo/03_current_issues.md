@@ -410,6 +410,26 @@ The cross-region 2PC protocol involves:
 
 Between steps 1 and 2, or between 3 and 4, another transaction can interleave. The Prewrite conflict check should detect this, and the lock resolution protocol should handle orphan locks. But something is failing in the combination.
 
+### Additional findings (post-matrix)
+
+1. **Orphan locks = 0, SI read succeeds, but balance still wrong.** With 32 workers and no orphan locks in cleanup, Phase 3 SI read completed for all 1000 accounts. Total was $100,022 (+$22). This proves the bug is NOT in lock cleanup or lock resolution — the committed values themselves are incorrect.
+
+2. **Prewrite conflict loop fix did not resolve the issue.** The loop correctly skips Rollback/Lock records to find data-changing writes, but the balance still diverges. The conflict detection logic appears correct for single-region transactions.
+
+3. **1-region + 2-workers = PASS confirmed.** With `region-split-size=200KB` (no splits), 2 workers completed 532 transfers with $100,000 total. This eliminates single-region concurrency as a cause.
+
+4. **The deviation direction varies** — sometimes +$X (credits without corresponding debits), sometimes -$X (debits without credits). This suggests partial transaction application rather than a systematic bias.
+
+### Root cause narrowing
+
+The bug must be in one of:
+
+- **Cross-region Prewrite interleaving**: Between KvPrewrite(Region A) and KvPrewrite(Region B), another transaction modifies a key. The second prewrite should detect this via conflict check, but the conflict check uses a snapshot from Region B's leader which may not reflect Region A's prewrite.
+
+- **Commit secondary failure + incorrect resolution**: commitSecondaries fails silently, lock resolver resolves the orphan lock, but the resolver's commit/rollback decision is wrong for some edge case.
+
+- **Raft proposal ordering**: Two Prewrite proposals for the same key arrive at the same region leader. The LatchGuard should serialize them, but if the latch key space differs between the two requests (e.g., one request has keys [A, B] and another has keys [B, C]), the latches may not overlap correctly.
+
 ### Next investigation step
 
 Add per-transaction trace logging to identify which specific transaction(s) cause balance divergence, then cross-reference with server-side Raft proposal outcomes.

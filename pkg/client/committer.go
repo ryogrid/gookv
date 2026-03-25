@@ -249,6 +249,7 @@ func (c *twoPhaseCommitter) commitSecondaries(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			lockNotFoundRetries := 0
 			err := c.client.sender.SendToRegion(ctx, key, func(client tikvpb.TikvClient, info *RegionInfo) (*errorpb.Error, error) {
 				resp, err := client.KvCommit(ctx, &kvrpcpb.CommitRequest{
 					Context:       buildContext(info),
@@ -264,10 +265,17 @@ func (c *twoPhaseCommitter) commitSecondaries(ctx context.Context) {
 				}
 				if resp.GetError() != nil {
 					if resp.GetError().GetTxnLockNotFound() != nil {
-						// Lock was already resolved by another transaction's
-						// lock resolver. Since the primary is committed, the
-						// resolver will have committed this secondary too.
-						// Accept as success.
+						lockNotFoundRetries++
+						if lockNotFoundRetries <= 5 {
+							// Lock not found — may be Raft replication delay
+							// (prewrite applied on another node but not here yet).
+							// Retry via region error to allow replication to catch up.
+							return &errorpb.Error{
+								Message:   "lock not found, retrying for replication",
+								NotLeader: &errorpb.NotLeader{RegionId: info.Region.GetId()},
+							}, nil
+						}
+						// After 5 retries, accept as genuinely resolved.
 						return nil, nil
 					}
 				}

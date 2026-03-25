@@ -21,7 +21,6 @@
 - [x] 3.3 Extend lease in handleReady on leadership confirmation
 - [x] 3.4 Check lease in coordinator.ReadIndex() before Raft round-trip
 - Note: Leader Lease disabled — does not guarantee appliedIndex >= commitIndex.
-  ReadOnlySafe provides both leadership and apply guarantees.
 
 ## Phase 3.5: ReadIndex Bug Fixes (DONE)
 
@@ -33,7 +32,7 @@
 ## Phase 3.6: Bug 12 — Commit to Wrong Node After Split (DONE)
 
 - [x] 3.6.1 Rewrite commitSecondaries: per-key SendToRegion with retry
-- [x] 3.6.2 TxnLockNotFound accepted as success (lock already resolved)
+- [x] 3.6.2 TxnLockNotFound retry with counter (5 retries before accepting)
 - [x] 3.6.3 KvCommit validates key range via validateRegionContext
 - [x] 3.6.4 Fix validateRegionContext key encoding (codec.EncodeBytes)
 
@@ -43,9 +42,10 @@
 - [x] 4.2 make test — 3 consecutive passes
 - [x] 4.3 make test-e2e — all pass
 - [ ] 4.4 Transaction integrity demo — 3 consecutive PASSes (32 workers)
-      Bug 12 fix reduced deviation from $50-$200 to $8-$95.
-      Remaining issue: cross-region prewrite interleaving or Raft apply
-      timing allows concurrent transactions to both succeed without
-      detecting conflicts. See 03_current_issues.md.
+      Bug 12 fixes applied. Remaining: cross-region prewrite interleaving.
+      Two concurrent txns can both prewrite the same key via different
+      region leaders after a split, bypassing conflict detection because
+      each leader's snapshot doesn't see the other's prewrite (different
+      Raft groups). See 03_current_issues.md.
 - [x] 4.5 No TODO(readindex) comments remaining
 - [x] 4.6 TODO.md fully checked

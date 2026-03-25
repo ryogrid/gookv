@@ -424,8 +424,8 @@ func phase2(pdAddr string, records *[]transferRecord) bool {
 						expectedFrom := fromBal - amount
 						expectedTo := toBal + amount
 						if actualFrom != expectedFrom || actualTo != expectedTo {
-							fmt.Fprintf(os.Stderr, "[VERIFY MISMATCH] startTS=%d from=%04d expected=$%d actual=$%d to=%04d expected=$%d actual=$%d amount=$%d errVF=%v errVT=%v\n",
-								txn.StartTS(), from, expectedFrom, actualFrom, to, expectedTo, actualTo, amount, errVF, errVT)
+							fmt.Fprintf(os.Stderr, "[VERIFY MISMATCH] txnStartTS=%d verifyStartTS=%d from=%04d expected=$%d actual=$%d to=%04d expected=$%d actual=$%d amount=$%d errVF=%v errVT=%v\n",
+								txn.StartTS(), verifyTxn.StartTS(), from, expectedFrom, actualFrom, to, expectedTo, actualTo, amount, errVF, errVT)
 						}
 					}
 

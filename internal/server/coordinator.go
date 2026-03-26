@@ -21,8 +21,6 @@ import (
 	"github.com/ryogrid/gookv/internal/raftstore/split"
 	"github.com/ryogrid/gookv/internal/server/transport"
 	"github.com/ryogrid/gookv/internal/storage/mvcc"
-	"github.com/ryogrid/gookv/pkg/cfnames"
-	"github.com/ryogrid/gookv/pkg/codec"
 	"github.com/ryogrid/gookv/pkg/pdclient"
 )
 
@@ -52,6 +50,9 @@ type StoreCoordinator struct {
 	peers   map[uint64]*raftstore.Peer
 	cancels map[uint64]context.CancelFunc
 	dones   map[uint64]chan struct{}
+
+	// splitResultCh receives split results from peers for child region bootstrapping.
+	splitResultCh chan *raftstore.SplitRegionResult
 }
 
 // StoreCoordinatorConfig holds the configuration for creating a StoreCoordinator.
@@ -91,6 +92,7 @@ func NewStoreCoordinator(cfg StoreCoordinatorConfig) *StoreCoordinator {
 		peers:         make(map[uint64]*raftstore.Peer),
 		cancels:       make(map[uint64]context.CancelFunc),
 		dones:         make(map[uint64]chan struct{}),
+		splitResultCh: make(chan *raftstore.SplitRegionResult, 16),
 	}
 
 	// Create and start the split check worker if PD client is available.
@@ -162,6 +164,9 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 		peer.SetSnapTaskCh(sc.snapTaskCh)
 	}
 
+	// Wire split result channel for Raft-based split.
+	peer.SetSplitResultCh(sc.splitResultCh)
+
 	// Register with router.
 	if err := sc.router.Register(regionID, peer.Mailbox); err != nil {
 		return err
@@ -217,39 +222,6 @@ func (sc *StoreCoordinator) applyEntriesForPeer(peer *raftstore.Peer, entries []
 	}
 }
 
-// filterModifiesByRegion filters out modifies whose keys are outside the
-// region's current key range. Uses CF-aware key decoding.
-func filterModifiesByRegion(modifies []mvcc.Modify, region *metapb.Region) []mvcc.Modify {
-	startKey := region.GetStartKey()
-	endKey := region.GetEndKey()
-	filtered := make([]mvcc.Modify, 0, len(modifies))
-	for _, m := range modifies {
-		if m.Type == mvcc.ModifyTypeDeleteRange {
-			filtered = append(filtered, m)
-			continue
-		}
-		var rawKey []byte
-		if m.CF == cfnames.CFLock {
-			rawKey, _ = mvcc.DecodeLockKey(m.Key)
-		} else {
-			rawKey, _, _ = mvcc.DecodeKey(m.Key)
-		}
-		if len(rawKey) == 0 {
-			// Unencoded key (RawKV) or decode failed — apply as-is.
-			filtered = append(filtered, m)
-			continue
-		}
-		encodedKey := codec.EncodeBytes(nil, rawKey)
-		if len(startKey) > 0 && bytes.Compare(encodedKey, startKey) < 0 {
-			continue
-		}
-		if len(endKey) > 0 && bytes.Compare(encodedKey, endKey) >= 0 {
-			continue
-		}
-		filtered = append(filtered, m)
-	}
-	return filtered
-}
 
 // ReadIndex performs a linearizable read index check for the given region.
 // The Raft leader confirms it is still the leader by contacting a quorum,
@@ -544,6 +516,9 @@ func (sc *StoreCoordinator) CreatePeer(req *raftstore.CreatePeerRequest) error {
 		peer.SetSnapTaskCh(sc.snapTaskCh)
 	}
 
+	// Wire split result channel for Raft-based split.
+	peer.SetSplitResultCh(sc.splitResultCh)
+
 	if err := sc.router.Register(regionID, peer.Mailbox); err != nil {
 		return err
 	}
@@ -636,21 +611,21 @@ func (sc *StoreCoordinator) maybeCreatePeerForMessage(msg *raft_serverpb.RaftMes
 	_ = sc.CreatePeer(req)
 }
 
-// RunSplitResultHandler processes split check results from the SplitCheckWorker
-// and coordinates the full split flow: ask PD for IDs, execute the split,
-// bootstrap new child regions, and report to PD.
-// Should be started as a goroutine.
+// RunSplitResultHandler processes both split check results (from SplitCheckWorker)
+// and split apply results (from peers after Raft commit). Should be started as a goroutine.
 func (sc *StoreCoordinator) RunSplitResultHandler(ctx context.Context) {
-	if sc.splitCheckWorker == nil {
-		return
+	var splitCheckCh <-chan split.SplitCheckResult
+	if sc.splitCheckWorker != nil {
+		splitCheckCh = sc.splitCheckWorker.ResultCh()
 	}
-	resultCh := sc.splitCheckWorker.ResultCh()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case result := <-resultCh:
+		case result := <-splitCheckCh:
 			sc.handleSplitCheckResult(result)
+		case result := <-sc.splitResultCh:
+			sc.handleSplitApplyResult(result)
 		}
 	}
 }
@@ -666,7 +641,7 @@ func (sc *StoreCoordinator) handleSplitCheckResult(result split.SplitCheckResult
 		return
 	}
 	if !peer.IsLeader() {
-		return // only leaders execute splits
+		return // only leaders propose splits
 	}
 
 	region := peer.Region()
@@ -692,49 +667,50 @@ func (sc *StoreCoordinator) handleSplitCheckResult(result split.SplitCheckResult
 		newPeerIDSets[i] = splitID.GetNewPeerIds()
 	}
 
-	// 3. Execute the split to produce new region metadata.
-	splitResult, err := split.ExecBatchSplit(region, [][]byte{result.SplitKey}, newRegionIDs, newPeerIDSets)
-	if err != nil {
-		slog.Warn("split: ExecBatchSplit failed", "region", result.RegionID, "err", err)
+	// 3. Propose split via Raft (fire-and-forget, same as CompactLog).
+	// The split is executed when the entry is committed and applied
+	// in handleReady → applySplitAdminEntry. This ensures strict
+	// ordering between data entries and the split in the Raft log.
+	req := raftstore.SplitAdminRequest{
+		SplitKey:      result.SplitKey,
+		NewRegionIDs:  newRegionIDs,
+		NewPeerIDSets: newPeerIDSets,
+	}
+	if err := peer.ProposeSplit(req); err != nil {
+		slog.Warn("split: propose failed", "region", result.RegionID, "err", err)
+	}
+}
+
+// handleSplitApplyResult processes a split result from a peer after Raft apply.
+// It bootstraps child regions and reports to PD.
+func (sc *StoreCoordinator) handleSplitApplyResult(result *raftstore.SplitRegionResult) {
+	if result == nil {
 		return
 	}
-
-	slog.Info("split: region split executed",
-		"parent", result.RegionID,
-		"splitKey", fmt.Sprintf("%x", result.SplitKey),
-		"newRegions", len(splitResult.Regions),
-	)
-
-	// 4. Update the parent region's metadata.
-	peer.UpdateRegion(splitResult.Derived)
-
-	// 5. Bootstrap new child regions as peers on this store.
-	for _, newRegion := range splitResult.Regions {
-		// Build raft.Peer list for bootstrap.
+	// Bootstrap child regions.
+	for _, newRegion := range result.Regions {
 		raftPeers := make([]raft.Peer, 0, len(newRegion.GetPeers()))
 		for _, p := range newRegion.GetPeers() {
 			raftPeers = append(raftPeers, raft.Peer{ID: p.GetId()})
 		}
-
 		if err := sc.BootstrapRegion(newRegion, raftPeers); err != nil {
 			slog.Warn("split: failed to bootstrap child region",
 				"region", newRegion.GetId(), "err", err)
 			continue
 		}
-
-		// Force immediate Raft activity on the new peer so it sends MsgVote
-		// to followers promptly (triggering peer creation on other nodes).
+		// Kick Raft activity on child to trigger peer creation on followers.
 		_ = sc.router.Send(newRegion.GetId(), raftstore.PeerMsg{
 			Type: raftstore.PeerMsgTypeTick,
 		})
 	}
-
-	// 6. Report all regions (parent + children) to PD.
-	allRegions := make([]*metapb.Region, 0, 1+len(splitResult.Regions))
-	allRegions = append(allRegions, splitResult.Derived)
-	allRegions = append(allRegions, splitResult.Regions...)
-	if err := sc.pdClient.ReportBatchSplit(context.Background(), allRegions); err != nil {
-		slog.Warn("split: ReportBatchSplit failed", "err", err)
+	// Report to PD.
+	if sc.pdClient != nil {
+		allRegions := make([]*metapb.Region, 0, 1+len(result.Regions))
+		allRegions = append(allRegions, result.Derived)
+		allRegions = append(allRegions, result.Regions...)
+		if err := sc.pdClient.ReportBatchSplit(context.Background(), allRegions); err != nil {
+			slog.Warn("split: ReportBatchSplit failed", "err", err)
+		}
 	}
 }
 

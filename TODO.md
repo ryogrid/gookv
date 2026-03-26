@@ -1,27 +1,50 @@
-# Cross-Region 2PC Integrity Fix
+# Split as Raft Admin Command
 
-## Production Code
+## Step 1: split_admin.go (NEW)
 
-- [x] 1.1 ProposeModifies: add variadic epoch param
-- [x] 1.2 ProposeModifies: check Version + ConfVer against current epoch
-- [x] 1.3 ProposeModifies: embed current epoch in RaftCmdRequest.Header
-- [x] 1.4 applyEntriesForPeer: epoch-aware filtering (match → apply all; mismatch → filter by range)
-- [x] 1.5 Extract filterModifiesByRegion helper
-- [x] 1.6 proposeErrorToRegionError: add "epoch not match" → EpochNotMatch
-- [x] 1.7 Pass epoch from KvPrewrite (standard path)
-- [x] 1.8 Pass epoch from KvPrewrite (async commit path)
-- [x] 1.9 Pass epoch from KvPrewrite (1PC path)
-- [x] 1.10 Pass epoch from KvCommit
-- [x] 1.11 Pass epoch from KvBatchRollback, KvCleanup, KvCheckTxnStatus, KvPessimisticLock, KvResolveLock
-- [x] 1.12 Update proposeModifiesToRegions/WithRegionError to accept epoch
+- [ ] 1.1 SplitAdminRequest struct
+- [ ] 1.2 MarshalSplitAdminRequest / UnmarshalSplitAdminRequest
+- [ ] 1.3 IsSplitAdmin(data) bool
+- [ ] 1.4 ExecSplitAdmin(peer, req) → SplitRegionResult
 
-## Verification
+## Step 2: peer.go
 
-- [x] 2.1 go vet clean
-- [x] 2.2 make test — pass
-- [x] 2.3 make test-e2e — pass
-- [x] 2.4 Final: TODO.md all checked, no stale TODO comments
+- [ ] 2.1 Add splitResultCh field + SetSplitResultCh setter
+- [ ] 2.2 Add applySplitAdminEntry method
+- [ ] 2.3 Detect SplitAdmin in handleReady committed entries loop
 
-## Deferred
+## Step 3: coordinator.go
 
-- Splits as Raft admin commands (long-term TiKV-faithful fix) — out of scope
+- [ ] 3.1 Add splitResultCh to StoreCoordinator
+- [ ] 3.2 Wire splitResultCh in BootstrapRegion
+- [ ] 3.3 Rewrite handleSplitCheckResult to propose via Raft
+- [ ] 3.4 Add RunSplitResultHandler goroutine
+- [ ] 3.5 Start RunSplitResultHandler in coordinator lifecycle
+
+## Step 4: Cleanup
+
+- [ ] 4.1 Remove filterModifiesByRegion (unused)
+- [ ] 4.2 Remove unused imports
+
+## Step 5: Tests
+
+- [ ] 5.1 TestMarshalUnmarshalSplitAdminRequest
+- [ ] 5.2 TestIsSplitAdmin
+- [ ] 5.3 go vet clean
+- [ ] 5.4 make test pass
+- [ ] 5.5 make test-e2e pass
+
+## Step 6: Demo verification
+
+- [ ] 6.1 32w/1000a run 1: $100,000
+- [ ] 6.2 32w/1000a run 2: $100,000
+- [ ] 6.3 32w/1000a run 3: $100,000
+
+## Step 7: Final checks
+
+- [ ] 7.1 TODO.md all items checked
+- [ ] 7.2 No stale TODO comments in codebase
+
+## Flaky Tests (Separate Task)
+
+(To be populated during test runs)

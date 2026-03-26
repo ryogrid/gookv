@@ -131,10 +131,19 @@ type Peer struct {
 	leaseExpiry time.Time
 	leaseValid  atomic.Bool
 
+	// splitResultCh sends split results to the coordinator for child
+	// region bootstrapping. Only used by the leader.
+	splitResultCh chan<- *SplitRegionResult
+
 	// State flags.
 	stopped     atomic.Bool
 	isLeader    atomic.Bool
 	initialized bool
+}
+
+// SetSplitResultCh sets the channel for receiving split results.
+func (p *Peer) SetSplitResultCh(ch chan<- *SplitRegionResult) {
+	p.splitResultCh = ch
 }
 
 // pendingRead represents a pending read index request waiting for
@@ -566,11 +575,16 @@ func (p *Peer) handleReady() {
 
 	// Apply committed entries.
 	if len(rd.CommittedEntries) > 0 {
-		// Process conf changes first (must be applied via RawNode.ApplyConfChange).
-		// This also updates region metadata (peer list, epoch).
+		// Process admin commands first (ConfChange, SplitAdmin) before
+		// sending data entries to applyFunc. This ensures region metadata
+		// is updated BEFORE data entries are applied, maintaining the
+		// ordering guarantee that Raft provides.
 		for _, e := range rd.CommittedEntries {
 			if e.Type == raftpb.EntryConfChange || e.Type == raftpb.EntryConfChangeV2 {
 				p.applyConfChangeEntry(e)
+			} else if e.Type == raftpb.EntryNormal && IsSplitAdmin(e.Data) {
+				eCopy := e
+				p.applySplitAdminEntry(&eCopy)
 			}
 		}
 		// Send to apply worker for state machine application.

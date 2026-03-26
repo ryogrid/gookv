@@ -183,9 +183,10 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 }
 
 // applyEntriesForPeer applies committed Raft entries to the KV storage engine.
-// The peer parameter provides the region metadata for key range validation.
-// Modifies whose keys fall outside the region's current range (e.g., due
-// to a concurrent split) are filtered out to prevent stale writes.
+// Epoch-aware filtering: if the entry's header epoch matches the current region
+// epoch, apply all modifies unconditionally. If the epochs differ (split occurred
+// between propose and apply), filter out-of-range keys using the current region
+// boundaries. Entries without a header (legacy/RawKV) are applied unconditionally.
 func (sc *StoreCoordinator) applyEntriesForPeer(peer *raftstore.Peer, entries []raftpb.Entry) {
 	for _, entry := range entries {
 		if entry.Type != raftpb.EntryNormal || len(entry.Data) == 0 {
@@ -201,52 +202,68 @@ func (sc *StoreCoordinator) applyEntriesForPeer(peer *raftstore.Peer, entries []
 			continue
 		}
 
-		// Convert protobuf requests back to MVCC modifications.
 		modifies := RequestsToModifies(req.Requests)
 		if len(modifies) == 0 {
 			continue
 		}
 
-		// Filter out modifies whose keys are outside the current region's
-		// range. After a split, the region's range shrinks. Entries proposed
-		// before the split may contain keys for the child region; these must
-		// not be applied by the parent (the child's Raft group will apply
-		// its own entries for those keys).
-		region := peer.Region()
-		startKey := region.GetStartKey()
-		endKey := region.GetEndKey()
-
-		filtered := modifies[:0]
-		for _, m := range modifies {
-			if m.Type == mvcc.ModifyTypeDeleteRange {
-				filtered = append(filtered, m)
-				continue
+		// Epoch-aware apply filtering:
+		// - No header or no epoch: apply unconditionally (legacy/RawKV entry)
+		// - Epoch matches current region: apply unconditionally (no split occurred)
+		// - Epoch differs: filter by current region key range (split between propose and apply)
+		needsFilter := false
+		if hdr := req.GetHeader(); hdr != nil && hdr.GetRegionEpoch() != nil {
+			currentEpoch := peer.Region().GetRegionEpoch()
+			if currentEpoch != nil {
+				proposeEpoch := hdr.GetRegionEpoch()
+				if proposeEpoch.GetVersion() != currentEpoch.GetVersion() {
+					needsFilter = true
+				}
 			}
-			var rawKey []byte
-			if m.CF == cfnames.CFLock {
-				rawKey, _ = mvcc.DecodeLockKey(m.Key)
-			} else {
-				rawKey, _, _ = mvcc.DecodeKey(m.Key)
-			}
-			if len(rawKey) == 0 {
-				// Unencoded key (RawKV) or decode failed — apply as-is.
-				filtered = append(filtered, m)
-				continue
-			}
-			encodedKey := codec.EncodeBytes(nil, rawKey)
-			if len(startKey) > 0 && bytes.Compare(encodedKey, startKey) < 0 {
-				continue // out of range
-			}
-			if len(endKey) > 0 && bytes.Compare(encodedKey, endKey) >= 0 {
-				continue // out of range
-			}
-			filtered = append(filtered, m)
 		}
 
-		if len(filtered) > 0 {
-			_ = sc.storage.ApplyModifies(filtered)
+		if needsFilter {
+			modifies = filterModifiesByRegion(modifies, peer.Region())
+		}
+
+		if len(modifies) > 0 {
+			_ = sc.storage.ApplyModifies(modifies)
 		}
 	}
+}
+
+// filterModifiesByRegion filters out modifies whose keys are outside the
+// region's current key range. Uses CF-aware key decoding.
+func filterModifiesByRegion(modifies []mvcc.Modify, region *metapb.Region) []mvcc.Modify {
+	startKey := region.GetStartKey()
+	endKey := region.GetEndKey()
+	filtered := make([]mvcc.Modify, 0, len(modifies))
+	for _, m := range modifies {
+		if m.Type == mvcc.ModifyTypeDeleteRange {
+			filtered = append(filtered, m)
+			continue
+		}
+		var rawKey []byte
+		if m.CF == cfnames.CFLock {
+			rawKey, _ = mvcc.DecodeLockKey(m.Key)
+		} else {
+			rawKey, _, _ = mvcc.DecodeKey(m.Key)
+		}
+		if len(rawKey) == 0 {
+			// Unencoded key (RawKV) or decode failed — apply as-is.
+			filtered = append(filtered, m)
+			continue
+		}
+		encodedKey := codec.EncodeBytes(nil, rawKey)
+		if len(startKey) > 0 && bytes.Compare(encodedKey, startKey) < 0 {
+			continue
+		}
+		if len(endKey) > 0 && bytes.Compare(encodedKey, endKey) >= 0 {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	return filtered
 }
 
 // ReadIndex performs a linearizable read index check for the given region.
@@ -305,7 +322,9 @@ func (sc *StoreCoordinator) ReadIndex(regionID uint64, timeout time.Duration) er
 // ProposeModifies proposes MVCC modifications via Raft for the given region.
 // It serializes the modifications as raft_cmdpb.RaftCmdRequest (protobuf binary)
 // and waits for Raft consensus. Returns after the entry is committed and applied.
-func (sc *StoreCoordinator) ProposeModifies(regionID uint64, modifies []mvcc.Modify, timeout time.Duration) error {
+// If reqEpoch is provided and the region's current epoch differs, the proposal
+// is rejected with an epoch-not-match error (client should retry with fresh region info).
+func (sc *StoreCoordinator) ProposeModifies(regionID uint64, modifies []mvcc.Modify, timeout time.Duration, reqEpoch ...*metapb.RegionEpoch) error {
 	sc.mu.RLock()
 	peer, ok := sc.peers[regionID]
 	sc.mu.RUnlock()
@@ -318,9 +337,25 @@ func (sc *StoreCoordinator) ProposeModifies(regionID uint64, modifies []mvcc.Mod
 		return fmt.Errorf("raftstore: not leader for region %d", regionID)
 	}
 
-	// Build RaftCmdRequest with the modifications as Put/Delete requests.
+	// Propose-time epoch check: reject if region epoch has changed since
+	// the RPC was received. This prevents stale proposals from entering
+	// the Raft log after a split.
+	currentEpoch := peer.Region().GetRegionEpoch()
+	if len(reqEpoch) > 0 && reqEpoch[0] != nil && currentEpoch != nil {
+		re := reqEpoch[0]
+		if re.GetVersion() != currentEpoch.GetVersion() ||
+			re.GetConfVer() != currentEpoch.GetConfVer() {
+			return fmt.Errorf("raftstore: epoch not match for region %d", regionID)
+		}
+	}
+
+	// Build RaftCmdRequest with epoch in header for apply-level filtering.
 	reqs := ModifiesToRequests(modifies)
 	cmdReq := &raft_cmdpb.RaftCmdRequest{
+		Header: &raft_cmdpb.RaftRequestHeader{
+			RegionId:    regionID,
+			RegionEpoch: currentEpoch,
+		},
 		Requests: reqs,
 	}
 

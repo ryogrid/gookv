@@ -369,7 +369,7 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 				return resp, nil
 			}
 			regionID := svc.resolveRegionID(primary)
-			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second, req.GetContext().GetRegionEpoch()); err != nil {
 				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
 					resp.RegionError = regErr
 					return resp, nil
@@ -418,7 +418,7 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 			if regionID == 0 && len(mutations) > 0 {
 				regionID = svc.resolveRegionID(mutations[0].Key)
 			}
-			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second, req.GetContext().GetRegionEpoch()); err != nil {
 				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
 					resp.RegionError = regErr
 					return resp, nil
@@ -463,7 +463,7 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 		if regionID == 0 && len(mutations) > 0 {
 			regionID = svc.resolveRegionID(mutations[0].Key)
 		}
-		if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+		if err := coord.ProposeModifies(regionID, modifies, 10*time.Second, req.GetContext().GetRegionEpoch()); err != nil {
 			if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
 				resp.RegionError = regErr
 				return resp, nil
@@ -519,7 +519,7 @@ func (svc *tikvService) KvCommit(ctx context.Context, req *kvrpcpb.CommitRequest
 			if regionID == 0 && len(keys) > 0 {
 				regionID = svc.resolveRegionID(keys[0])
 			}
-			if propErr := coord.ProposeModifies(regionID, modifies, 10*time.Second); propErr != nil {
+			if propErr := coord.ProposeModifies(regionID, modifies, 10*time.Second, req.GetContext().GetRegionEpoch()); propErr != nil {
 				if regErr := proposeErrorToRegionError(propErr, regionID); regErr != nil {
 					resp.RegionError = regErr
 					return resp, nil
@@ -614,7 +614,7 @@ func (svc *tikvService) KvBatchRollback(ctx context.Context, req *kvrpcpb.BatchR
 			if regionID == 0 {
 				regionID = svc.resolveRegionID(keys[0])
 			}
-			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second, req.GetContext().GetRegionEpoch()); err != nil {
 				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
 					resp.RegionError = regErr
 					return resp, nil
@@ -661,7 +661,7 @@ func (svc *tikvService) KvCleanup(ctx context.Context, req *kvrpcpb.CleanupReque
 			if regionID == 0 {
 				regionID = 1
 			}
-			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second, req.GetContext().GetRegionEpoch()); err != nil {
 				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
 					resp.RegionError = regErr
 					return resp, nil
@@ -723,7 +723,7 @@ func (svc *tikvService) KvCheckTxnStatus(ctx context.Context, req *kvrpcpb.Check
 			if regionID == 0 {
 				regionID = 1
 			}
-			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second, req.GetContext().GetRegionEpoch()); err != nil {
 				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
 					resp.RegionError = regErr
 					return resp, nil
@@ -857,7 +857,7 @@ func (svc *tikvService) KvResolveLock(ctx context.Context, req *kvrpcpb.ResolveL
 			if regionID == 0 {
 				regionID = 1
 			}
-			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second); err != nil {
+			if err := coord.ProposeModifies(regionID, modifies, 10*time.Second, req.GetContext().GetRegionEpoch()); err != nil {
 				if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
 					resp.RegionError = regErr
 					return resp, nil
@@ -1119,10 +1119,10 @@ func (svc *tikvService) groupModifiesByRegion(modifies []mvcc.Modify) map[uint64
 }
 
 // proposeModifiesToRegions proposes modifies grouped by region, each to its own region leader.
-func (svc *tikvService) proposeModifiesToRegions(coord *StoreCoordinator, modifies []mvcc.Modify, timeout time.Duration) error {
+func (svc *tikvService) proposeModifiesToRegions(coord *StoreCoordinator, modifies []mvcc.Modify, timeout time.Duration, reqEpoch ...*metapb.RegionEpoch) error {
 	groups := svc.groupModifiesByRegion(modifies)
 	for regionID, regionModifies := range groups {
-		if err := coord.ProposeModifies(regionID, regionModifies, timeout); err != nil {
+		if err := coord.ProposeModifies(regionID, regionModifies, timeout, reqEpoch...); err != nil {
 			return err
 		}
 	}
@@ -1134,12 +1134,12 @@ func (svc *tikvService) proposeModifiesToRegions(coord *StoreCoordinator, modifi
 // It attempts to propose to ALL regions even if some fail (best-effort for multi-region
 // operations like BatchRollback where this node may not be leader for all target regions).
 // Returns the LAST region error encountered, or nil if all succeeded.
-func (svc *tikvService) proposeModifiesToRegionsWithRegionError(coord *StoreCoordinator, modifies []mvcc.Modify, timeout time.Duration) (*errorpb.Error, error) {
+func (svc *tikvService) proposeModifiesToRegionsWithRegionError(coord *StoreCoordinator, modifies []mvcc.Modify, timeout time.Duration, reqEpoch ...*metapb.RegionEpoch) (*errorpb.Error, error) {
 	groups := svc.groupModifiesByRegion(modifies)
 	var lastRegErr *errorpb.Error
 	var lastErr error
 	for regionID, regionModifies := range groups {
-		if err := coord.ProposeModifies(regionID, regionModifies, timeout); err != nil {
+		if err := coord.ProposeModifies(regionID, regionModifies, timeout, reqEpoch...); err != nil {
 			if regErr := proposeErrorToRegionError(err, regionID); regErr != nil {
 				lastRegErr = regErr
 				continue // try remaining regions
@@ -1179,6 +1179,12 @@ func proposeErrorToRegionError(err error, regionID uint64) *errorpb.Error {
 		return &errorpb.Error{
 			Message:   msg,
 			NotLeader: &errorpb.NotLeader{RegionId: regionID},
+		}
+	}
+	if strings.Contains(msg, "epoch not match") {
+		return &errorpb.Error{
+			Message:       msg,
+			EpochNotMatch: &errorpb.EpochNotMatch{},
 		}
 	}
 	return nil

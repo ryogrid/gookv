@@ -123,27 +123,23 @@ The current PD Raft implementation uses a fixed cluster topology specified via `
 
 To change the PD cluster topology, all PD nodes must be stopped and restarted with updated `--initial-cluster` flags. This is acceptable for the typical 3-or-5-node PD deployment but prevents online PD scaling.
 
-### 2.3 Cross-Region Transaction Concurrency Limitation
+### 2.3 Cross-Region Transaction Concurrency — RESOLVED
 
-At high concurrency (32 concurrent workers), cross-region transactions show $50-$100 balance divergence in the bank transfer demo despite extensive fixes across 8 rounds.
+Cross-region transaction integrity under high concurrency (32 workers, 1000 accounts) is now fully functional. The transaction integrity demo passes 3 consecutive runs with exact $100,000 balance conservation.
 
-**What has been fixed (all implemented and verified):**
+**Fixes applied (chronological order):**
 
 1. **ReadIndex protocol** (ReadOnlySafe mode) — linearizable reads via Raft quorum confirmation. Includes no-op propose for `committedEntryInCurrentTerm`, `AppliedIndex` tracking in `handleReady`, `CancelPendingRead` for timeout cleanup, `ErrMailboxFull` retry, and batch mailbox drain.
-2. **Region Epoch validation** — `validateRegionContext` checks epoch version + confVer on all RPC handlers. Returns `EpochNotMatch` with current region metadata.
-3. **Apply-level key range filtering** — `applyEntriesForPeer` filters out-of-range modify keys per-key (CF-aware: `DecodeLockKey` for CF_LOCK, `DecodeKey` for CF_WRITE/CF_DEFAULT). Matches TiKV's `check_key_in_region` in `handle_put`/`handle_delete`.
-4. **Per-key commitSecondaries** — each secondary committed individually via `SendToRegion` with retry. `TxnLockNotFound` retried 5 times before accepting as resolved.
-5. **KvCommit key range validation** — `validateRegionContext` checks key against region boundaries with `codec.EncodeBytes` encoding.
-6. **KvPrewrite per-key validation** — defense-in-depth: validates all mutation keys belong to current region when `RegionId` is set.
-7. **KvPrewrite region routing fix** — uses `mutations[0].Key` instead of primary lock key for `resolveRegionID` (primary may be in a different region for secondary prewrites).
-8. **Leader Lease** — implemented but disabled. The lease confirms leadership but does not guarantee `appliedIndex >= commitIndex`, so `ReadOnlySafe` is used instead.
-9. **LatchGuard pattern** — holds latch across Raft proposal to prevent stale snapshot reads.
-10. **Split checker boundary encoding** — decodes MVCC keys and re-encodes as `EncodeLockKey` for consistent region boundaries.
+2. **Region Epoch validation** — `validateRegionContext` checks epoch version + confVer on all RPC handlers.
+3. **Per-key commitSecondaries** — each secondary committed individually via `SendToRegion` with retry. `TxnLockNotFound` retried 5 times before accepting as resolved.
+4. **KvCommit / KvPrewrite key range validation** — `validateRegionContext` with `codec.EncodeBytes` encoding.
+5. **LatchGuard pattern** — holds latch across Raft proposal to prevent stale snapshot reads.
+6. **Split checker boundary encoding** — decodes MVCC keys and re-encodes as `EncodeLockKey` for consistent region boundaries.
+7. **Propose-time epoch check** — `ProposeModifies` validates epoch (Version + ConfVer) before proposing. Returns `EpochNotMatch` on mismatch.
+8. **isPrimaryCommitted check** — after `commitPrimary` error, checks via `KvCheckTxnStatus` whether primary was actually committed (Raft may commit but response lost). If committed, proceeds with secondaries.
+9. **Split as Raft admin command** — region splits are proposed and committed through the Raft log (tag byte `0x02`), ensuring strict ordering between data entries and split operations. This eliminates the timing gap that was the fundamental root cause.
+10. **propose() failure handling** — `Peer.propose()` no longer calls `cmd.Callback(nil)` when `rawNode.Propose()` fails. This was the final bug: silent success on propose failure caused prewrite locks to never be written, leading to `TxnLockNotFound` on commit.
 
-**Remaining root cause: missing propose-time epoch check**
+**Test results:** 32 workers, 1000 accounts, 30s — 3/3 PASS ($100,000 exact).
 
-TiKV uses `CmdEpochChecker` to reject stale-epoch proposals BEFORE they enter the Raft log (`tikv/components/raftstore/src/store/peer.rs:4723-4731`). gookv checks epoch at the RPC level (`validateRegionContext`) but NOT at Raft propose time. Between the RPC validation and the Raft proposal, a split can change region boundaries, allowing a prewrite to be proposed to a region that no longer owns the key.
-
-Additionally, TiKV has store-wide latches + shared engine snapshot that serialize prewrites for the same key regardless of region. gookv also has these (`latch.New(2048)` in `storage.go`, `engine.NewSnapshot()` shared across regions), so same-key conflict detection works correctly within a single store. The issue arises when two stores each have a different region's leader for the same key range during a split transition.
-
-See `design_doc/cross_region_2pc_integrity/` for the detailed design document addressing this issue.
+See `design_doc/split_as_raft_admin/` and `design_doc/cross_region_2pc_integrity/` for detailed design documents.

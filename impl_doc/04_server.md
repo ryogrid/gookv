@@ -132,6 +132,7 @@ type StoreCoordinator struct {
     snapStopCh       chan struct{}                      // stops the snap worker
     pdTaskCh         chan<- interface{}                 // channel to PDWorker for heartbeats
     snapSemaphore    chan struct{}                      // capacity 3; limits concurrent outbound snapshots
+    splitResultCh    chan *raftstore.SplitRegionResult  // receives split results from peers after Raft apply
 }
 ```
 
@@ -140,7 +141,7 @@ type StoreCoordinator struct {
 | Method | Description |
 |---|---|
 | `BootstrapRegion(region, allPeers)` | Creates and starts a Raft peer for a region |
-| `ProposeModifies(regionID, modifies, timeout)` | Serializes modifies as `RaftCmdRequest` and proposes via Raft; blocks until committed or timeout |
+| `ProposeModifies(regionID, modifies, timeout, reqEpoch...)` | Serializes modifies as `RaftCmdRequest` (with epoch in header) and proposes via Raft; optionally validates region epoch at propose time; blocks until committed or timeout |
 | `HandleRaftMessage(msg)` | Dispatches incoming `RaftMessage` to the correct peer via the router; falls back to `storeCh` on `ErrRegionNotFound` for dynamic peer creation |
 | `HandleSnapshotMessage(msg, data)` | Attaches snapshot data to Raft message; creates peer if needed via `maybeCreatePeerForMessage`; routes to peer mailbox |
 | `reportSnapshotStatus(regionID, peerID, status)` | Sends `SignificantMsg{SnapshotStatus}` back to the leader peer via the router |
@@ -406,9 +407,9 @@ Steps 1-4 are identical to the standalone path, but step 5 is skipped. Instead:
 - **For `KvPrewrite` (standard 2PC) and `KvCommit`:** The handler extracts the region ID from the request context (`req.GetContext().GetRegionId()`) and calls `coord.ProposeModifies(regionID, modifies, timeout)` directly to the single target region. This works because the client library groups mutations by region before sending each request.
 - **For `KvPrewrite` (async commit):** The handler uses the same `req.GetContext().GetRegionId()` extraction as standard 2PC, calling `coord.ProposeModifies(regionID, modifies, timeout)` directly. All async commit mutations in a single request are proposed to the primary key's region.
 - **For `KvBatchRollback`, `KvPessimisticLock`, and `KvResolveLock`:** The handler calls `proposeModifiesToRegionsWithRegionError(coord, modifies, timeout)` which groups modifications by region via `groupModifiesByRegion()` and proposes to each region's leader separately.
-- `ProposeModifies` converts modifies to `[]*raft_cmdpb.Request` via `ModifiesToRequests`, wraps them in a `RaftCmdRequest`, and sends a `PeerMsgTypeRaftCommand` to the peer's mailbox via the router.
+- `ProposeModifies` accepts an optional `reqEpoch` parameter. When provided, it validates that the region's current epoch matches (both `Version` and `ConfVer`) before proposing — returning an "epoch not match" error if stale. It embeds the current epoch in the `RaftCmdRequest.Header` for apply-time reference. The request is serialized via `ModifiesToRequests`, wrapped in a `RaftCmdRequest`, and sent as a `PeerMsgTypeRaftCommand` to the peer's mailbox. All transactional RPC handlers pass `req.GetContext().GetRegionEpoch()` to `ProposeModifies`; RawKV handlers omit the epoch parameter.
 - The peer proposes the entry to Raft. After consensus, the `applyFunc` callback fires.
-- `applyEntries` unmarshals each committed entry back to `RaftCmdRequest`, converts the requests to modifies via `RequestsToModifies`, and calls `storage.ApplyModifies`.
+- `applyEntriesForPeer` unmarshals each committed entry back to `RaftCmdRequest`, converts the requests to modifies via `RequestsToModifies`, and calls `storage.ApplyModifies` unconditionally. Split admin entries (tag byte `0x02`) and CompactLog entries (tag byte `0x01`) fail protobuf unmarshal and are harmlessly skipped — they are processed separately in `handleReady`'s first committed-entries loop.
 
 ### 5.4 CheckTxnStatus / CheckTxnStatusWithCleanup
 
@@ -505,6 +506,7 @@ Converts a `ProposeModifies` error into a structured region error by inspecting 
 - `"not found"` → `RegionNotFound{RegionId}`
 - `"not leader"` → `NotLeader{RegionId}`
 - `"timeout"` → `NotLeader{RegionId}` (proposal timeout usually indicates the Raft group is non-functional; returning NotLeader triggers client retry with a different store)
+- `"epoch not match"` → `EpochNotMatch{}` (region epoch changed between RPC validation and Raft proposal, typically due to a concurrent split; client refreshes region cache and retries)
 
 Used by `proposeModifiesToRegionsWithRegionError`, the direct proposal paths in `KvPrewrite` (standard 2PC, 1PC), `KvCommit`, and Raw KV write handlers.
 
@@ -547,7 +549,9 @@ flowchart TD
     CheckNotLeader -->|Yes| NotLeader["NotLeader\n{RegionId}"]
     CheckNotLeader -->|No| CheckTimeout{"contains\n'timeout'?"}
     CheckTimeout -->|Yes| NotLeaderTimeout["NotLeader\n{RegionId}\n(Raft group down)"]
-    CheckTimeout -->|No| Nil["nil\n(not a region error)"]
+    CheckTimeout -->|No| CheckEpoch{"contains\n'epoch not match'?"}
+    CheckEpoch -->|Yes| EpochNotMatch["EpochNotMatch\n{}"]
+    CheckEpoch -->|No| Nil["nil\n(not a region error)"]
 ```
 
 ### 5.9 lockToLockInfo

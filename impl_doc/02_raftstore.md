@@ -21,6 +21,7 @@ Source files:
 | `internal/raftstore/convert.go` | eraftpb <-> raftpb protobuf conversion |
 | `internal/raftstore/snapshot.go` | Snapshot generation, serialization, transfer, and application; `SnapWorker` background processing |
 | `internal/raftstore/split/checker.go` | Region split checking (`SplitCheckWorker`) and execution (`ExecBatchSplit`) |
+| `internal/raftstore/split_admin.go` | Split as Raft admin command: `SplitAdminRequest`, `ExecSplitAdmin`, `ProposeSplit` |
 | `internal/raftstore/raftlog_gc.go` | Raft log compaction: `execCompactLog`, `RaftLogGCWorker` background deletion |
 | `internal/raftstore/conf_change.go` | Conf change processing (`applyConfChangeEntry`, `processConfChange`, `ProposeConfChange`) |
 | `internal/raftstore/merge.go` | Region merge: `ExecPrepareMerge`, `ExecCommitMerge`, `ExecRollbackMerge` |
@@ -39,6 +40,7 @@ type Peer struct {
     peerID           uint64
     storeID          uint64
     region           *metapb.Region
+    regionMu         sync.RWMutex                   // protects region field (concurrent gRPC access)
 
     rawNode          *raft.RawNode
     storage          *PeerStorage
@@ -56,6 +58,12 @@ type Peer struct {
     logGCWorkerCh    chan<- RaftLogGCTask            // sends GC tasks to RaftLogGCWorker
     pdTaskCh         chan<- interface{}              // sends RegionHeartbeatInfo to PDWorker
     splitCheckCh     chan<- split.SplitCheckTask     // sends split check tasks to SplitCheckWorker
+
+    pendingReads     map[string]*pendingRead         // ReadIndex requests awaiting apply
+    nextReadID       atomic.Uint64                   // unique request contexts for ReadIndex
+    leaseExpiry      time.Time                       // leader lease timestamp (80% of election timeout)
+    leaseValid       atomic.Bool                     // leader lease validity flag
+    splitResultCh    chan<- *SplitRegionResult        // split results to coordinator (leader only)
 
     stopped          atomic.Bool
     isLeader         atomic.Bool
@@ -423,6 +431,8 @@ Mailboxes are buffered Go channels with a default capacity of 256 (configurable 
 | `PeerMsgTypeDestroy` | 6 | Peer destruction request |
 | `PeerMsgTypeCasual` | 7 | Low-priority, droppable messages |
 | `PeerMsgTypeSchedule` | 8 | Scheduling commands from PD (leader transfer, peer change, merge) |
+| `PeerMsgTypeReadIndex` | 9 | Linearizable read index request from coordinator |
+| `PeerMsgTypeCancelRead` | 10 | Cancel a timed-out pending read |
 
 ### 6.2 PeerTickType (tick classifications)
 
@@ -634,13 +644,13 @@ On the leader side, `PeerStorage.Snapshot()` triggers `SnapWorker` to generate `
 
 On the receiving side, the gRPC `Snapshot` handler reassembles the chunks and calls `HandleSnapshotMessage`, which attaches the snapshot data to the Raft message and creates a peer if one doesn't exist for the region (via `maybeCreatePeerForMessage`). When PD is available, `maybeCreatePeerForMessage` queries `pdClient.GetRegionByID()` to obtain full region metadata (including the complete peer list), so the child peer is bootstrapped with the correct cluster configuration. If PD is unavailable or the query fails, it falls back to constructing minimal metadata from the `FromPeer`/`ToPeer` in the Raft message. The follower's `handleReady()` detects a non-empty `rd.Snapshot` and calls `storage.ApplySnapshot()` to apply the data.
 
-### 8.2 Region Split
+### 8.2 Region Split (Raft Admin Command)
 
-Source: `internal/raftstore/split/checker.go`
+Source: `internal/raftstore/split/checker.go`, `internal/raftstore/split_admin.go`
 
-The split subsystem detects oversized regions and executes boundary splits.
+Region splits are implemented as **Raft admin commands**, ensuring strict ordering between data entries and split operations in the Raft log. This eliminates timing gaps where data writes could be proposed with one region epoch but applied with another.
 
-**Core Types:**
+**Split Check (detection):**
 
 | Type | Fields | Purpose |
 |------|--------|---------|
@@ -648,19 +658,69 @@ The split subsystem detects oversized regions and executes boundary splits.
 | `SplitCheckWorkerConfig` | `SplitSize` (96 MiB), `MaxSize` (144 MiB), `SplitKeys`, `MaxKeys` | Size thresholds |
 | `SplitCheckTask` | `RegionID`, `Region`, `StartKey`, `EndKey`, `Policy` | Check request |
 | `SplitCheckResult` | `RegionID`, `SplitKey`, `RegionSize` | Check outcome |
-| `SplitRegionResult` | `Derived`, `Regions` | Post-split region metadata |
 
-**Check Policy** — `CheckPolicyScan` iterates all three data CFs to measure exact region size; `CheckPolicyApproximate` is defined but defaults to scan.
+**Size Scanning** — `scanRegionSize(task)` iterates entries across `CF_DEFAULT`, `CF_LOCK`, `CF_WRITE` within `[StartKey, EndKey)`. It accumulates key-value sizes and records a midpoint split key. The scanner decodes the MVCC-encoded key via `mvcc.DecodeKey()` to extract the raw user key, then re-encodes it as `mvcc.EncodeLockKey()` (memcomparable encoding, without timestamp), ensuring consistent region boundary format.
 
-**Size Scanning** — `scanRegionSize(task)` iterates entries across `CF_DEFAULT`, `CF_LOCK`, `CF_WRITE` within `[StartKey, EndKey)`. It accumulates key-value sizes and records a midpoint split key. When selecting a split key at approximately the midpoint, the scanner decodes the MVCC-encoded key via `mvcc.DecodeKey()` to extract the raw user key, then re-encodes it as `mvcc.EncodeLockKey()` (memcomparable encoding, without timestamp). This ensures region boundaries use a consistent format that matches all routing operations (PD key lookup, client region cache, modify grouping). If decoding fails, the raw key bytes are used as a fallback. If the total size exceeds `SplitSize`, the midpoint split key is returned as `SplitKey`.
+**Split Proposal and Execution:**
 
-**Split Execution** — `ExecBatchSplit(region, splitKeys, newRegionIDs, newPeerIDs)` creates new region metadata:
+```mermaid
+sequenceDiagram
+    participant SC as StoreCoordinator
+    participant Peer as Peer (handleReady)
+    participant Raft as Raft Log
+    participant PD as PD Server
+
+    SC->>PD: AskBatchSplit(region, splitKey)
+    PD-->>SC: newRegionIDs, newPeerIDs
+
+    SC->>Peer: peer.ProposeSplit(SplitAdminRequest)
+    Peer->>Raft: rawNode.Propose(data) [tag=0x02]
+
+    Note over Raft: Split enters log at index N<br/>Ordered with data entries
+
+    Raft->>Peer: CommittedEntries includes split admin
+    Peer->>Peer: First loop: applySplitAdminEntry()<br/>→ ExecSplitAdmin → UpdateRegion
+    Peer->>Peer: applyFunc: ALL entries to engine<br/>(split admin harmlessly skipped)
+
+    Peer->>SC: splitResultCh ← SplitRegionResult
+    SC->>SC: BootstrapRegion(child)
+    SC->>PD: ReportBatchSplit
+```
+
+**Split Admin Command Format** — Tag byte `0x02` (CompactLog uses `0x01`; safe from collision with protobuf `RaftCmdRequest` which starts with `0x0A`):
+
+| Field | Size | Description |
+|-------|------|-------------|
+| Tag | 1 byte | `0x02` |
+| SplitKeyLen | 4 bytes | uint32, big-endian |
+| SplitKey | variable | Split boundary key |
+| NumNewRegions | 4 bytes | uint32 |
+| Per region: RegionID | 8 bytes | uint64 |
+| Per region: NumPeerIDs | 4 bytes | uint32 |
+| Per region: PeerIDs | 8×N bytes | uint64 each |
+
+**Key Functions:**
+
+| Function | File | Purpose |
+|----------|------|---------|
+| `MarshalSplitAdminRequest` | `split_admin.go` | Serialize split request |
+| `UnmarshalSplitAdminRequest` | `split_admin.go` | Deserialize split request |
+| `IsSplitAdmin(data)` | `split_admin.go` | Detect by tag byte |
+| `ExecSplitAdmin(peer, req)` | `split_admin.go` | Execute split: call `ExecBatchSplit`, `UpdateRegion` |
+| `ProposeSplit(req)` | `split_admin.go` | Propose via `rawNode.Propose(data)` |
+| `applySplitAdminEntry(e)` | `split_admin.go` | Process committed split entry |
+
+**Split Execution** — `ExecBatchSplit(region, splitKeys, newRegionIDs, newPeerIDs)` (in `split/checker.go`) creates new region metadata:
 1. Validates that split keys fall within the region's range and are in order.
 2. Creates new `metapb.Region` entries for each split, assigning new IDs and peers.
 3. Updates the original region's `EndKey` and bumps `RegionEpoch.Version`.
 4. Returns a `SplitRegionResult` with the derived parent and new child regions.
 
-**Background Worker** — `SplitCheckWorker.Run()` consumes `SplitCheckTask` from its channel, calls `checkRegion`, and sends `SplitCheckResult` to `resultCh`. The caller can schedule tasks via `Schedule()` and read results via `ResultCh()`.
+**handleReady Integration** — In the committed entries processing loop, split admin entries are detected alongside ConfChange entries. The split executes BEFORE `applyFunc` is called, ensuring region metadata is updated before data entries are applied. All entries (including split admin) flow to `applyFunc`; split admin entries are harmlessly skipped at protobuf unmarshal.
+
+**Follower Behavior** — `applySplitAdminEntry` runs on all replicas (leader and follower). Child regions on followers are created via `maybeCreatePeerForMessage` when the leader's child region sends Raft messages.
+
+**Background Worker** — `SplitCheckWorker.Run()` consumes `SplitCheckTask` from its channel, calls `checkRegion`, and sends `SplitCheckResult` to `resultCh`. The coordinator's `RunSplitResultHandler` processes both split check results (proposing via Raft) and split apply results (bootstrapping children).
 
 ### 8.3 Raft Log Compaction
 
@@ -778,7 +838,7 @@ This is used after a peer is removed via conf change or region merge.
 - **Proposal tracking** — `pendingProposals` map with index-based callback lookup and cleanup on commit.
 - **ConfChange processing** — `applyConfChangeEntry` parses and applies ConfChange/ConfChangeV2 entries; `processConfChange` updates region metadata (peer list, epoch); `ProposeConfChange` proposes membership changes; self-removal detection.
 - **Snapshot generation and application** — `SnapWorker` generates snapshots in the background; `PeerStorage.ApplySnapshot` applies received snapshots with checksum verification; `SnapState` FSM tracks progress.
-- **Region split** — `SplitCheckWorker` detects oversized regions via CF scanning; `ExecBatchSplit` creates new region metadata with validated split keys and epoch bumps.
+- **Region split (Raft admin command)** — `SplitCheckWorker` detects oversized regions via CF scanning. Splits are proposed as Raft admin commands (tag byte `0x02`) and executed during `handleReady` in the committed entries loop. `ExecSplitAdmin` calls `ExecBatchSplit` and updates parent region metadata atomically within the Raft apply path. Child regions are bootstrapped by the coordinator after receiving the split result via `splitResultCh`.
 - **Raft log compaction** — `onRaftLogGCTick` evaluates size/count thresholds; `execCompactLog` advances `TruncatedIndex`; `RaftLogGCWorker` deletes old entries in the background.
 - **Region merge** — `ExecPrepareMerge` / `ExecCommitMerge` / `ExecRollbackMerge` implement the three-phase merge protocol with epoch management.
 - **PD heartbeat** — `sendRegionHeartbeatToPD()` sends region leader info to PD via `pdTaskCh` on leadership change.
@@ -789,7 +849,7 @@ This is used after a peer is removed via conf change or region merge.
 - **Significant messages** — All three `SignificantMsgType` values are fully handled in `handleSignificantMessage()`: `Unreachable` → `rawNode.ReportUnreachable`, `SnapshotStatus` → `rawNode.ReportSnapshot`, `MergeResult` → `stopped = true`.
 - **PD scheduling messages** — `PeerMsgTypeSchedule` (value 8) dispatches to `handleScheduleMessage()`. Only the leader executes; routes `TransferLeader`, `ChangePeer`, and `Merge` commands from PD's scheduler.
 - **Snapshot transfer** — Fully wired end-to-end: `PeerStorage.Snapshot()` → `SnapWorker` generation → `handleReady` applies snapshots → `sendRaftMessage` detects `MsgSnap` → `SendSnapshot` streaming → remote `Snapshot` gRPC handler → `HandleSnapshotMessage` → `ApplySnapshot` → `reportSnapshotStatus`.
-- **PD-coordinated split** — Wired end-to-end. Peers call `onSplitCheckTick()` at a configurable interval (`SplitCheckTickInterval`, default 10s) when acting as leader, sending `SplitCheckTask` to the `SplitCheckWorker` via `splitCheckCh`. The `StoreCoordinator.RunSplitResultHandler()` processes results: calls `AskBatchSplit` on PD for new IDs, executes `ExecBatchSplit`, bootstraps child regions via `CreatePeer` (on bootstrap failure, continues to the next region), sends a `PeerMsgTypeTick` to each new region to force immediate Raft activity (triggering `MsgVote` to followers for prompt peer creation on other nodes), and reports splits to PD via `ReportBatchSplit`.
+- **PD-coordinated split (Raft admin command)** — Wired end-to-end. Peers call `onSplitCheckTick()` at a configurable interval (`SplitCheckTickInterval`, default 10s) when acting as leader. The coordinator's `handleSplitCheckResult` calls `AskBatchSplit` on PD for new IDs, then proposes a `SplitAdminRequest` via `peer.ProposeSplit()` (fire-and-forget, same pattern as CompactLog). When the split entry is committed, `handleReady` detects it and calls `applySplitAdminEntry` → `ExecSplitAdmin` → `UpdateRegion`. The coordinator's `RunSplitResultHandler` receives the result via `splitResultCh` and bootstraps child regions, sends `PeerMsgTypeTick` to each for prompt peer creation on followers, and reports to PD via `ReportBatchSplit`.
 
 ### Not Implemented
 

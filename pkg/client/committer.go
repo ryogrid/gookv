@@ -82,6 +82,16 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) error {
 
 	// Commit primary synchronously — must succeed.
 	if err := c.commitPrimary(ctx); err != nil {
+		// The primary commit may have succeeded at the Raft level but the
+		// response was lost (e.g., timeout during leader change after split).
+		// Check the actual transaction status before rolling back.
+		if c.isPrimaryCommitted(ctx) {
+			// Primary IS committed — proceed with secondaries.
+			slog.Info("commitPrimary returned error but primary is committed, proceeding",
+				"startTS", c.startTS, "err", err)
+			c.commitSecondaries(context.Background())
+			return nil
+		}
 		_ = c.rollback(context.Background())
 		return err
 	}
@@ -195,6 +205,32 @@ func (c *twoPhaseCommitter) prewriteRegion(ctx context.Context, muts []mutationW
 		}
 		return nil, nil
 	})
+}
+
+// isPrimaryCommitted checks whether the primary key's transaction was actually
+// committed. Used after commitPrimary returns an error — the Raft proposal may
+// have succeeded but the response was lost (e.g., timeout during leader change).
+func (c *twoPhaseCommitter) isPrimaryCommitted(ctx context.Context) bool {
+	var committed bool
+	_ = c.client.sender.SendToRegion(ctx, c.primary, func(client tikvpb.TikvClient, info *RegionInfo) (*errorpb.Error, error) {
+		resp, err := client.KvCheckTxnStatus(ctx, &kvrpcpb.CheckTxnStatusRequest{
+			Context:    buildContext(info),
+			PrimaryKey: c.primary,
+			LockTs:     uint64(c.startTS),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if resp.GetRegionError() != nil {
+			return resp.GetRegionError(), nil
+		}
+		// If CommitVersion is non-zero, the primary was committed.
+		if resp.GetCommitVersion() != 0 {
+			committed = true
+		}
+		return nil, nil
+	})
+	return committed
 }
 
 // commitPrimary commits the primary key synchronously.

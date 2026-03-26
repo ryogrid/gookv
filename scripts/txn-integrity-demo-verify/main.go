@@ -185,7 +185,7 @@ func phase1(pdAddr string) bool {
 	// Wait for region splits to reach >= 3 regions (before initial balance
 	// verification, so that leaders are stable when we read).
 	splitTimeout := 30 * time.Second
-	if numAccounts <= 200 {
+	if numAccounts <= 100 {
 		splitTimeout = 15 * time.Second
 	}
 	fmt.Printf("  [Step 3] Waiting for region splits (target: >= 3 regions, timeout %s)...\n", splitTimeout)

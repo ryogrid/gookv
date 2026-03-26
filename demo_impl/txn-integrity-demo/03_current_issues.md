@@ -723,8 +723,49 @@ gookv's `applyEntriesForPeer` now filters out-of-range modify keys per-modify (m
 2. The prewrite's `resolveRegionID(primary)` routes ALL modifies to Region 1, so "zebra" lock is proposed to Region 1 but filtered out at apply → lock never written
 3. Need to verify that per-region KvPrewrite correctly proposes "zebra" lock to Region 2
 
+---
+
+## Status After Propose-Time Epoch Check and isPrimaryCommitted Fix
+
+### Fixes applied (latest round)
+
+| Fix | File | Effect |
+|-----|------|--------|
+| Propose-time epoch check | `coordinator.go` | `ProposeModifies` rejects proposals whose epoch differs from current region epoch |
+| Epoch embedded in RaftCmdRequest header | `coordinator.go` | Apply-level filter compares entry epoch vs current epoch |
+| Epoch-aware apply filtering | `coordinator.go` | Entry epoch match → apply all; mismatch → filter by key range |
+| `proposeErrorToRegionError`: epoch mismatch | `server.go` | Clients receive `EpochNotMatch` (retriable) |
+| All txn handlers pass epoch | `server.go` | 8 handlers pass `req.GetContext().GetRegionEpoch()` |
+| `isPrimaryCommitted` check | `committer.go` | After `commitPrimary` error, check if primary was actually committed |
+| E2E tests fixed | `multi_region_routing_test.go` | Per-region KvPrewrite/KvCommit requests |
+| Makefile build caching | `Makefile` | File-based targets skip unchanged rebuilds |
+| Demo configurable scale | `main.go` | `--accounts`, `--workers`, `--duration` flags |
+
+### Test results
+
+| Scale | Result | Notes |
+|-------|--------|-------|
+| 8w/100a 15s | 3/3 PASS | Stable |
+| 16w/100a 15s | 3/3 PASS | Stable |
+| 16w/500a 15s | 1/2 PASS, 1/2 FAIL ($49,966) | See below |
+| `make test` | PASS | (PD flaky test: passes on retry) |
+| `make test-e2e` | PASS | Including TestMultiRegionTransactions |
+
+### Remaining issue: prewrite lock not applied despite prewrite success
+
+The `commitPrimary` error in the FAIL case is `txn_lock_not_found` — the prewrite lock was never written to the engine. Root cause analysis:
+
+1. `isPrimaryCommitted` caught 8 cases where primary WAS committed despite `commitPrimary` returning error → these are handled correctly now
+2. But 4 orphan locks were still committed by cleanup (`committed=4`) — these represent cases where the prewrite lock was lost
+3. The prewrite returns success to the client, but the Raft proposal's modifications are either:
+   - Rejected by the propose-time epoch check (epoch changed between prewrite's `validateRegionContext` and `ProposeModifies`)
+   - Filtered at apply time (epoch in entry header doesn't match current region after split)
+4. The client doesn't know the prewrite failed at the Raft level, so it proceeds to commit → `TxnLockNotFound`
+
+This is the **same timing gap** identified in `design_doc/cross_region_2pc_integrity/01_problem_analysis.md`: between the RPC-level validation and the Raft proposal, a split can change the region epoch. The propose-time epoch check catches SOME cases (when the split completes before `ProposeModifies` is called) but not all (when the split completes between `ProposeModifies`'s epoch check and the actual `rawNode.Propose()`).
+
 ### Next Steps
 
-1. **Debug TestMultiRegionTransactions**: Add logging to confirm "zebra" lock is proposed to Region 2 (not Region 1) when sent as a separate KvPrewrite
-2. **Verify apply-level filter is not blocking legitimate writes**: The filter should only block writes after a split changes region boundaries
-3. **Complete unit tests and demo verification**
+1. Add debug logging to `ProposeModifies` to confirm epoch check rejections during prewrite
+2. Investigate whether the epoch check rejection error is properly propagated back through the prewrite handler to the client
+3. If the error IS propagated, the client should retry with fresh region info. If NOT, the prewrite silently succeeds while the Raft proposal is rejected.

@@ -207,28 +207,13 @@ func (sc *StoreCoordinator) applyEntriesForPeer(peer *raftstore.Peer, entries []
 			continue
 		}
 
-		// Epoch-aware apply filtering:
-		// - No header or no epoch: apply unconditionally (legacy/RawKV entry)
-		// - Epoch matches current region: apply unconditionally (no split occurred)
-		// - Epoch differs: filter by current region key range (split between propose and apply)
-		needsFilter := false
-		if hdr := req.GetHeader(); hdr != nil && hdr.GetRegionEpoch() != nil {
-			currentEpoch := peer.Region().GetRegionEpoch()
-			if currentEpoch != nil {
-				proposeEpoch := hdr.GetRegionEpoch()
-				if proposeEpoch.GetVersion() != currentEpoch.GetVersion() {
-					needsFilter = true
-				}
-			}
-		}
-
-		if needsFilter {
-			modifies = filterModifiesByRegion(modifies, peer.Region())
-		}
-
-		if len(modifies) > 0 {
-			_ = sc.storage.ApplyModifies(modifies)
-		}
+		// Apply all modifies unconditionally. The propose-time epoch check
+		// in ProposeModifies prevents stale proposals from entering the Raft
+		// log. Any proposal that passed the epoch check at propose time is
+		// valid and must be applied — filtering at apply time would silently
+		// drop committed writes when a split occurs between propose and apply,
+		// causing data loss (prewrite reports success but lock is not written).
+		_ = sc.storage.ApplyModifies(modifies)
 	}
 }
 

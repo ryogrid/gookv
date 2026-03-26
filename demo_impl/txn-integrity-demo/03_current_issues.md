@@ -658,8 +658,73 @@ With ReadIndex now functioning, the demo exposes Bug 12 (commit to wrong node af
 
 The $73 discrepancy comes from Bug 12: `commitSecondaries` uses stale region cache after splits, sending commits to the wrong node. The commit silently fails (LOCK_NOT_FOUND), leaving the primary committed but secondary uncommitted. When the orphan secondary lock is later resolved, the wrong decision (commit vs rollback) may be made.
 
+---
+
+## Status After Bug 12 Fix and Bug 13 (Apply-Level Validation) WIP
+
+### Bug 12 fixes applied
+
+| Fix | File | Effect |
+|-----|------|--------|
+| Per-key `SendToRegion` in commitSecondaries | `committer.go` | Each secondary committed individually with retry |
+| `TxnLockNotFound` retry (5 attempts) | `committer.go` | Handles Raft replication delay |
+| Key range validation in `KvCommit` | `server.go` | Returns `KeyNotInRegion` for misrouted commits |
+| Key encoding fix in `validateRegionContext` | `server.go` | Encodes raw key with `codec.EncodeBytes` before boundary comparison |
+| Leader Lease disabled | `coordinator.go` | Prevents stale reads (lease doesn't guarantee appliedIndex >= commitIndex) |
+
+Balance deviation reduced from $50-$200 to $8-$95.
+
+### Bug 13: Apply-level key range validation (IN PROGRESS)
+
+**Root cause**: `applyEntries` writes to the shared engine without checking if keys belong to the current region. After a split, entries proposed before the split can write keys that now belong to a different region. See `design_doc/bug13_cross_region_prewrite/01_design.md`.
+
+**Implementation status**:
+
+| Item | Status |
+|------|--------|
+| `applyEntriesForPeer` with key range validation | Done |
+| CF-aware key decoding (DecodeLockKey / DecodeKey) | Done |
+| Atomic entry rejection (skip entire entry if any key out of range) | Done |
+| Peer passed via closure (avoids `GetPeer` lock contention) | Done |
+| Per-key validation in KvPrewrite | Done |
+| Unit tests | Pending |
+| E2E tests | **FAILING** — see below |
+
+**E2E test failures**:
+
+`TestMultiRegionTransactions` and `TestMultiRegionAsyncCommit` fail. The apply-level validation incorrectly skips legitimate entries in multi-region test scenarios. The issue is that `DecodeKey` returns an empty raw key for some non-MVCC encoded keys (e.g., RawKV entries whose `Modify.Key` is a plain user key), causing the boundary comparison to produce false positives.
+
+Current mitigation: skip validation when `len(rawKey) == 0` (decode failed → unencoded key). However, the multi-region test still fails, suggesting that some MVCC-encoded keys are being incorrectly classified as out-of-range. Root cause investigation in progress.
+
+### Current demo results (with all fixes)
+
+| Metric | Value |
+|--------|-------|
+| Phase 1 (seed + verify) | PASS (RC fallback for SI read) |
+| Phase 2 (32 workers, 30s) | 150-200 transfers, some VERIFY MISMATCHes |
+| Phase 3 (balance conservation) | $99,900-$100,024 (±$100 deviation) |
+| Unit tests (`make test`) | All PASS |
+| E2E tests (`make test-e2e`) | 2 FAIL (multi-region txn tests) |
+
+### TiKV Architecture Reference (confirmed from source)
+
+TiKV's apply layer validates **each key individually** in `handle_put`/`handle_delete` via `check_key_in_region`. Out-of-range keys are rejected per-key (NOT atomically per-entry). The client (client-go) is responsible for grouping mutations by region before sending. Server-side prewrite does NOT validate region boundaries — validation happens only at the Raft apply layer.
+
+Key files: `tikv/components/raftstore/src/store/fsm/apply.rs:1897-1944`, `tikv/components/raftstore/src/store/util.rs:71-77`.
+
+### Apply-level filtering implementation
+
+gookv's `applyEntriesForPeer` now filters out-of-range modify keys per-modify (matching TiKV's per-key approach). CF-aware key decoding uses `mvcc.DecodeLockKey` (CF_LOCK) and `mvcc.DecodeKey` (CF_WRITE/CF_DEFAULT). Undecodable keys (RawKV) are passed through without filtering.
+
+### E2E test status
+
+`TestMultiRegionTransactions` and `TestMultiRegionAsyncCommit` tests were updated to send per-region KvPrewrite/KvCommit requests (matching TiKV's client convention). `TestMultiRegionTransactions` commit for "zebra" (Region 2) still fails with `TxnLockNotFound`. Possible causes:
+1. Raft replication delay between prewrite and commit (sleep 200ms may be insufficient)
+2. The prewrite's `resolveRegionID(primary)` routes ALL modifies to Region 1, so "zebra" lock is proposed to Region 1 but filtered out at apply → lock never written
+3. Need to verify that per-region KvPrewrite correctly proposes "zebra" lock to Region 2
+
 ### Next Steps
 
-1. **Fix Bug 12**: Make `commitSecondaries` handle `LOCK_NOT_FOUND` by retrying with refreshed region cache, or use the same `RegionInfo` from Prewrite for Commit.
-
-2. **Demo 3-consecutive PASS**: After Bug 12 fix, ReadIndex + epoch validation + correct commits should yield consistent $100,000 totals.
+1. **Debug TestMultiRegionTransactions**: Add logging to confirm "zebra" lock is proposed to Region 2 (not Region 1) when sent as a separate KvPrewrite
+2. **Verify apply-level filter is not blocking legitimate writes**: The filter should only block writes after a split changes region boundaries
+3. **Complete unit tests and demo verification**

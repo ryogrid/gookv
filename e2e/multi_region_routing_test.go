@@ -152,54 +152,86 @@ func TestMultiRegionTransactions(t *testing.T) {
 	startTS := uint64(100)
 	commitTS := uint64(110)
 
-	// Prewrite with primary in region1 and a secondary in region2.
-	// Find the leader node and pin all subsequent operations to it,
-	// since the lock is applied on the leader immediately after Raft
-	// commit but followers may apply asynchronously.
-	var leaderAddr string
-	var prewriteResp *kvrpcpb.PrewriteResponse
-	for _, n := range mc.nodes {
-		_, client := dialTikvClient(t, n.addr)
-		resp, err := client.KvPrewrite(ctx, &kvrpcpb.PrewriteRequest{
-			Mutations: []*kvrpcpb.Mutation{
-				{Op: kvrpcpb.Op_Put, Key: []byte("alpha"), Value: []byte("v1")},
-				{Op: kvrpcpb.Op_Put, Key: []byte("zebra"), Value: []byte("v2")},
-			},
-			PrimaryLock:  []byte("alpha"),
-			StartVersion: startTS,
-			LockTtl:      5000,
-		})
-		if err != nil || resp.GetRegionError() != nil {
-			continue
-		}
-		hasRetryable := false
-		for _, e := range resp.GetErrors() {
-			if e.GetRetryable() != "" {
-				hasRetryable = true
-				break
+	// Prewrite primary ("alpha" in region1) and secondary ("zebra" in region2)
+	// as SEPARATE requests per region — matching how the client library groups
+	// mutations by region before sending. TiKV and gookv both require this:
+	// the apply layer filters out-of-region keys, so cross-region mutations
+	// in a single request would be partially dropped.
+
+	// Prewrite primary key (region1: [""..m))
+	prewritePrimary := func() bool {
+		for _, n := range mc.nodes {
+			_, client := dialTikvClient(t, n.addr)
+			resp, err := client.KvPrewrite(ctx, &kvrpcpb.PrewriteRequest{
+				Mutations: []*kvrpcpb.Mutation{
+					{Op: kvrpcpb.Op_Put, Key: []byte("alpha"), Value: []byte("v1")},
+				},
+				PrimaryLock:  []byte("alpha"),
+				StartVersion: startTS,
+				LockTtl:      5000,
+			})
+			if err != nil || resp.GetRegionError() != nil {
+				continue
 			}
+			if len(resp.GetErrors()) > 0 {
+				continue
+			}
+			return true
 		}
-		if hasRetryable {
-			continue
-		}
-		prewriteResp = resp
-		leaderAddr = n.addr
-		break
+		return false
 	}
-	require.NotNil(t, prewriteResp, "KvPrewrite should succeed on at least one node")
-	assert.Empty(t, prewriteResp.GetErrors(), "prewrite should succeed")
+	require.True(t, prewritePrimary(), "prewrite primary should succeed")
 
-	// Commit on the same leader node.
-	_, leaderClient := dialTikvClient(t, leaderAddr)
-	commitResp, err := leaderClient.KvCommit(ctx, &kvrpcpb.CommitRequest{
-		Keys:          [][]byte{[]byte("alpha"), []byte("zebra")},
-		StartVersion:  startTS,
-		CommitVersion: commitTS,
-	})
-	require.NoError(t, err)
-	assert.Nil(t, commitResp.GetError(), "commit should succeed")
+	// Prewrite secondary key (region2: [m..""))
+	prewriteSecondary := func() bool {
+		for _, n := range mc.nodes {
+			_, client := dialTikvClient(t, n.addr)
+			resp, err := client.KvPrewrite(ctx, &kvrpcpb.PrewriteRequest{
+				Mutations: []*kvrpcpb.Mutation{
+					{Op: kvrpcpb.Op_Put, Key: []byte("zebra"), Value: []byte("v2")},
+				},
+				PrimaryLock:  []byte("alpha"),
+				StartVersion: startTS,
+				LockTtl:      5000,
+			})
+			if err != nil || resp.GetRegionError() != nil {
+				continue
+			}
+			if len(resp.GetErrors()) > 0 {
+				continue
+			}
+			return true
+		}
+		return false
+	}
+	require.True(t, prewriteSecondary(), "prewrite secondary should succeed")
 
-	// Wait for Raft replication so reads on any node can find the data.
+	// Wait for Raft replication of prewrite locks.
+	time.Sleep(200 * time.Millisecond)
+
+	// Commit primary key on any node.
+	commitKey := func(key []byte) bool {
+		for _, n := range mc.nodes {
+			_, client := dialTikvClient(t, n.addr)
+			resp, err := client.KvCommit(ctx, &kvrpcpb.CommitRequest{
+				Keys:          [][]byte{key},
+				StartVersion:  startTS,
+				CommitVersion: commitTS,
+			})
+			if err != nil || resp.GetRegionError() != nil {
+				continue
+			}
+			if resp.GetError() != nil {
+				continue
+			}
+			return true
+		}
+		return false
+	}
+	require.True(t, commitKey([]byte("alpha")), "commit primary should succeed")
+	require.True(t, commitKey([]byte("zebra")), "commit secondary should succeed")
+
+	// Wait for Raft replication.
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify both keys are readable.
@@ -594,20 +626,45 @@ func TestMultiRegionAsyncCommit(t *testing.T) {
 	startTS := uint64(500)
 
 	// Async commit prewrite: primary in region1, secondary in region2.
+	// Each region gets its own KvPrewrite request — matching how the client
+	// library groups mutations by region. The apply layer filters out-of-region
+	// keys, so cross-region mutations in a single request would be dropped.
 	primaryKey := []byte("ac-primary")     // region1 (< "m")
 	secondaryKey := []byte("zz-secondary") // region2 (>= "m")
 
-	// Find the leader node for the primary key's region and use it for all
-	// operations. Since async commit proposes all modifications through the
-	// primary's region, the leader node has the locks applied immediately
-	// after ProposeModifies returns (followers apply asynchronously).
-	var leaderAddr string
+	// Prewrite primary key (region1).
 	var prewriteResp *kvrpcpb.PrewriteResponse
 	for _, n := range mc.nodes {
 		_, client := dialTikvClient(t, n.addr)
 		resp, err := client.KvPrewrite(ctx, &kvrpcpb.PrewriteRequest{
 			Mutations: []*kvrpcpb.Mutation{
 				{Op: kvrpcpb.Op_Put, Key: primaryKey, Value: []byte("primary-val")},
+			},
+			PrimaryLock:    primaryKey,
+			StartVersion:   startTS,
+			LockTtl:        5000,
+			UseAsyncCommit: true,
+			Secondaries:    [][]byte{secondaryKey},
+		})
+		if err != nil || resp.GetRegionError() != nil {
+			continue
+		}
+		if len(resp.GetErrors()) > 0 {
+			continue
+		}
+		prewriteResp = resp
+		break
+	}
+	require.NotNil(t, prewriteResp, "prewrite primary should succeed")
+	assert.Greater(t, prewriteResp.GetMinCommitTs(), uint64(0),
+		"MinCommitTs should be > 0 for async commit prewrite")
+
+	// Prewrite secondary key (region2).
+	prewriteSecondaryOK := false
+	for _, n := range mc.nodes {
+		_, client := dialTikvClient(t, n.addr)
+		resp, err := client.KvPrewrite(ctx, &kvrpcpb.PrewriteRequest{
+			Mutations: []*kvrpcpb.Mutation{
 				{Op: kvrpcpb.Op_Put, Key: secondaryKey, Value: []byte("secondary-val")},
 			},
 			PrimaryLock:    primaryKey,
@@ -619,50 +676,62 @@ func TestMultiRegionAsyncCommit(t *testing.T) {
 		if err != nil || resp.GetRegionError() != nil {
 			continue
 		}
-		hasRetryable := false
-		for _, e := range resp.GetErrors() {
-			if e.GetRetryable() != "" {
-				hasRetryable = true
-				break
-			}
-		}
-		if hasRetryable {
+		if len(resp.GetErrors()) > 0 {
 			continue
 		}
-		prewriteResp = resp
-		leaderAddr = n.addr
+		prewriteSecondaryOK = true
 		break
 	}
-	require.NotNil(t, prewriteResp, "KvPrewrite should succeed on at least one node")
-	assert.Empty(t, prewriteResp.GetErrors(), "async commit prewrite should succeed")
-	assert.Greater(t, prewriteResp.GetMinCommitTs(), uint64(0),
-		"MinCommitTs should be > 0 for async commit prewrite")
+	require.True(t, prewriteSecondaryOK, "prewrite secondary should succeed")
 
-	// Use the same leader node for all subsequent operations (locks are
-	// guaranteed to be applied on this node).
-	_, leaderClient := dialTikvClient(t, leaderAddr)
+	// Wait for Raft replication of prewrite locks.
+	time.Sleep(200 * time.Millisecond)
 
-	// CheckSecondaryLocks on the secondary key.
-	checkResp, err := leaderClient.KvCheckSecondaryLocks(ctx, &kvrpcpb.CheckSecondaryLocksRequest{
-		Keys:         [][]byte{secondaryKey},
-		StartVersion: startTS,
-	})
-	require.NoError(t, err, "CheckSecondaryLocks RPC should not fail")
+	// CheckSecondaryLocks on the secondary key (try all nodes).
+	var checkResp *kvrpcpb.CheckSecondaryLocksResponse
+	for _, n := range mc.nodes {
+		_, client := dialTikvClient(t, n.addr)
+		resp, err := client.KvCheckSecondaryLocks(ctx, &kvrpcpb.CheckSecondaryLocksRequest{
+			Keys:         [][]byte{secondaryKey},
+			StartVersion: startTS,
+		})
+		if err != nil {
+			continue
+		}
+		if len(resp.GetLocks()) > 0 {
+			checkResp = resp
+			break
+		}
+	}
+	require.NotNil(t, checkResp, "CheckSecondaryLocks should find the lock")
 	assert.Nil(t, checkResp.GetError(), "should not return an error")
 	assert.NotEmpty(t, checkResp.GetLocks(), "should find the lock on the secondary key")
 	assert.Equal(t, uint64(0), checkResp.GetCommitTs(), "commitTs should be 0 while lock is held")
 
-	// Commit the transaction on the same leader node.
+	// Commit each key individually (per-region).
 	commitTS := startTS + 10
-	commitResp, err := leaderClient.KvCommit(ctx, &kvrpcpb.CommitRequest{
-		Keys:          [][]byte{primaryKey, secondaryKey},
-		StartVersion:  startTS,
-		CommitVersion: commitTS,
-	})
-	require.NoError(t, err, "KvCommit RPC should not fail")
-	assert.Nil(t, commitResp.GetError(), "commit should succeed")
+	commitKey := func(key []byte) bool {
+		for _, n := range mc.nodes {
+			_, client := dialTikvClient(t, n.addr)
+			resp, err := client.KvCommit(ctx, &kvrpcpb.CommitRequest{
+				Keys:          [][]byte{key},
+				StartVersion:  startTS,
+				CommitVersion: commitTS,
+			})
+			if err != nil || resp.GetRegionError() != nil {
+				continue
+			}
+			if resp.GetError() != nil {
+				continue
+			}
+			return true
+		}
+		return false
+	}
+	require.True(t, commitKey(primaryKey), "commit primary should succeed")
+	require.True(t, commitKey(secondaryKey), "commit secondary should succeed")
 
-	// Wait for Raft replication so reads on any node can find the data.
+	// Wait for Raft replication.
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify both keys readable.

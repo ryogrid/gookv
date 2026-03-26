@@ -184,8 +184,8 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 
 // applyEntriesForPeer applies committed Raft entries to the KV storage engine.
 // The peer parameter provides the region metadata for key range validation.
-// Entries whose keys fall outside the region's current range (e.g., due
-// to a concurrent split) are atomically skipped to prevent data corruption.
+// Modifies whose keys fall outside the region's current range (e.g., due
+// to a concurrent split) are filtered out to prevent stale writes.
 func (sc *StoreCoordinator) applyEntriesForPeer(peer *raftstore.Peer, entries []raftpb.Entry) {
 	for _, entry := range entries {
 		if entry.Type != raftpb.EntryNormal || len(entry.Data) == 0 {
@@ -207,23 +207,21 @@ func (sc *StoreCoordinator) applyEntriesForPeer(peer *raftstore.Peer, entries []
 			continue
 		}
 
-		// Validate that ALL keys belong to the current region's range.
-		// After a split, the region's range may have shrunk. Entries
-		// proposed before the split but applied after must be rejected
-		// if their keys are now outside the range.
+		// Filter out modifies whose keys are outside the current region's
+		// range. After a split, the region's range shrinks. Entries proposed
+		// before the split may contain keys for the child region; these must
+		// not be applied by the parent (the child's Raft group will apply
+		// its own entries for those keys).
 		region := peer.Region()
 		startKey := region.GetStartKey()
 		endKey := region.GetEndKey()
 
-		outOfRange := false
+		filtered := modifies[:0]
 		for _, m := range modifies {
 			if m.Type == mvcc.ModifyTypeDeleteRange {
-				continue // DeleteRange checked separately if needed
+				filtered = append(filtered, m)
+				continue
 			}
-			// Decode the modify key to raw user key using CF-aware logic.
-			// CF_LOCK keys use EncodeLockKey (no timestamp suffix).
-			// CF_WRITE and CF_DEFAULT keys use EncodeKey (with timestamp).
-			// RawKV keys are unencoded and will fail to decode — skip them.
 			var rawKey []byte
 			if m.CF == cfnames.CFLock {
 				rawKey, _ = mvcc.DecodeLockKey(m.Key)
@@ -231,26 +229,23 @@ func (sc *StoreCoordinator) applyEntriesForPeer(peer *raftstore.Peer, entries []
 				rawKey, _, _ = mvcc.DecodeKey(m.Key)
 			}
 			if len(rawKey) == 0 {
-				continue // unencoded key (RawKV) or decode failed — skip validation
+				// Unencoded key (RawKV) or decode failed — apply as-is.
+				filtered = append(filtered, m)
+				continue
 			}
 			encodedKey := codec.EncodeBytes(nil, rawKey)
 			if len(startKey) > 0 && bytes.Compare(encodedKey, startKey) < 0 {
-				outOfRange = true
-				break
+				continue // out of range
 			}
 			if len(endKey) > 0 && bytes.Compare(encodedKey, endKey) >= 0 {
-				outOfRange = true
-				break
+				continue // out of range
 			}
+			filtered = append(filtered, m)
 		}
 
-		if outOfRange {
-			slog.Debug("applyEntries: skipping out-of-range entry",
-				"region", peer.RegionID(), "modifies", len(modifies))
-			continue
+		if len(filtered) > 0 {
+			_ = sc.storage.ApplyModifies(filtered)
 		}
-
-		_ = sc.storage.ApplyModifies(modifies)
 	}
 }
 

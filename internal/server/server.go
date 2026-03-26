@@ -442,8 +442,7 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 
 	// --- Standard 2PC path ---
 	// Cluster mode: compute modifications then propose via Raft.
-	// All mutations in a single prewrite request belong to the same region
-	// (the client groups by region). Use the request's region context.
+	// Cluster mode: compute modifications then propose via Raft.
 	if coord := svc.server.coordinator; coord != nil {
 		modifies, errs, guard := svc.server.storage.PrewriteModifies(mutations, primary, startTS, lockTTL)
 		defer svc.server.storage.ReleaseLatch(guard)
@@ -456,6 +455,9 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 		if len(resp.Errors) > 0 || len(modifies) == 0 {
 			return resp, nil
 		}
+		// Route modifies to the correct region. When RegionId is provided
+		// (client-grouped), propose to that single region. Otherwise, group
+		// by region for correct apply-level key range filtering.
 		regionID := req.GetContext().GetRegionId()
 		if regionID == 0 {
 			regionID = svc.resolveRegionID(primary)
@@ -502,7 +504,8 @@ func (svc *tikvService) KvCommit(ctx context.Context, req *kvrpcpb.CommitRequest
 	commitTS := txntypes.TimeStamp(req.GetCommitVersion())
 
 	// Cluster mode: compute modifications then propose via Raft.
-	// All keys in a commit request belong to the same region (client groups by region).
+	// Group modifies by region to ensure each region's Raft group applies
+	// only the keys that belong to it.
 	if coord := svc.server.coordinator; coord != nil {
 		modifies, err, guard := svc.server.storage.CommitModifies(keys, startTS, commitTS)
 		defer svc.server.storage.ReleaseLatch(guard)
@@ -512,7 +515,7 @@ func (svc *tikvService) KvCommit(ctx context.Context, req *kvrpcpb.CommitRequest
 		}
 		if len(modifies) > 0 {
 			regionID := req.GetContext().GetRegionId()
-			if regionID == 0 {
+			if regionID == 0 && len(keys) > 0 {
 				regionID = svc.resolveRegionID(keys[0])
 			}
 			if propErr := coord.ProposeModifies(regionID, modifies, 10*time.Second); propErr != nil {

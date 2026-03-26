@@ -49,7 +49,8 @@
 
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
-- **Minimat Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+- **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+- **No Band-Aid Fixes**: Before applying a local fix, verify it won't break other parts of the system. Check how TiKV handles the same situation (search `tikv/` source). If a fix feels like a workaround, find the architecturally correct solution first. A fix that solves one problem but makes another design unsound is worse than no fix.
 
 ## gookv Development
 
@@ -76,8 +77,3 @@ gookv is a Go-based distributed transactional KV store modeled after TiKV.
 - Private packages: internal/ (engine, raftstore, storage, server, etc.)
 - Build: `make -f Makefile build`
 - Test: `make -f Makefile test`
-
-### Multi-Agent (Ralph) Usage
-- Available skills: `/orchestrator`, `/iterate`, `/task-batch`, `/gates`, etc.
-- Do NOT use external paid API models (no glm, kimi, minimax). Use Claude Code only.
-- Only safety hooks are enabled: git-safety-guard and repo-boundary-guard

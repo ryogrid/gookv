@@ -80,8 +80,6 @@ internal/                 # Private implementation packages
     flow/                 # Flow control, EWMA backpressure, memory quota
   coprocessor/            # Push-down execution: RPN, TableScan, Selection, Aggregation
 e2e/                      # End-to-end integration tests (cluster, PD, Raw KV, GC, etc.)
-proto/                    # Reference .proto files from kvproto
-design_docs/              # Architecture and design documents (00-08)
 tasks/                    # Project tracking (todo.md)
 ```
 

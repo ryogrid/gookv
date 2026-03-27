@@ -124,10 +124,14 @@ func TestMultiRegionRawKV(t *testing.T) {
 	ctx := context.Background()
 
 	// Write keys that should span multiple regions.
+	// Use retry for each Put since new regions after split may still be electing leaders.
 	keys := []string{"aaa-key", "mmm-key", "zzz-key"}
 	for i, k := range keys {
-		err := rawKV.Put(ctx, []byte(k), []byte(fmt.Sprintf("val-%d", i)))
-		require.NoError(t, err)
+		e2elib.WaitForCondition(t, 30*time.Second, fmt.Sprintf("put %s", k), func() bool {
+			ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			return rawKV.Put(ctx2, []byte(k), []byte(fmt.Sprintf("val-%d", i))) == nil
+		})
 	}
 
 	// Read back all keys.

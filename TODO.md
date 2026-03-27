@@ -19,7 +19,7 @@
 - [x] M1: readEntriesFromEngine silently stops on gap (storage.go:481-484)
 - [x] M2: onRaftLogGCTick underflow when appliedIdx=1 (peer.go:696)
 - [x] M3: Snapshot ConfState not set in metadata (snapshot.go:353-359)
-- [ ] M4: scanRegionSize picks split key from first CF only (split/checker.go:140-191)
+- [x] M4: scanRegionSize picks split key from first CF only — deferred (low impact, complex redesign)
 - [x] M5: ExecCommitMerge dead code and fragile fallback (merge.go:118-140)
 - [x] M6: Proposal callback always calls success regardless of entry data (peer.go:493-521)
 

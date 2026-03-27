@@ -1192,6 +1192,10 @@ func NewTSOAllocator(saveInterval time.Duration) *TSOAllocator {
 
 // Allocate allocates `count` timestamps and returns the last one.
 func (t *TSOAllocator) Allocate(count int) (*pdpb.Timestamp, error) {
+	if count <= 0 {
+		return nil, fmt.Errorf("tso: count must be positive, got %d", count)
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -1202,15 +1206,23 @@ func (t *TSOAllocator) Allocate(count int) (*pdpb.Timestamp, error) {
 	}
 
 	t.logical += int64(count)
+
+	// If logical overflows the 18-bit space, advance physical and reset.
 	if t.logical >= (1 << 18) {
-		// Overflow: advance physical.
-		t.physical++
+		// Re-read wall clock to avoid creating timestamps behind the real
+		// time when the clock has already advanced past physical+1.
+		next := t.physical + 1
+		now = time.Now().UnixMilli()
+		if now >= next {
+			next = now
+		}
+		t.physical = next
 		t.logical = int64(count)
 	}
 
 	return &pdpb.Timestamp{
 		Physical: t.physical,
-		Logical:  int64(t.logical),
+		Logical:  t.logical,
 	}, nil
 }
 

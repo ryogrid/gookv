@@ -1,6 +1,7 @@
 package latch
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -152,11 +153,9 @@ func TestConcurrentDeadlockFree(t *testing.T) {
 				lock := l.GenLock(keys)
 				cmdID := uint64(id*iterations + i + 1)
 
-				// Spin until acquired.
-				for !l.Acquire(lock, cmdID) {
-					// Reset and retry.
-					lock = l.GenLock(keys)
-				}
+				// Use blocking acquire instead of spin-wait.
+				err := l.AcquireBlocking(context.Background(), lock, cmdID)
+				require.NoError(t, err)
 
 				counter.Add(1)
 				l.Release(lock, cmdID)

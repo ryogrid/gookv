@@ -73,7 +73,7 @@ func NewServer(cfg ServerConfig, storage *Storage) *Server {
 	opts := buildServerOptions(cfg)
 	grpcSrv := grpc.NewServer(opts...)
 
-	gcWorker := gc.NewGCWorker(storage.Engine(), gc.DefaultGCConfig())
+	gcWorker := gc.NewGCWorker(storage.Engine(), storage.Latches(), storage.CmdIDCounter(), gc.DefaultGCConfig())
 	gcWorker.Start()
 
 	s := &Server{

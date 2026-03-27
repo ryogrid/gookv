@@ -4,8 +4,9 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"errors"
-	"sync"
+	"sync/atomic"
 
 	"github.com/ryogrid/gookv/internal/engine/traits"
 	"github.com/ryogrid/gookv/internal/storage/mvcc"
@@ -19,29 +20,35 @@ import (
 // Storage provides the transaction-aware storage interface used by gRPC service handlers.
 // It bridges the engine layer, MVCC layer, and transaction layer together.
 type Storage struct {
-	engine      traits.KvEngine
-	latches     *latch.Latches
-	concMgr     *concurrency.Manager
-	mu          sync.Mutex
-	nextCmdID   uint64
+	engine       traits.KvEngine
+	latches      *latch.Latches
+	concMgr      *concurrency.Manager
+	cmdIDCounter *atomic.Uint64 // shared with GCWorker to avoid command ID collisions
 }
 
 // NewStorage creates a new Storage backed by the given engine.
 func NewStorage(engine traits.KvEngine) *Storage {
+	counter := &atomic.Uint64{}
 	return &Storage{
-		engine:    engine,
-		latches:   latch.New(2048),
-		concMgr:   concurrency.New(),
-		nextCmdID: 1,
+		engine:       engine,
+		latches:      latch.New(2048),
+		concMgr:      concurrency.New(),
+		cmdIDCounter: counter,
 	}
 }
 
 func (s *Storage) allocCmdID() uint64 {
-	s.mu.Lock()
-	id := s.nextCmdID
-	s.nextCmdID++
-	s.mu.Unlock()
-	return id
+	return s.cmdIDCounter.Add(1)
+}
+
+// Latches returns the latch instance for sharing with other components (e.g. GCWorker).
+func (s *Storage) Latches() *latch.Latches {
+	return s.latches
+}
+
+// CmdIDCounter returns the shared command ID counter for sharing with other components (e.g. GCWorker).
+func (s *Storage) CmdIDCounter() *atomic.Uint64 {
+	return s.cmdIDCounter
 }
 
 // LatchGuard holds a latch that must be released after the caller finishes
@@ -182,8 +189,7 @@ func (s *Storage) PrewriteModifies(mutations []txn.Mutation, primary []byte, sta
 
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
@@ -224,8 +230,7 @@ func (s *Storage) PrewriteModifies(mutations []txn.Mutation, primary []byte, sta
 func (s *Storage) CommitModifies(keys [][]byte, startTS, commitTS txntypes.TimeStamp) ([]mvcc.Modify, error, *LatchGuard) {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
@@ -254,9 +259,7 @@ func (s *Storage) Prewrite(mutations []txn.Mutation, primary []byte, startTS txn
 	// Acquire latches.
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-		// Spin until acquired. In production, use a wait channel.
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	defer s.latches.Release(lock, cmdID)
 
 	// Take snapshot and create reader/writer.
@@ -310,8 +313,7 @@ func (s *Storage) Commit(keys [][]byte, startTS, commitTS txntypes.TimeStamp) er
 	// Acquire latches.
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	defer s.latches.Release(lock, cmdID)
 
 	snap := s.engine.NewSnapshot()
@@ -333,8 +335,7 @@ func (s *Storage) Commit(keys [][]byte, startTS, commitTS txntypes.TimeStamp) er
 func (s *Storage) BatchRollback(keys [][]byte, startTS txntypes.TimeStamp) error {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	defer s.latches.Release(lock, cmdID)
 
 	snap := s.engine.NewSnapshot()
@@ -358,8 +359,7 @@ func (s *Storage) BatchRollback(keys [][]byte, startTS txntypes.TimeStamp) error
 func (s *Storage) BatchRollbackModifies(keys [][]byte, startTS txntypes.TimeStamp) ([]mvcc.Modify, error, *LatchGuard) {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
@@ -382,8 +382,7 @@ func (s *Storage) Cleanup(key []byte, startTS txntypes.TimeStamp) (txntypes.Time
 	keys := [][]byte{key}
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	defer s.latches.Release(lock, cmdID)
 
 	snap := s.engine.NewSnapshot()
@@ -450,8 +449,7 @@ func (s *Storage) CleanupModifies(key []byte, startTS txntypes.TimeStamp) (txnty
 	keys := [][]byte{key}
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
@@ -532,8 +530,7 @@ func (s *Storage) CheckTxnStatus(primaryKey []byte, startTS txntypes.TimeStamp) 
 func (s *Storage) CheckTxnStatusWithCleanup(primaryKey []byte, startTS, callerStartTS txntypes.TimeStamp, rollbackIfNotExist bool) (*txn.TxnStatus, []mvcc.Modify, error, *LatchGuard) {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock([][]byte{primaryKey})
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
@@ -553,8 +550,7 @@ func (s *Storage) CheckTxnStatusWithCleanup(primaryKey []byte, startTS, callerSt
 func (s *Storage) PessimisticLock(keys [][]byte, primary []byte, startTS, forUpdateTS txntypes.TimeStamp, lockTTL uint64) []error {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	defer s.latches.Release(lock, cmdID)
 
 	snap := s.engine.NewSnapshot()
@@ -595,8 +591,7 @@ func (s *Storage) PessimisticLock(keys [][]byte, primary []byte, startTS, forUpd
 func (s *Storage) PessimisticLockModifies(keys [][]byte, primary []byte, startTS, forUpdateTS txntypes.TimeStamp, lockTTL uint64) ([]mvcc.Modify, []error, *LatchGuard) {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
@@ -627,8 +622,7 @@ func (s *Storage) PessimisticLockModifies(keys [][]byte, primary []byte, startTS
 func (s *Storage) PessimisticRollbackKeys(keys [][]byte, startTS, forUpdateTS txntypes.TimeStamp) []error {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	defer s.latches.Release(lock, cmdID)
 
 	snap := s.engine.NewSnapshot()
@@ -664,8 +658,7 @@ func (s *Storage) TxnHeartBeat(primaryKey []byte, startTS txntypes.TimeStamp, ad
 	keys := [][]byte{primaryKey}
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	defer s.latches.Release(lock, cmdID)
 
 	snap := s.engine.NewSnapshot()
@@ -693,8 +686,7 @@ func (s *Storage) TxnHeartBeatModifies(primaryKey []byte, startTS txntypes.TimeS
 	keys := [][]byte{primaryKey}
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
@@ -715,8 +707,7 @@ func (s *Storage) TxnHeartBeatModifies(primaryKey []byte, startTS txntypes.TimeS
 func (s *Storage) PessimisticRollbackModifies(keys [][]byte, startTS, forUpdateTS txntypes.TimeStamp) ([]mvcc.Modify, []error, *LatchGuard) {
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
@@ -744,8 +735,7 @@ func (s *Storage) ResolveLock(startTS, commitTS txntypes.TimeStamp, keys [][]byt
 
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	defer s.latches.Release(lock, cmdID)
 
 	snap := s.engine.NewSnapshot()
@@ -774,8 +764,7 @@ func (s *Storage) ResolveLockModifies(startTS, commitTS txntypes.TimeStamp, keys
 
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
@@ -828,8 +817,7 @@ func (s *Storage) PrewriteAsyncCommit(mutations []txn.Mutation, primary []byte, 
 
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	defer s.latches.Release(lock, cmdID)
 
 	snap := s.engine.NewSnapshot()
@@ -892,8 +880,7 @@ func (s *Storage) PrewriteAsyncCommitModifies(mutations []txn.Mutation, primary 
 
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()
@@ -945,8 +932,7 @@ func (s *Storage) Prewrite1PC(mutations []txn.Mutation, primary []byte, startTS 
 
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	defer s.latches.Release(lock, cmdID)
 
 	snap := s.engine.NewSnapshot()
@@ -995,8 +981,7 @@ func (s *Storage) Prewrite1PCModifies(mutations []txn.Mutation, primary []byte, 
 
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
-	for !s.latches.Acquire(lock, cmdID) {
-	}
+	s.latches.AcquireBlocking(context.Background(), lock, cmdID)
 	guard := &LatchGuard{lock: lock, cmdID: cmdID}
 
 	snap := s.engine.NewSnapshot()

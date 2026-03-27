@@ -3,6 +3,7 @@ package pd
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
@@ -25,7 +26,8 @@ type PDSnapshot struct {
 	NextID       uint64                      `json:"next_id"`
 	TSOState     TSOSnapshotState            `json:"tso_state"`
 	GCSafePoint  uint64                      `json:"gc_safe_point"`
-	PendingMoves map[uint64]*PendingMove     `json:"pending_moves"`
+	PendingMoves       map[uint64]*PendingMove `json:"pending_moves"`
+	StoreLastHeartbeat map[uint64]int64        `json:"store_last_heartbeat"`
 }
 
 // GenerateSnapshot captures the current PD server state as a JSON-encoded snapshot.
@@ -57,6 +59,10 @@ func (s *PDServer) GenerateSnapshot() ([]byte, error) {
 	}
 	for k, v := range s.meta.storeStates {
 		snap.StoreStates[k] = v
+	}
+	snap.StoreLastHeartbeat = make(map[uint64]int64, len(s.meta.storeLastHeartbeat))
+	for k, v := range s.meta.storeLastHeartbeat {
+		snap.StoreLastHeartbeat[k] = v.UnixNano()
 	}
 	s.meta.mu.RUnlock()
 
@@ -120,6 +126,10 @@ func (s *PDServer) ApplySnapshot(data []byte) error {
 	s.meta.storeStates = snap.StoreStates
 	if s.meta.storeStates == nil {
 		s.meta.storeStates = make(map[uint64]StoreState)
+	}
+	s.meta.storeLastHeartbeat = make(map[uint64]time.Time, len(snap.StoreLastHeartbeat))
+	for k, v := range snap.StoreLastHeartbeat {
+		s.meta.storeLastHeartbeat[k] = time.Unix(0, v)
 	}
 	s.meta.mu.Unlock()
 

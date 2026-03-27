@@ -48,10 +48,10 @@
 - [x] BUG-03: Async commit only checks single write record (async_commit.go:44-52)
 
 ### Medium
-- [ ] BUG-04: Latch spin-wait without backoff (server/storage.go)
+- [x] BUG-04: Latch spin-wait without backoff (server/storage.go)
 - [x] ISSUE-05: CleanupModifies removes lock without rollback record (server/storage.go)
-- [ ] ISSUE-06: GC runs without latches (gc/gc.go)
-- [ ] ISSUE-07: GC does not remove Delete markers (gc/gc.go)
+- [x] ISSUE-06: GC runs without latches (gc/gc.go)
+- [x] ISSUE-07: GC does not remove Delete markers (gc/gc.go)
 
 ## 04 Client Library (`pkg/client/`)
 
@@ -76,13 +76,13 @@
 ## 05 PD Layer (`internal/pd/`, `pkg/pdclient/`)
 
 ### Critical
-- [ ] C1: Proposal index tracking reads stale LastIndex (raft_peer.go:250-255)
+- [x] C1: Proposal index tracking reads stale LastIndex (raft_peer.go:250-255)
 - [x] C2: Non-atomic bootstrap in Raft mode (server.go:574-605)
 - [x] C3: ReportBatchSplit missing Leader field in Raft mode (server.go:858-864)
-- [ ] C4: Snapshot doesn't include storeLastHeartbeat (snapshot.go)
+- [x] C4: Snapshot doesn't include storeLastHeartbeat (snapshot.go)
 
 ### Moderate
-- [ ] M1: TSO logical overflow may produce non-monotonic timestamps (server.go:1199-1221)
+- [x] M1: TSO logical overflow may produce non-monotonic timestamps (server.go:1199-1221)
 - [x] M3: scheduleExcessReplicaShedding may remove leader (scheduler.go:156-187)
 - [x] M5: MockClient TSO race condition (pdclient/mock.go:64-80)
 

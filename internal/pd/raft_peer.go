@@ -93,9 +93,10 @@ type PDRaftPeer struct {
 	// sendFunc dispatches outgoing Raft messages to other peers.
 	sendFunc func([]raftpb.Message)
 
-	// pendingProposals tracks in-flight proposals: log index -> callback.
+	// pendingProposals tracks in-flight proposals in FIFO order.
+	// Every call to propose() appends one entry (nil or non-nil callback).
 	// Only accessed from the Run goroutine.
-	pendingProposals map[uint64]func([]byte, error)
+	pendingProposals []func([]byte, error)
 
 	// applyFunc is called for each committed entry to apply the PDCommand
 	// to the PD state machine. It returns a result and optional error.
@@ -168,7 +169,7 @@ func NewPDRaftPeer(
 		storage:          storage,
 		peerAddrs:        peerAddrs,
 		Mailbox:          make(chan PDRaftMsg, cfg.MailboxCapacity),
-		pendingProposals: make(map[uint64]func([]byte, error)),
+		pendingProposals: nil, // zero-value slice; appended in propose()
 		cfg:              cfg,
 	}
 
@@ -247,12 +248,9 @@ func (p *PDRaftPeer) propose(proposal *PDProposal) {
 		return
 	}
 
-	// Track the proposal callback by expected log index.
-	lastIdx, _ := p.storage.LastIndex()
-	expectedIdx := lastIdx + 1
-	if proposal.Callback != nil {
-		p.pendingProposals[expectedIdx] = proposal.Callback
-	}
+	// Always append to maintain FIFO alignment, even if callback is nil.
+	// Nil callbacks (e.g. CmdCompactLog) are discarded during dequeue.
+	p.pendingProposals = append(p.pendingProposals, proposal.Callback)
 }
 
 // handleReady processes a Raft Ready batch, following the same 7-step pattern
@@ -274,6 +272,16 @@ func (p *PDRaftPeer) handleReady() {
 		// Fire leader change callback when status transitions.
 		if wasLeader != nowLeader && p.leaderChangeFunc != nil {
 			p.leaderChangeFunc(nowLeader)
+		}
+
+		// If we lost leadership, drain all pending proposals with ErrNotLeader.
+		if wasLeader && !nowLeader {
+			for _, cb := range p.pendingProposals {
+				if cb != nil {
+					cb(nil, ErrNotLeader)
+				}
+			}
+			p.pendingProposals = nil
 		}
 	}
 
@@ -312,21 +320,15 @@ func (p *PDRaftPeer) handleReady() {
 	// Step 4: Apply committed entries.
 	if len(rd.CommittedEntries) > 0 {
 		for _, e := range rd.CommittedEntries {
-			// Skip empty entries (e.g., leader election no-ops).
+			// No-op entries (leader election) are not proposed via propose(),
+			// so do NOT dequeue from pendingProposals.
 			if len(e.Data) == 0 {
-				if cb, ok := p.pendingProposals[e.Index]; ok {
-					cb(nil, nil)
-					delete(p.pendingProposals, e.Index)
-				}
 				continue
 			}
 
-			// Skip conf change entries (emitted during bootstrap).
+			// ConfChange entries are not proposed via propose(),
+			// so do NOT dequeue from pendingProposals.
 			if e.Type == raftpb.EntryConfChange || e.Type == raftpb.EntryConfChangeV2 {
-				if cb, ok := p.pendingProposals[e.Index]; ok {
-					cb(nil, nil)
-					delete(p.pendingProposals, e.Index)
-				}
 				continue
 			}
 
@@ -334,9 +336,13 @@ func (p *PDRaftPeer) handleReady() {
 			if err != nil {
 				slog.Error("pd: failed to unmarshal committed entry",
 					"node", p.nodeID, "index", e.Index, "err", err)
-				if cb, ok := p.pendingProposals[e.Index]; ok {
-					cb(nil, err)
-					delete(p.pendingProposals, e.Index)
+				// Dequeue and notify error if this is our proposal.
+				if len(p.pendingProposals) > 0 {
+					cb := p.pendingProposals[0]
+					p.pendingProposals = p.pendingProposals[1:]
+					if cb != nil {
+						cb(nil, err)
+					}
 				}
 				continue
 			}
@@ -348,10 +354,13 @@ func (p *PDRaftPeer) handleReady() {
 				result, applyErr = p.applyFunc(cmd)
 			}
 
-			// Invoke pending proposal callback.
-			if cb, ok := p.pendingProposals[e.Index]; ok {
-				cb(result, applyErr)
-				delete(p.pendingProposals, e.Index)
+			// Dequeue the next pending callback (FIFO).
+			if len(p.pendingProposals) > 0 {
+				cb := p.pendingProposals[0]
+				p.pendingProposals = p.pendingProposals[1:]
+				if cb != nil {
+					cb(result, applyErr)
+				}
 			}
 		}
 
@@ -404,11 +413,15 @@ func (p *PDRaftPeer) onRaftLogGCTick() {
 		CompactIndex: compactIdx,
 		CompactTerm:  term,
 	}
-	data, err := cmd.Marshal()
-	if err != nil {
-		return
-	}
-	_ = p.rawNode.Propose(data) // fire-and-forget
+	// Route through propose() with nil callback to keep the FIFO queue
+	// aligned. Direct rawNode.Propose() would cause callback mismatches.
+	p.handleMessage(PDRaftMsg{
+		Type: PDRaftMsgTypeProposal,
+		Data: &PDProposal{
+			Command:  cmd,
+			Callback: nil,
+		},
+	})
 	p.lastCompactedIdx = compactIdx
 }
 

@@ -141,19 +141,20 @@ func TestGC_DeleteVersion(t *testing.T) {
 	writeVersion(t, engine, key, 15, 20, txntypes.WriteTypeDelete, nil)
 	writeVersion(t, engine, key, 25, 30, txntypes.WriteTypePut, []byte("v2"))
 
-	// GC at safe_point=25: Delete@20 kept (latest data-changing below safe point), Put@10 removed.
+	// GC at safe_point=25: Delete@20 is latest below safe point. Put@10 removed (gcStateRemoveAll),
+	// then Delete@20 marker is also removed (same-pass cleanup since no older versions remain).
 	snap := engine.NewSnapshot()
 	reader := mvcc.NewMvccReader(snap)
 	txn := mvcc.NewMvccTxn(0)
 
 	info, err := GC(txn, reader, key, 25)
 	require.NoError(t, err)
-	assert.Equal(t, 1, info.DeletedVersions) // Put@10 deleted.
+	assert.Equal(t, 2, info.DeletedVersions) // Put@10 + Delete@20 both deleted.
 
 	reader.Close()
 	applyModifies(t, engine, txn)
 
-	assert.Equal(t, 2, countWriteVersions(t, engine, key))
+	assert.Equal(t, 1, countWriteVersions(t, engine, key))
 }
 
 func TestGC_LargeValue(t *testing.T) {
@@ -217,7 +218,7 @@ func TestGCWorker_Basic(t *testing.T) {
 		writeVersion(t, engine, key, txntypes.TimeStamp(i*10+5), txntypes.TimeStamp(i*10+10), txntypes.WriteTypePut, []byte{i, 0x02})
 	}
 
-	worker := NewGCWorker(engine, DefaultGCConfig())
+	worker := NewGCWorker(engine, nil, nil, DefaultGCConfig())
 	worker.Start()
 	defer worker.Stop()
 

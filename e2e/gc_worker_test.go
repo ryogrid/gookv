@@ -31,8 +31,8 @@ func startStandaloneServerWithGC(t *testing.T) (string, *server.Server, *gc.GCWo
 	require.NoError(t, srv.Start())
 	t.Cleanup(func() { srv.Stop() })
 
-	// Create and start GC worker separately.
-	gcWorker := gc.NewGCWorker(engine, gc.DefaultGCConfig())
+	// Create and start GC worker separately (nil latches/counter for independent testing).
+	gcWorker := gc.NewGCWorker(engine, storage.Latches(), storage.CmdIDCounter(), gc.DefaultGCConfig())
 	gcWorker.Start()
 	t.Cleanup(func() { gcWorker.Stop() })
 

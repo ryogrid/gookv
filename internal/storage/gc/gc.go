@@ -11,6 +11,7 @@ import (
 
 	"github.com/ryogrid/gookv/internal/engine/traits"
 	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/internal/storage/txn/latch"
 	"github.com/ryogrid/gookv/pkg/cfnames"
 	"github.com/ryogrid/gookv/pkg/txntypes"
 )
@@ -67,6 +68,11 @@ func GC(
 	state := gcStateRewind
 	ts := txntypes.TSMax
 
+	// Track whether we entered gcStateRemoveAll from a Delete marker,
+	// so we can remove the Delete marker after all older versions are cleaned.
+	var deleteMarkerTS txntypes.TimeStamp
+	var hasDeleteMarker bool
+
 	for {
 		write, commitTS, err := reader.SeekWrite(key, ts)
 		if err != nil {
@@ -98,7 +104,21 @@ func GC(
 				continue
 
 			case txntypes.WriteTypeDelete:
-				// Keep the Delete marker, but transition to remove all older versions.
+				// Check if there are any older versions below this Delete.
+				olderWrite, _, err := reader.SeekWrite(key, commitTS-1)
+				if err != nil {
+					return nil, err
+				}
+				if olderWrite == nil {
+					// No older versions — the Delete marker is orphaned. Remove it.
+					txn.DeleteWrite(key, commitTS)
+					info.DeletedVersions++
+					// No need to transition to gcStateRemoveAll; we're done with this key.
+					goto done
+				}
+				// Older versions exist — keep the Delete and remove everything below.
+				deleteMarkerTS = commitTS
+				hasDeleteMarker = true
 				state = gcStateRemoveAll
 				ts = commitTS - 1
 				continue
@@ -128,6 +148,14 @@ func GC(
 		ts = commitTS - 1
 	}
 
+done:
+	// After the main loop, if we removed all versions below a Delete marker,
+	// remove the Delete marker too (same-pass cleanup).
+	if hasDeleteMarker {
+		txn.DeleteWrite(key, deleteMarkerTS)
+		info.DeletedVersions++
+	}
+
 	return info, nil
 }
 
@@ -147,9 +175,11 @@ type GCWorkerStats struct {
 
 // GCWorker executes GC tasks.
 type GCWorker struct {
-	engine traits.KvEngine
-	taskCh chan GCTask
-	config *GCConfig
+	engine       traits.KvEngine
+	latches      *latch.Latches  // shared latch instance for mutual exclusion with transactions
+	cmdIDCounter *atomic.Uint64  // shared with Storage to avoid command ID collisions
+	taskCh       chan GCTask
+	config       *GCConfig
 
 	keysScanned     atomic.Int64
 	versionsDeleted atomic.Int64
@@ -159,15 +189,25 @@ type GCWorker struct {
 }
 
 // NewGCWorker creates a new GCWorker.
-func NewGCWorker(engine traits.KvEngine, config *GCConfig) *GCWorker {
+// If latches or cmdIDCounter is nil, internal instances are created (useful for testing
+// without shared latch coordination).
+func NewGCWorker(engine traits.KvEngine, latches *latch.Latches, cmdIDCounter *atomic.Uint64, config *GCConfig) *GCWorker {
 	if config == nil {
 		config = DefaultGCConfig()
 	}
+	if latches == nil {
+		latches = latch.New(2048)
+	}
+	if cmdIDCounter == nil {
+		cmdIDCounter = &atomic.Uint64{}
+	}
 	return &GCWorker{
-		engine: engine,
-		taskCh: make(chan GCTask, 64),
-		config: config,
-		stopCh: make(chan struct{}),
+		engine:       engine,
+		latches:      latches,
+		cmdIDCounter: cmdIDCounter,
+		taskCh:       make(chan GCTask, 64),
+		config:       config,
+		stopCh:       make(chan struct{}),
 	}
 }
 
@@ -242,6 +282,7 @@ func (w *GCWorker) processTask(task GCTask) error {
 
 	// Track unique user keys to avoid duplicate GC.
 	var lastUserKey []byte
+	var batchKeys [][]byte
 
 	for iter.SeekToFirst(); iter.Valid(); iter.Next() {
 		userKey, _, err := mvcc.DecodeKey(iter.Key())
@@ -263,22 +304,43 @@ func (w *GCWorker) processTask(task GCTask) error {
 		}
 
 		w.versionsDeleted.Add(int64(info.DeletedVersions))
+		batchKeys = append(batchKeys, append([]byte(nil), userKey...))
 
 		// Flush when batch gets large.
 		if txn.WriteSize >= w.config.MaxTxnWriteSize {
-			if err := w.applyModifies(txn); err != nil {
+			if err := w.applyModifiesWithLatches(txn, batchKeys); err != nil {
 				return err
 			}
 			txn = mvcc.NewMvccTxn(0)
+			batchKeys = batchKeys[:0]
 		}
 	}
 
 	// Flush remaining modifies.
 	if len(txn.Modifies) > 0 {
-		return w.applyModifies(txn)
+		return w.applyModifiesWithLatches(txn, batchKeys)
 	}
 
 	return nil
+}
+
+func (w *GCWorker) applyModifiesWithLatches(txn *mvcc.MvccTxn, keys [][]byte) error {
+	if len(txn.Modifies) == 0 {
+		return nil
+	}
+
+	// Acquire latches for all keys in this batch.
+	cmdID := w.cmdIDCounter.Add(1)
+	lock := w.latches.GenLock(keys)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := w.latches.AcquireBlocking(ctx, lock, cmdID); err != nil {
+		return fmt.Errorf("gc: latch acquire: %w", err)
+	}
+	defer w.latches.Release(lock, cmdID)
+
+	// Apply the writes under latch protection.
+	return w.applyModifies(txn)
 }
 
 func (w *GCWorker) applyModifies(txn *mvcc.MvccTxn) error {

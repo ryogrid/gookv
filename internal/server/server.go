@@ -803,9 +803,44 @@ func (svc *tikvService) KvPessimisticLock(ctx context.Context, req *kvrpcpb.Pess
 // KVPessimisticRollback implements the KVPessimisticRollback RPC.
 func (svc *tikvService) KVPessimisticRollback(ctx context.Context, req *kvrpcpb.PessimisticRollbackRequest) (*kvrpcpb.PessimisticRollbackResponse, error) {
 	resp := &kvrpcpb.PessimisticRollbackResponse{}
+
+	var validateKey []byte
+	if len(req.GetKeys()) > 0 {
+		validateKey = req.GetKeys()[0]
+	}
+	if regErr := svc.validateRegionContext(req.GetContext(), validateKey); regErr != nil {
+		resp.RegionError = regErr
+		return resp, nil
+	}
+
 	startTS := txntypes.TimeStamp(req.GetStartVersion())
 	forUpdateTS := txntypes.TimeStamp(req.GetForUpdateTs())
 
+	// Cluster mode: propose via Raft.
+	if coord := svc.server.coordinator; coord != nil {
+		modifies, errs, guard := svc.server.storage.PessimisticRollbackModifies(req.GetKeys(), startTS, forUpdateTS)
+		defer svc.server.storage.ReleaseLatch(guard)
+		for _, err := range errs {
+			if err != nil {
+				resp.Errors = append(resp.Errors, errToKeyError(err))
+			}
+		}
+		if len(modifies) > 0 {
+			regionID := req.GetContext().GetRegionId()
+			if regionID == 0 && len(req.GetKeys()) > 0 {
+				regionID = svc.resolveRegionID(req.GetKeys()[0])
+			}
+			if propErr := coord.ProposeModifies(regionID, modifies, 10*time.Second, req.GetContext().GetRegionEpoch()); propErr != nil {
+				if regErr := proposeErrorToRegionError(propErr, regionID); regErr != nil {
+					resp.RegionError = regErr
+					return resp, nil
+				}
+			}
+		}
+		return resp, nil
+	}
+
+	// Standalone mode: direct apply.
 	errs := svc.server.storage.PessimisticRollbackKeys(req.GetKeys(), startTS, forUpdateTS)
 	for _, err := range errs {
 		if err != nil {
@@ -818,8 +853,39 @@ func (svc *tikvService) KVPessimisticRollback(ctx context.Context, req *kvrpcpb.
 // KvTxnHeartBeat implements the KvTxnHeartBeat RPC.
 func (svc *tikvService) KvTxnHeartBeat(ctx context.Context, req *kvrpcpb.TxnHeartBeatRequest) (*kvrpcpb.TxnHeartBeatResponse, error) {
 	resp := &kvrpcpb.TxnHeartBeatResponse{}
+
+	if regErr := svc.validateRegionContext(req.GetContext(), req.GetPrimaryLock()); regErr != nil {
+		resp.RegionError = regErr
+		return resp, nil
+	}
+
 	startTS := txntypes.TimeStamp(req.GetStartVersion())
 
+	// Cluster mode: propose via Raft.
+	if coord := svc.server.coordinator; coord != nil {
+		ttl, modifies, err, guard := svc.server.storage.TxnHeartBeatModifies(req.GetPrimaryLock(), startTS, req.GetAdviseLockTtl())
+		defer svc.server.storage.ReleaseLatch(guard)
+		if err != nil {
+			resp.Error = errToKeyError(err)
+			return resp, nil
+		}
+		if len(modifies) > 0 {
+			regionID := req.GetContext().GetRegionId()
+			if regionID == 0 {
+				regionID = svc.resolveRegionID(req.GetPrimaryLock())
+			}
+			if propErr := coord.ProposeModifies(regionID, modifies, 10*time.Second, req.GetContext().GetRegionEpoch()); propErr != nil {
+				if regErr := proposeErrorToRegionError(propErr, regionID); regErr != nil {
+					resp.RegionError = regErr
+					return resp, nil
+				}
+			}
+		}
+		resp.LockTtl = ttl
+		return resp, nil
+	}
+
+	// Standalone mode: direct apply.
 	ttl, err := svc.server.storage.TxnHeartBeat(req.GetPrimaryLock(), startTS, req.GetAdviseLockTtl())
 	if err != nil {
 		resp.Error = errToKeyError(err)
@@ -1538,7 +1604,11 @@ func (svc *tikvService) KvDeleteRange(ctx context.Context, req *kvrpcpb.DeleteRa
 	coord := svc.server.coordinator
 	if coord != nil {
 		// Cluster mode: propose via Raft.
-		if err := coord.ProposeModifies(1, modifies, 30*time.Second); err != nil {
+		regionID := req.GetContext().GetRegionId()
+		if regionID == 0 {
+			regionID = svc.resolveRegionID(startKey)
+		}
+		if err := coord.ProposeModifies(regionID, modifies, 30*time.Second, req.GetContext().GetRegionEpoch()); err != nil {
 			resp.Error = err.Error()
 		}
 	} else {

@@ -686,6 +686,52 @@ func (s *Storage) TxnHeartBeat(primaryKey []byte, startTS txntypes.TimeStamp, ad
 	return ttl, nil
 }
 
+// TxnHeartBeatModifies extends the TTL and returns modifications without applying.
+// Used in cluster mode to propose via Raft.
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) TxnHeartBeatModifies(primaryKey []byte, startTS txntypes.TimeStamp, adviseLockTTL uint64) (uint64, []mvcc.Modify, error, *LatchGuard) {
+	keys := [][]byte{primaryKey}
+	cmdID := s.allocCmdID()
+	lock := s.latches.GenLock(keys)
+	for !s.latches.Acquire(lock, cmdID) {
+	}
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
+
+	snap := s.engine.NewSnapshot()
+	reader := mvcc.NewMvccReader(snap)
+	defer reader.Close()
+
+	mvccTxn := mvcc.NewMvccTxn(startTS)
+	ttl, err := txn.TxnHeartBeat(mvccTxn, reader, primaryKey, startTS, adviseLockTTL)
+	if err != nil {
+		return 0, nil, err, guard
+	}
+	return ttl, mvccTxn.Modifies, nil, guard
+}
+
+// PessimisticRollbackModifies removes pessimistic locks and returns modifications.
+// Used in cluster mode to propose via Raft.
+// The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
+func (s *Storage) PessimisticRollbackModifies(keys [][]byte, startTS, forUpdateTS txntypes.TimeStamp) ([]mvcc.Modify, []error, *LatchGuard) {
+	cmdID := s.allocCmdID()
+	lock := s.latches.GenLock(keys)
+	for !s.latches.Acquire(lock, cmdID) {
+	}
+	guard := &LatchGuard{lock: lock, cmdID: cmdID}
+
+	snap := s.engine.NewSnapshot()
+	reader := mvcc.NewMvccReader(snap)
+	defer reader.Close()
+
+	mvccTxn := mvcc.NewMvccTxn(startTS)
+	mvccKeys := make([]mvcc.Key, len(keys))
+	for i, k := range keys {
+		mvccKeys[i] = k
+	}
+	errs := txn.PessimisticRollback(mvccTxn, reader, mvccKeys, startTS, forUpdateTS)
+	return mvccTxn.Modifies, errs, guard
+}
+
 // ResolveLock resolves all locks for a transaction (commit or rollback).
 func (s *Storage) ResolveLock(startTS, commitTS txntypes.TimeStamp, keys [][]byte) error {
 	if len(keys) == 0 {

@@ -27,9 +27,9 @@
 
 ### Critical
 - [ ] C1: Loopback routing uses source region ID for target peer (coordinator.go:770-783)
-- [ ] C2: KVPessimisticRollback bypasses Raft in cluster mode (server.go:804-816)
-- [ ] C3: KvTxnHeartBeat bypasses Raft in cluster mode (server.go:819-830)
-- [ ] C4: C2+C3 skip validateRegionContext (server.go:804, 819)
+- [x] C2: KVPessimisticRollback bypasses Raft in cluster mode (server.go:804-816)
+- [x] C3: KvTxnHeartBeat bypasses Raft in cluster mode (server.go:819-830)
+- [x] C4: C2+C3 skip validateRegionContext (server.go:804, 819)
 - [ ] C5: ProposeModifies callback never invoked on silent drop (coordinator.go:317-343)
 - [ ] C6: Transport creates new gRPC stream per Send (transport.go:78-102)
 
@@ -37,7 +37,7 @@
 - [ ] P1: ReadPool.Stop() doesn't drain pending tasks (flow/flow.go:112-114)
 - [ ] P3: Connection pool always uses index 0 (transport.go:249)
 - [ ] P4: TOCTOU in pd_resolver (pd_resolver.go:52-75)
-- [ ] P6: KvDeleteRange hardcodes region ID 1 (server.go:1541)
+- [x] P6: KvDeleteRange hardcodes region ID 1 (server.go:1541)
 - [ ] P7: RawPut/RawDelete skip region validation (server.go:1194-1233)
 
 ## 03 Storage/MVCC Layer

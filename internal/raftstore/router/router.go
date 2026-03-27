@@ -27,6 +27,11 @@ type Router struct {
 	// peers maps regionID -> chan<- PeerMsg
 	peers sync.Map
 
+	// peerMap maps peerID -> regionID for loopback routing.
+	// After a region split, the target peer may belong to a different region
+	// than the source. This map enables correct routing by peer ID.
+	peerMap sync.Map
+
 	// storeCh is the channel for store-level messages.
 	storeCh chan raftstore.StoreMsg
 }
@@ -125,4 +130,27 @@ func (r *Router) GetMailbox(regionID uint64) chan raftstore.PeerMsg {
 		return nil
 	}
 	return v.(chan raftstore.PeerMsg)
+}
+
+// RegisterPeer adds a peerID -> regionID mapping for loopback routing.
+// This must be called when peers are created (bootstrap, split, conf change)
+// so that sendRaftMessage can find the correct target region for loopback messages.
+func (r *Router) RegisterPeer(peerID, regionID uint64) {
+	r.peerMap.Store(peerID, regionID)
+}
+
+// UnregisterPeer removes a peerID mapping.
+// This must be called when peers are destroyed or removed via conf change.
+func (r *Router) UnregisterPeer(peerID uint64) {
+	r.peerMap.Delete(peerID)
+}
+
+// FindRegionByPeerID looks up which region a peer belongs to.
+// Returns the region ID and true if found, or (0, false) otherwise.
+func (r *Router) FindRegionByPeerID(peerID uint64) (uint64, bool) {
+	v, ok := r.peerMap.Load(peerID)
+	if !ok {
+		return 0, false
+	}
+	return v.(uint64), true
 }

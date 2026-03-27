@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/raft_serverpb"
@@ -20,10 +21,13 @@ import (
 // RaftClient manages gRPC connections to other gookv nodes for Raft message transport.
 type RaftClient struct {
 	mu          sync.RWMutex
-	connections map[uint64]*connPool // storeID -> connection pool
+	connections map[uint64]*connPool    // storeID -> connection pool
+	streams     map[uint64]*raftStream  // storeID -> persistent stream
 	resolver    StoreResolver
 	batchSize   int
 	dialTimeout time.Duration
+	poolSize    int // configured connection pool size per store
+	streamBuf   int // send channel buffer size for streams
 }
 
 // StoreResolver resolves a store ID to a network address.
@@ -33,10 +37,11 @@ type StoreResolver interface {
 
 // connPool manages a pool of gRPC connections to a single store.
 type connPool struct {
-	mu    sync.Mutex
-	addr  string
-	conns []*grpc.ClientConn
-	size  int
+	mu      sync.Mutex
+	addr    string
+	conns   []*grpc.ClientConn
+	size    int
+	nextIdx uint64 // round-robin counter
 }
 
 // RaftClientConfig configures the RaftClient.
@@ -68,37 +73,62 @@ func NewRaftClient(resolver StoreResolver, cfg RaftClientConfig) *RaftClient {
 	}
 	return &RaftClient{
 		connections: make(map[uint64]*connPool),
+		streams:     make(map[uint64]*raftStream),
 		resolver:    resolver,
 		batchSize:   cfg.BatchSize,
 		dialTimeout: cfg.DialTimeout,
+		poolSize:    cfg.PoolSize,
+		streamBuf:   4096,
 	}
 }
 
-// Send sends a Raft message to the target store via the Raft streaming RPC.
+// Send sends a Raft message to the target store via a persistent gRPC streaming RPC.
+// The stream is created lazily on first use and reused for subsequent messages.
+// If the stream is closed (e.g., due to a send error), it is automatically recreated.
 func (c *RaftClient) Send(storeID uint64, msg *raft_serverpb.RaftMessage) error {
+	rs, err := c.getOrCreateStream(storeID)
+	if err != nil {
+		return err
+	}
+	return rs.send(msg)
+}
+
+// getOrCreateStream returns an existing persistent stream for the store,
+// or creates a new one if none exists or the existing one is closed.
+func (c *RaftClient) getOrCreateStream(storeID uint64) (*raftStream, error) {
+	c.mu.RLock()
+	rs, ok := c.streams[storeID]
+	c.mu.RUnlock()
+
+	if ok && !rs.closed.Load() {
+		return rs, nil
+	}
+
+	// Need to create or recreate stream.
 	conn, err := c.getConnection(storeID)
 	if err != nil {
-		return fmt.Errorf("failed to get connection to store %d: %w", storeID, err)
+		return nil, err
 	}
 
-	client := tikvpb.NewTikvClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	slog.Debug("raft.Send", "store-id", storeID)
-	stream, err := client.Raft(ctx)
+	// Double-check after lock.
+	if rs, ok = c.streams[storeID]; ok && !rs.closed.Load() {
+		return rs, nil
+	}
+
+	// Close old stream if it exists.
+	if rs != nil {
+		rs.close()
+	}
+
+	rs, err = newRaftStream(conn, storeID, c.streamBuf)
 	if err != nil {
-		return fmt.Errorf("raft stream to store %d failed: %w", storeID, err)
+		return nil, err
 	}
-
-	if err := stream.Send(msg); err != nil {
-		return fmt.Errorf("raft send to store %d failed: %w", storeID, err)
-	}
-
-	if _, err := stream.CloseAndRecv(); err != nil {
-		return fmt.Errorf("raft close to store %d failed: %w", storeID, err)
-	}
-	return nil
+	c.streams[storeID] = rs
+	return rs, nil
 }
 
 // BatchSend sends multiple Raft messages to the target store.
@@ -206,21 +236,34 @@ func (c *RaftClient) SendSnapshot(storeID uint64, msg *raft_serverpb.RaftMessage
 	return nil
 }
 
-// Close closes all connections.
+// Close closes all persistent streams and connections.
 func (c *RaftClient) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Close all persistent streams first.
+	for _, rs := range c.streams {
+		rs.close()
+	}
+	c.streams = make(map[uint64]*raftStream)
+
+	// Then close connection pools.
 	for _, pool := range c.connections {
 		pool.close()
 	}
 	c.connections = make(map[uint64]*connPool)
 }
 
-// RemoveConnection removes and closes connections to a specific store.
+// RemoveConnection removes and closes the stream and connections to a specific store.
 func (c *RaftClient) RemoveConnection(storeID uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Close the persistent stream first.
+	if rs, ok := c.streams[storeID]; ok {
+		rs.close()
+		delete(c.streams, storeID)
+	}
 
 	if pool, ok := c.connections[storeID]; ok {
 		pool.close()
@@ -246,7 +289,7 @@ func (c *RaftClient) getConnection(storeID uint64) (*grpc.ClientConn, error) {
 		// Double-check after acquiring write lock.
 		pool, ok = c.connections[storeID]
 		if !ok {
-			pool = newConnPool(addr, 1)
+			pool = newConnPool(addr, c.poolSize)
 			c.connections[storeID] = pool
 		}
 		c.mu.Unlock()
@@ -270,8 +313,10 @@ func (p *connPool) get(dialTimeout time.Duration) (*grpc.ClientConn, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Use first available connection.
-	idx := 0
+	// Round-robin across pool.
+	idx := int(p.nextIdx % uint64(p.size))
+	p.nextIdx++
+
 	if p.conns[idx] != nil {
 		return p.conns[idx], nil
 	}
@@ -328,6 +373,81 @@ func HashRegionForConn(regionID uint64, poolSize int) int {
 	buf[7] = byte(regionID >> 56)
 	h.Write(buf[:])
 	return int(h.Sum64() % uint64(poolSize))
+}
+
+// raftStream wraps a long-lived gRPC Raft stream to a single store.
+// It has a dedicated send goroutine with a buffered channel to avoid blocking
+// the caller. When a send error occurs, the stream is marked closed and
+// getOrCreateStream will recreate it on the next Send(). Buffered messages
+// in the old sendCh are dropped; this is safe because Raft retries
+// unacknowledged messages.
+type raftStream struct {
+	storeID uint64
+	conn    *grpc.ClientConn
+	stream  tikvpb.Tikv_RaftClient
+	sendCh  chan *raft_serverpb.RaftMessage
+	ctx     context.Context
+	cancel  context.CancelFunc
+	closed  atomic.Bool
+}
+
+func newRaftStream(conn *grpc.ClientConn, storeID uint64, bufSize int) (*raftStream, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := tikvpb.NewTikvClient(conn)
+	stream, err := client.Raft(ctx)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("raft stream to store %d failed: %w", storeID, err)
+	}
+	rs := &raftStream{
+		storeID: storeID,
+		conn:    conn,
+		stream:  stream,
+		sendCh:  make(chan *raft_serverpb.RaftMessage, bufSize),
+		ctx:     ctx,
+		cancel:  cancel,
+	}
+	go rs.sendLoop()
+	return rs, nil
+}
+
+// sendLoop drains sendCh and writes to the gRPC stream. It exits when the
+// context is cancelled or a send error occurs.
+func (rs *raftStream) sendLoop() {
+	for {
+		select {
+		case msg := <-rs.sendCh:
+			if err := rs.stream.Send(msg); err != nil {
+				slog.Warn("raft stream send failed, will reconnect",
+					"store", rs.storeID, "err", err)
+				rs.closed.Store(true)
+				return
+			}
+		case <-rs.ctx.Done():
+			return
+		}
+	}
+}
+
+// send enqueues a message on the stream's send channel. Returns an error if the
+// stream is closed or the send buffer is full.
+func (rs *raftStream) send(msg *raft_serverpb.RaftMessage) error {
+	if rs.closed.Load() {
+		return fmt.Errorf("stream to store %d closed", rs.storeID)
+	}
+	select {
+	case rs.sendCh <- msg:
+		return nil
+	default:
+		return fmt.Errorf("stream send buffer full for store %d", rs.storeID)
+	}
+}
+
+// close marks the stream as closed and cancels the context to stop sendLoop.
+// The sendCh is intentionally NOT closed to avoid a race with concurrent send().
+func (rs *raftStream) close() {
+	rs.closed.Store(true)
+	rs.cancel()
 }
 
 // MessageBatcher accumulates Raft messages and flushes them in batches.

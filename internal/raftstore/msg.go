@@ -4,6 +4,9 @@
 package raftstore
 
 import (
+	"time"
+
+	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/kvproto/pkg/raft_cmdpb"
@@ -184,3 +187,27 @@ const (
 	RaftInitLogTerm  uint64 = 5
 	RaftInitLogIndex uint64 = 5
 )
+
+// proposalEntry tracks an in-flight proposal callback.
+type proposalEntry struct {
+	callback func(*raft_cmdpb.RaftCmdResponse)
+	term     uint64
+	proposed time.Time
+}
+
+// IsCompactLog returns true if the entry data represents a CompactLog admin command.
+// CompactLog entries start with tag byte 0x01.
+func IsCompactLog(data []byte) bool {
+	return len(data) >= 1 && data[0] == 0x01
+}
+
+// errorResponse builds a RaftCmdResponse with an error in the header.
+func errorResponse(err error) *raft_cmdpb.RaftCmdResponse {
+	return &raft_cmdpb.RaftCmdResponse{
+		Header: &raft_cmdpb.RaftResponseHeader{
+			Error: &errorpb.Error{
+				Message: err.Error(),
+			},
+		},
+	}
+}

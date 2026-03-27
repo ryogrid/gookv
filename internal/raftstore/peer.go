@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -97,8 +98,12 @@ type Peer struct {
 	// applyFunc is called to send committed entries for application.
 	applyFunc func(regionID uint64, entries []raftpb.Entry)
 
-	// pendingProposals tracks in-flight proposals: index -> callback.
-	pendingProposals map[uint64]func([]byte, error)
+	// nextProposalID is a per-peer monotonically increasing counter for proposal IDs.
+	nextProposalID uint64
+	// currentTerm caches the Raft term, updated in handleReady() from HardState.
+	currentTerm uint64
+	// pendingProposals tracks in-flight proposals: proposalID -> entry.
+	pendingProposals map[uint64]proposalEntry
 
 	// raftLogSizeHint tracks estimated size of the Raft log.
 	raftLogSizeHint uint64
@@ -216,7 +221,8 @@ func NewPeer(
 		engine:           engine,
 		cfg:              cfg,
 		Mailbox:          make(chan PeerMsg, cfg.MailboxCapacity),
-		pendingProposals: make(map[uint64]func([]byte, error)),
+		nextProposalID:   1,
+		pendingProposals: make(map[uint64]proposalEntry),
 		pendingReads:     make(map[string]*pendingRead),
 		initialized:      true,
 	}
@@ -499,27 +505,36 @@ func (p *Peer) propose(cmd *RaftCommand) {
 		return
 	}
 
+	proposalID := p.nextProposalID
+	p.nextProposalID++
+
 	data, err := cmd.Request.Marshal()
 	if err != nil {
 		slog.Warn("propose: marshal failed", "region", p.regionID, "err", err)
+		if cmd.Callback != nil {
+			cmd.Callback(errorResponse(err))
+		}
 		return
 	}
 
-	if err := p.rawNode.Propose(data); err != nil {
+	// Prepend 8-byte proposal ID to data.
+	tagged := make([]byte, 8+len(data))
+	binary.BigEndian.PutUint64(tagged[:8], proposalID)
+	copy(tagged[8:], data)
+
+	if err := p.rawNode.Propose(tagged); err != nil {
 		slog.Warn("propose: rawNode.Propose failed", "region", p.regionID, "err", err)
-		// Do NOT call callback — let ProposeModifies timeout and return error.
-		// Calling callback with nil would make ProposeModifies report success
-		// even though the entry never entered the Raft log.
+		if cmd.Callback != nil {
+			cmd.Callback(errorResponse(err))
+		}
 		return
 	}
 
-	// Track the proposal callback.
-	// We use the last index + 1 as the expected index for this proposal.
-	lastIdx, _ := p.storage.LastIndex()
-	expectedIdx := lastIdx + 1
 	if cmd.Callback != nil {
-		p.pendingProposals[expectedIdx] = func(_ []byte, _ error) {
-			cmd.Callback(nil)
+		p.pendingProposals[proposalID] = proposalEntry{
+			callback: cmd.Callback,
+			term:     p.currentTerm,
+			proposed: time.Now(),
 		}
 	}
 }
@@ -542,9 +557,10 @@ func (p *Peer) handleReady() {
 			p.leaseExpiryNanos.Store(time.Now().Add(electionTimeout * 4 / 5).UnixNano())
 			p.leaseValid.Store(true)
 		}
-		// Invalidate lease and cleanup pending reads on leader stepdown.
+		// Invalidate lease, fail pending proposals, and cleanup pending reads on leader stepdown.
 		if !p.isLeader.Load() && wasLeader {
 			p.leaseValid.Store(false)
+			p.failAllPendingProposals(fmt.Errorf("leader stepped down"))
 		}
 		if !p.isLeader.Load() && len(p.pendingReads) > 0 {
 			for key, pr := range p.pendingReads {
@@ -552,6 +568,11 @@ func (p *Peer) handleReady() {
 				delete(p.pendingReads, key)
 			}
 		}
+	}
+
+	// Cache current term for use in propose() without calling Status().
+	if !raft.IsEmptyHardState(rd.HardState) {
+		p.currentTerm = rd.HardState.Term
 	}
 
 	// Persist entries and hard state.
@@ -575,7 +596,7 @@ func (p *Peer) handleReady() {
 
 	// Apply committed entries.
 	if len(rd.CommittedEntries) > 0 {
-		// Process admin commands first (ConfChange, SplitAdmin) before
+		// Process admin commands first (ConfChange, SplitAdmin, CompactLog) before
 		// sending data entries to applyFunc. This ensures region metadata
 		// is updated BEFORE data entries are applied, maintaining the
 		// ordering guarantee that Raft provides.
@@ -587,15 +608,38 @@ func (p *Peer) handleReady() {
 				p.applySplitAdminEntry(&eCopy)
 			}
 		}
-		// Send to apply worker for state machine application.
+		// Filter admin entries out before passing to applyFunc.
+		// Only send data entries (non-admin, with 8-byte proposal ID prefix) to the apply worker.
 		if p.applyFunc != nil {
-			p.applyFunc(p.regionID, rd.CommittedEntries)
+			var dataEntries []raftpb.Entry
+			for _, e := range rd.CommittedEntries {
+				if e.Type == raftpb.EntryNormal && !IsSplitAdmin(e.Data) && !IsCompactLog(e.Data) && len(e.Data) > 8 {
+					dataEntries = append(dataEntries, e)
+				}
+			}
+			if len(dataEntries) > 0 {
+				p.applyFunc(p.regionID, dataEntries)
+			}
 		}
 		// Invoke pending proposal callbacks for committed entries.
+		// Match by proposal ID embedded in the first 8 bytes of entry data.
 		for _, e := range rd.CommittedEntries {
-			if cb, ok := p.pendingProposals[e.Index]; ok {
-				cb(e.Data, nil)
-				delete(p.pendingProposals, e.Index)
+			if e.Type != raftpb.EntryNormal || len(e.Data) < 8 {
+				continue
+			}
+			proposalID := binary.BigEndian.Uint64(e.Data[:8])
+			if proposalID == 0 {
+				continue
+			}
+			if entry, ok := p.pendingProposals[proposalID]; ok {
+				if e.Term == entry.term {
+					entry.callback(nil) // success
+				} else {
+					entry.callback(errorResponse(
+						fmt.Errorf("term mismatch: proposed in %d, committed in %d",
+							entry.term, e.Term)))
+				}
+				delete(p.pendingProposals, proposalID)
 			}
 		}
 		// Update applied index so ReadIndex can confirm data is readable.
@@ -641,6 +685,26 @@ func (p *Peer) handleReady() {
 
 	// Advance the Raft state machine.
 	p.rawNode.Advance(rd)
+}
+
+// failAllPendingProposals invokes all pending proposal callbacks with the given error
+// and clears the pending proposals map. Called on leader stepdown.
+func (p *Peer) failAllPendingProposals(err error) {
+	for id, entry := range p.pendingProposals {
+		entry.callback(errorResponse(err))
+		delete(p.pendingProposals, id)
+	}
+}
+
+// sweepStaleProposals fails proposals that have been pending longer than maxAge.
+func (p *Peer) sweepStaleProposals(maxAge time.Duration) {
+	now := time.Now()
+	for id, entry := range p.pendingProposals {
+		if now.Sub(entry.proposed) > maxAge {
+			entry.callback(errorResponse(fmt.Errorf("proposal expired")))
+			delete(p.pendingProposals, id)
+		}
+	}
 }
 
 func (p *Peer) onApplyResult(result *ApplyResult) {

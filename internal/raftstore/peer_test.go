@@ -165,9 +165,14 @@ func TestPeerProposeAndApply(t *testing.T) {
 	}
 	require.True(t, p.IsLeader())
 
-	// Propose some data.
-	require.NoError(t, p.Propose([]byte("hello")))
-	require.NoError(t, p.Propose([]byte("world")))
+	// Propose some data via the raw Propose() API.
+	// Since handleReady now filters entries for applyFunc (only entries with
+	// 8-byte proposal ID prefix pass), raw Propose() entries are filtered out.
+	// We pad each entry with a zero 8-byte prefix so they pass the filter.
+	helloData := append(make([]byte, 8), []byte("hello")...)
+	worldData := append(make([]byte, 8), []byte("world")...)
+	require.NoError(t, p.Propose(helloData))
+	require.NoError(t, p.Propose(worldData))
 
 	// Wait for entries to be applied.
 	time.Sleep(300 * time.Millisecond)
@@ -175,11 +180,14 @@ func TestPeerProposeAndApply(t *testing.T) {
 	// Should have applied entries (at least the proposals + conf change entry).
 	assert.True(t, len(appliedEntries) >= 2, "should have applied at least 2 entries, got %d", len(appliedEntries))
 
-	// Find our data among applied entries.
+	// Find our data among applied entries (data includes 8-byte prefix).
 	found := 0
 	for _, e := range appliedEntries {
-		if string(e.Data) == "hello" || string(e.Data) == "world" {
-			found++
+		if len(e.Data) > 8 {
+			payload := string(e.Data[8:])
+			if payload == "hello" || payload == "world" {
+				found++
+			}
 		}
 	}
 	assert.Equal(t, 2, found, "both proposals should be applied")

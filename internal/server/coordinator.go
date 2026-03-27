@@ -172,6 +172,12 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 		return err
 	}
 
+	// Register peer-to-region mapping for all peers in this region.
+	// This enables correct loopback routing after splits.
+	for _, p := range region.GetPeers() {
+		sc.router.RegisterPeer(p.GetId(), regionID)
+	}
+
 	// Start the peer goroutine.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -188,10 +194,11 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 }
 
 // applyEntriesForPeer applies committed Raft entries to the KV storage engine.
-// Epoch-aware filtering: if the entry's header epoch matches the current region
-// epoch, apply all modifies unconditionally. If the epochs differ (split occurred
-// between propose and apply), filter out-of-range keys using the current region
-// boundaries. Entries without a header (legacy/RawKV) are applied unconditionally.
+// Entries arriving here have already been filtered by the peer to exclude admin
+// entries (ConfChange, SplitAdmin, CompactLog). Each entry carries an 8-byte
+// proposal ID prefix that must be stripped before protobuf unmarshaling.
+// For backward compatibility during replay of old entries without the prefix,
+// falls back to unmarshaling the original data if stripping fails.
 func (sc *StoreCoordinator) applyEntriesForPeer(peer *raftstore.Peer, entries []raftpb.Entry) {
 	for _, entry := range entries {
 		if entry.Type != raftpb.EntryNormal || len(entry.Data) == 0 {
@@ -199,8 +206,22 @@ func (sc *StoreCoordinator) applyEntriesForPeer(peer *raftstore.Peer, entries []
 		}
 
 		var req raft_cmdpb.RaftCmdRequest
-		if err := req.Unmarshal(entry.Data); err != nil {
-			continue
+
+		if len(entry.Data) > 8 {
+			// Try new format: strip 8-byte proposal ID prefix.
+			cmdData := entry.Data[8:]
+			if err := req.Unmarshal(cmdData); err != nil {
+				// Fall back to old format (no prefix) for backward compatibility.
+				req.Reset()
+				if err2 := req.Unmarshal(entry.Data); err2 != nil {
+					continue
+				}
+			}
+		} else {
+			// Data too short for new format; try old format directly.
+			if err := req.Unmarshal(entry.Data); err != nil {
+				continue
+			}
 		}
 
 		if len(req.Requests) == 0 {
@@ -315,12 +336,16 @@ func (sc *StoreCoordinator) ProposeModifies(regionID uint64, modifies []mvcc.Mod
 	}
 
 	// Send as a RaftCommand via the peer's mailbox with a callback.
-	doneCh := make(chan struct{}, 1)
+	doneCh := make(chan error, 1)
 
 	cmd := &raftstore.RaftCommand{
 		Request: cmdReq,
 		Callback: func(resp *raft_cmdpb.RaftCmdResponse) {
-			doneCh <- struct{}{}
+			if resp != nil && resp.Header != nil && resp.Header.Error != nil {
+				doneCh <- fmt.Errorf("raft proposal error: %s", resp.Header.Error.Message)
+			} else {
+				doneCh <- nil
+			}
 		},
 	}
 
@@ -335,8 +360,8 @@ func (sc *StoreCoordinator) ProposeModifies(regionID uint64, modifies []mvcc.Mod
 
 	// Wait for commit or timeout.
 	select {
-	case <-doneCh:
-		return nil
+	case err := <-doneCh:
+		return err
 	case <-time.After(timeout):
 		return fmt.Errorf("raftstore: proposal timeout for region %d", regionID)
 	}
@@ -409,6 +434,12 @@ func (sc *StoreCoordinator) Stop() {
 	for regionID, cancel := range sc.cancels {
 		cancel()
 		<-sc.dones[regionID]
+		// Unregister peer-to-region mappings.
+		if peer, ok := sc.peers[regionID]; ok {
+			for _, p := range peer.Region().GetPeers() {
+				sc.router.UnregisterPeer(p.GetId())
+			}
+		}
 		sc.router.Unregister(regionID)
 	}
 	sc.peers = make(map[uint64]*raftstore.Peer)
@@ -521,6 +552,11 @@ func (sc *StoreCoordinator) CreatePeer(req *raftstore.CreatePeerRequest) error {
 		return err
 	}
 
+	// Register peer-to-region mapping for all peers in this region.
+	for _, p := range req.Region.GetPeers() {
+		sc.router.RegisterPeer(p.GetId(), regionID)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	sc.peers[regionID] = peer
@@ -549,6 +585,13 @@ func (sc *StoreCoordinator) DestroyPeer(req *raftstore.DestroyPeerRequest) error
 	// Cancel the peer goroutine.
 	cancel()
 	<-sc.dones[regionID]
+
+	// Unregister peer-to-region mappings for all peers in this region.
+	if peer, ok := sc.peers[regionID]; ok {
+		for _, p := range peer.Region().GetPeers() {
+			sc.router.UnregisterPeer(p.GetId())
+		}
+	}
 
 	// Unregister from Router.
 	sc.router.Unregister(regionID)
@@ -768,14 +811,21 @@ func (sc *StoreCoordinator) sendRaftMessage(regionID uint64, region *metapb.Regi
 	// instead of gRPC. This is critical for ReadIndex (ReadOnlySafe mode)
 	// which requires heartbeat responses from local follower peers.
 	if toStoreID == sc.storeID {
+		// Find the target region ID for this peer. After a split, the target
+		// peer may belong to a different region than the source.
+		targetRegionID := regionID // fallback to source region
+		if rid, ok := sc.router.FindRegionByPeerID(msg.To); ok {
+			targetRegionID = rid
+		}
+
 		peerMsg := raftstore.PeerMsg{
 			Type: raftstore.PeerMsgTypeRaftMessage,
 			Data: msg,
 		}
-		if err := sc.router.Send(regionID, peerMsg); err == router.ErrMailboxFull {
+		if err := sc.router.Send(targetRegionID, peerMsg); err == router.ErrMailboxFull {
 			for i := 0; i < 3; i++ {
 				time.Sleep(time.Millisecond)
-				if err = sc.router.Send(regionID, peerMsg); err != router.ErrMailboxFull {
+				if err = sc.router.Send(targetRegionID, peerMsg); err != router.ErrMailboxFull {
 					break
 				}
 			}

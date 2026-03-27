@@ -12,8 +12,8 @@
 - [x] H1: PeerMsgTypeDestroy closes Mailbox causing panic on concurrent sends (peer.go:425-428)
 - [x] H2: leaseExpiry accessed from multiple goroutines without sync (peer.go:131-132)
 - [x] H3: handleReady runs after peer destroyed (peer.go:376-378)
-- [ ] H4: Admin entries sent to applyFunc; relies on format incompatibility (peer.go:579-600)
-- [ ] C5/H5: Proposal callback index tracking breaks with batched proposals (peer.go:515-521)
+- [x] H4: Admin entries sent to applyFunc; relies on format incompatibility (peer.go:579-600)
+- [x] C5/H5: Proposal callback index tracking breaks with batched proposals (peer.go:515-521)
 
 ### Medium
 - [x] M1: readEntriesFromEngine silently stops on gap (storage.go:481-484)
@@ -21,21 +21,21 @@
 - [x] M3: Snapshot ConfState not set in metadata (snapshot.go:353-359)
 - [ ] M4: scanRegionSize picks split key from first CF only (split/checker.go:140-191)
 - [x] M5: ExecCommitMerge dead code and fragile fallback (merge.go:118-140)
-- [ ] M6: Proposal callback always calls success regardless of entry data (peer.go:493-521)
+- [x] M6: Proposal callback always calls success regardless of entry data (peer.go:493-521)
 
 ## 02 Server/RPC Layer (`internal/server/`)
 
 ### Critical
-- [ ] C1: Loopback routing uses source region ID for target peer (coordinator.go:770-783)
+- [x] C1: Loopback routing uses source region ID for target peer (coordinator.go:770-783)
 - [x] C2: KVPessimisticRollback bypasses Raft in cluster mode (server.go:804-816)
 - [x] C3: KvTxnHeartBeat bypasses Raft in cluster mode (server.go:819-830)
 - [x] C4: C2+C3 skip validateRegionContext (server.go:804, 819)
-- [ ] C5: ProposeModifies callback never invoked on silent drop (coordinator.go:317-343)
-- [ ] C6: Transport creates new gRPC stream per Send (transport.go:78-102)
+- [x] C5: ProposeModifies callback never invoked on silent drop (coordinator.go:317-343)
+- [x] C6: Transport creates new gRPC stream per Send (transport.go:78-102)
 
 ### Potential/Medium
 - [x] P1: ReadPool.Stop() doesn't drain pending tasks (flow/flow.go:112-114)
-- [ ] P3: Connection pool always uses index 0 (transport.go:249)
+- [x] P3: Connection pool always uses index 0 (transport.go:249)
 - [x] P4: TOCTOU in pd_resolver — performance only, not correctness (pd_resolver.go:52-75)
 - [x] P6: KvDeleteRange hardcodes region ID 1 (server.go:1541)
 - [x] P7: RawPut/RawDelete skip region validation (server.go:1194-1233)

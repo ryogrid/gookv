@@ -149,6 +149,45 @@ func countRegions(ctx context.Context, pd pdclient.Client) int {
 	return count
 }
 
+// WaitForStoreCount waits until PD reports at least minCount stores.
+func WaitForStoreCount(t *testing.T, pd pdclient.Client, minCount int, timeout time.Duration) int {
+	t.Helper()
+	ctx := context.Background()
+
+	var lastCount int
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		stores, err := pd.GetAllStores(ctx)
+		if err == nil {
+			lastCount = len(stores)
+			if lastCount >= minCount {
+				return lastCount
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("WaitForStoreCount: expected at least %d stores, got %d after %v", minCount, lastCount, timeout)
+	return lastCount
+}
+
+// WaitForRegionLeader waits until PD reports a leader for the region containing key.
+// Returns the leader store ID.
+func WaitForRegionLeader(t *testing.T, pd pdclient.Client, key []byte, timeout time.Duration) uint64 {
+	t.Helper()
+	ctx := context.Background()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, leader, err := pd.GetRegion(ctx, key)
+		if err == nil && leader != nil && leader.GetStoreId() != 0 {
+			return leader.GetStoreId()
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("WaitForRegionLeader: no leader for key %x after %v", key, timeout)
+	return 0
+}
+
 // SeedAccounts creates numAccounts keys ("account-0", "account-1", ...) each with
 // initialBalance as value, using transactional writes in batches of 50.
 func SeedAccounts(t *testing.T, txnKV *client.TxnKVClient, numAccounts, initialBalance int) {

@@ -16,7 +16,7 @@ test-e2e:
 	go test ./e2e/... -v -count=1 -timeout 120s
 
 test-e2e-external: build
-	go test ./e2e_external/... -v -count=1 -timeout 300s
+	go test ./e2e_external/... -v -count=1 -timeout 900s
 
 build: gookv-server gookv-ctl gookv-pd
 

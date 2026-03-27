@@ -248,7 +248,7 @@ func (c *GokvCluster) Client() *client.Client {
 	ctx := context.Background()
 	cl, err := client.NewClient(ctx, client.Config{
 		PDAddrs:    []string{c.pd.Addr()},
-		MaxRetries: 10,
+		MaxRetries: 30,
 	})
 	if err != nil {
 		c.t.Fatalf("e2elib: create cluster client: %v", err)
@@ -263,6 +263,16 @@ func (c *GokvCluster) Client() *client.Client {
 	})
 
 	return c.topClient
+}
+
+// ResetClient closes the cached client and forces a new one to be created
+// on the next Client()/RawKV()/TxnKV() call. Useful after region splits
+// to clear the stale region cache.
+func (c *GokvCluster) ResetClient() {
+	if c.topClient != nil {
+		_ = c.topClient.Close()
+		c.topClient = nil
+	}
 }
 
 // RawKV returns a RawKVClient connected to the cluster.

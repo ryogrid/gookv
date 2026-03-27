@@ -56,6 +56,26 @@ func (d Datum) IsNull() bool {
 	return d.Kind == KindNull
 }
 
+// IsZeroValue returns true if the datum's value is zero for its kind.
+func (d Datum) IsZeroValue() bool {
+	switch d.Kind {
+	case KindInt64:
+		return d.I64 == 0
+	case KindUint64:
+		return d.U64 == 0
+	case KindFloat64:
+		return d.F64 == 0
+	case KindString:
+		return d.Str == ""
+	case KindBytes:
+		return len(d.Buf) == 0
+	case KindNull:
+		return true
+	default:
+		return true
+	}
+}
+
 // ToInt64 converts the datum to int64.
 func (d Datum) ToInt64() (int64, error) {
 	switch d.Kind {
@@ -354,7 +374,7 @@ func (e *SelectionExecutor) NextBatch(ctx context.Context, batchSize int) (*Batc
 				pass = false
 				break
 			}
-			if val.IsNull() || val.I64 == 0 {
+			if val.IsNull() || val.IsZeroValue() {
 				pass = false
 				break
 			}

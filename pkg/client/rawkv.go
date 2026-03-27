@@ -276,25 +276,24 @@ func (c *RawKVClient) Scan(ctx context.Context, startKey, endKey []byte, limit i
 	currentKey := startKey
 
 	for {
-		info, err := c.cache.LocateKey(ctx, currentKey)
-		if err != nil {
-			return nil, err
-		}
-
-		regionEnd := info.Region.GetEndKey()
-		scanEnd := endKey
-		if len(regionEnd) > 0 && (len(scanEnd) == 0 || bytes.Compare(regionEnd, scanEnd) < 0) {
-			scanEnd = regionEnd
-		}
-
 		remaining := limit - len(result)
 		if remaining <= 0 {
 			break
 		}
 
 		var pairs []KvPair
+		var regionEnd []byte
 		slog.Debug("rawkv.Scan", "start", fmt.Sprintf("%x", currentKey), "limit", remaining)
-		err = c.sender.SendToRegion(ctx, currentKey, func(client tikvpb.TikvClient, rInfo *RegionInfo) (*errorpb.Error, error) {
+		err := c.sender.SendToRegion(ctx, currentKey, func(client tikvpb.TikvClient, rInfo *RegionInfo) (*errorpb.Error, error) {
+			// Recompute scanEnd from the (possibly refreshed) region info
+			// so that after a region error + cache invalidation, we use
+			// the up-to-date region boundary.
+			regionEnd = rInfo.Region.GetEndKey()
+			scanEnd := endKey
+			if len(regionEnd) > 0 && (len(scanEnd) == 0 || bytes.Compare(regionEnd, scanEnd) < 0) {
+				scanEnd = regionEnd
+			}
+
 			resp, err := client.RawScan(ctx, &kvrpcpb.RawScanRequest{
 				Context:  buildContext(rInfo),
 				StartKey: currentKey,
@@ -308,6 +307,7 @@ func (c *RawKVClient) Scan(ctx context.Context, startKey, endKey []byte, limit i
 			if resp.GetRegionError() != nil {
 				return resp.GetRegionError(), nil
 			}
+			pairs = nil // reset in case of retry
 			for _, kv := range resp.GetKvs() {
 				pairs = append(pairs, KvPair{Key: kv.GetKey(), Value: kv.GetValue()})
 			}

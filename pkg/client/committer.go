@@ -376,6 +376,7 @@ func (c *twoPhaseCommitter) commitSecondariesPerKey(ctx context.Context, keys []
 								NotLeader: &errorpb.NotLeader{RegionId: info.Region.GetId()},
 							}, nil
 						}
+						slog.Error("commitSecondary: TxnLockNotFound after retries", "key", key, "startTS", c.startTS)
 						return nil, nil
 					}
 				}

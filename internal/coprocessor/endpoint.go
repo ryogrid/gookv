@@ -481,6 +481,39 @@ func DecodeRPNExpression(data []byte) (*RPNExpression, error) {
 			pos += slen
 			nodes = append(nodes, RPNNode{Type: RPNConstant, Constant: StringDatum(s)})
 
+		case 0x04: // Constant Uint64
+			if pos+8 > len(data) {
+				return nil, fmt.Errorf("truncated Uint64 constant")
+			}
+			v := binary.BigEndian.Uint64(data[pos : pos+8])
+			pos += 8
+			nodes = append(nodes, RPNNode{Type: RPNConstant, Constant: Uint64Datum(v)})
+
+		case 0x05: // Constant Float64
+			if pos+8 > len(data) {
+				return nil, fmt.Errorf("truncated Float64 constant")
+			}
+			v := math.Float64frombits(binary.BigEndian.Uint64(data[pos : pos+8]))
+			pos += 8
+			nodes = append(nodes, RPNNode{Type: RPNConstant, Constant: Float64Datum(v)})
+
+		case 0x06: // Constant Bytes
+			if pos+2 > len(data) {
+				return nil, fmt.Errorf("truncated Bytes constant length")
+			}
+			blen := int(binary.BigEndian.Uint16(data[pos : pos+2]))
+			pos += 2
+			if pos+blen > len(data) {
+				return nil, fmt.Errorf("truncated Bytes constant data")
+			}
+			b := make([]byte, blen)
+			copy(b, data[pos:pos+blen])
+			pos += blen
+			nodes = append(nodes, RPNNode{Type: RPNConstant, Constant: BytesDatum(b)})
+
+		case 0x07: // Constant Null
+			nodes = append(nodes, RPNNode{Type: RPNConstant, Constant: NullDatum()})
+
 		case 0x10: // FuncCall
 			if pos >= len(data) {
 				return nil, fmt.Errorf("truncated FuncCall")
@@ -519,6 +552,24 @@ func EncodeRPNExpression(expr *RPNExpression) []byte {
 				binary.BigEndian.PutUint16(b, uint16(len(node.Constant.Str)))
 				buf = append(buf, b...)
 				buf = append(buf, []byte(node.Constant.Str)...)
+			case KindUint64:
+				buf = append(buf, 0x04)
+				b := make([]byte, 8)
+				binary.BigEndian.PutUint64(b, node.Constant.U64)
+				buf = append(buf, b...)
+			case KindFloat64:
+				buf = append(buf, 0x05)
+				b := make([]byte, 8)
+				binary.BigEndian.PutUint64(b, math.Float64bits(node.Constant.F64))
+				buf = append(buf, b...)
+			case KindBytes:
+				buf = append(buf, 0x06)
+				b := make([]byte, 2)
+				binary.BigEndian.PutUint16(b, uint16(len(node.Constant.Buf)))
+				buf = append(buf, b...)
+				buf = append(buf, node.Constant.Buf...)
+			case KindNull:
+				buf = append(buf, 0x07)
 			}
 		case RPNFuncCall:
 			buf = append(buf, 0x10, byte(node.FuncType))

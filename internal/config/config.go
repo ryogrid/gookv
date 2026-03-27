@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,8 +64,7 @@ func (s *ReadableSize) UnmarshalText(text []byte) error {
 		str = str[:len(str)-1]
 	}
 
-	var val uint64
-	_, err := fmt.Sscanf(str, "%d", &val)
+	val, err := strconv.ParseUint(str, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid size %q: %w", string(text), err)
 	}
@@ -259,6 +259,11 @@ func (c *Config) Validate() error {
 	// Validate server address.
 	if c.Server.Addr == "" {
 		errs = append(errs, errors.New("server addr must not be empty"))
+	}
+
+	// Validate status address.
+	if c.Server.StatusAddr == "" {
+		errs = append(errs, errors.New("server status-addr must not be empty"))
 	}
 
 	// Validate storage data dir.

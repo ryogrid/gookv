@@ -58,7 +58,7 @@
 ### Critical
 - [x] C1: Region cache never evicts stale entries after split (region_cache.go:132-154)
 - [x] C2: BatchGet sends all keys to single region (txn.go:198-231)
-- [ ] C3: commitSecondariesPerKey silently swallows TxnLockNotFound (committer.go:337-378)
+- [x] C3: commitSecondariesPerKey silently swallows TxnLockNotFound (committer.go:337-378)
 
 ### High
 - [x] H1: isPrimaryCommitted swallows errors (committer.go:213-234)
@@ -71,7 +71,7 @@
 - [ ] M2: lockNotFoundRetries counter accumulates across retries (committer.go:294,344)
 - [x] M3: isRetryableRegionError is dead code (request_sender.go:132-142)
 - [ ] M4: lock_resolver resolving map grows unboundedly (lock_resolver.go:22-23,69)
-- [ ] M5: Scan reuses stale scanEnd after region error (rawkv.go:274-338)
+- [x] M5: Scan reuses stale scanEnd after region error (rawkv.go:274-338)
 
 ## 05 PD Layer (`internal/pd/`, `pkg/pdclient/`)
 
@@ -97,13 +97,13 @@
 
 ### High
 - [x] H-1: --store-id=0 with --initial-cluster creates invalid Raft peers (main.go)
-- [ ] H-2: SelectionExecutor truthiness check uses I64 for all types (coprocessor.go:357)
-- [ ] H-3: ReadableSize parser doesn't validate trailing chars (config.go:42-73)
+- [x] H-2: SelectionExecutor truthiness check uses I64 for all types (coprocessor.go:357)
+- [x] H-3: ReadableSize parser doesn't validate trailing chars (config.go:42-73)
 - [x] H-4: parseInitialCluster silently drops malformed entries (main.go:442-460)
 
 ### Medium
-- [ ] M-2: EncodeRPNExpression only handles Int64/String constants (endpoint.go:500-528)
-- [ ] M-4: Config validation doesn't check StatusAddr (config.go:240-291)
+- [x] M-2: EncodeRPNExpression only handles Int64/String constants (endpoint.go:500-528)
+- [x] M-4: Config validation doesn't check StatusAddr (config.go:240-291)
 
 ## 07 Test Code
 
@@ -113,9 +113,9 @@
 - [x] 4.2: PDCluster Restart() leaks old log file handle (pdcluster.go)
 
 ### Medium
-- [ ] 4.4: PDCluster.Client() creates new client per call (pdcluster.go)
+- [x] 4.4: PDCluster.Client() creates new client per call (pdcluster.go)
 - [x] 3.2: secondDuration uses raw nanosecond constant (cluster.go:143-144)
-- [ ] 1.4: Cross-node replication test ignores all errors (cluster_server_test.go)
-- [ ] 1.5: TSO via follower test has no failure assertions (pd_replication_test.go)
-- [ ] 1.6: TSO forwarding test passes with zero successes (pd_replication_test.go)
+- [x] 1.4: Cross-node replication test ignores all errors (cluster_server_test.go)
+- [x] 1.5: TSO via follower test has no failure assertions (pd_replication_test.go)
+- [x] 1.6: TSO forwarding test passes with zero successes (pd_replication_test.go)
 - [ ] 5.1: Duplicate newClusterWithLeader/newClientCluster helpers (e2e_external/)

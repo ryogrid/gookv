@@ -60,6 +60,7 @@ func TestClusterServerCrossNodeReplication(t *testing.T) {
 	assert.Equal(t, []byte("repl-val"), val)
 
 	// Also verify via raw gRPC on each node.
+	replicatedCount := 0
 	for i := 0; i < 3; i++ {
 		client := e2elib.DialTikvClient(t, cluster.Node(i).Addr())
 		getResp, err := client.RawGet(ctx, &kvrpcpb.RawGetRequest{
@@ -71,8 +72,10 @@ func TestClusterServerCrossNodeReplication(t *testing.T) {
 		if !getResp.GetNotFound() {
 			assert.Equal(t, []byte("repl-val"), getResp.GetValue(),
 				"node %d should have replicated value", i)
+			replicatedCount++
 		}
 	}
+	assert.GreaterOrEqual(t, replicatedCount, 1, "at least 1 node should have the replicated value")
 
 	t.Log("Cross-node replication passed")
 }

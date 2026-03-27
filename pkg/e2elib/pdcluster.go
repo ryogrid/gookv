@@ -26,10 +26,11 @@ type PDClusterConfig struct {
 
 // PDCluster manages multiple PD nodes with Raft replication for testing.
 type PDCluster struct {
-	t     *testing.T
-	cfg   PDClusterConfig
-	alloc *PortAllocator
-	nodes []*PDClusterNode
+	t         *testing.T
+	cfg       PDClusterConfig
+	alloc     *PortAllocator
+	nodes     []*PDClusterNode
+	topClient pdclient.Client
 }
 
 // PDClusterNode represents a single PD node in a replicated cluster.
@@ -202,9 +203,14 @@ func (c *PDCluster) ClientAddrs() []string {
 	return addrs
 }
 
-// Client creates a pdclient.Client connected to all PD nodes.
+// Client returns a cached pdclient.Client connected to all PD nodes.
+// On the first call it creates and caches the client; subsequent calls return the same instance.
 func (c *PDCluster) Client() pdclient.Client {
 	c.t.Helper()
+
+	if c.topClient != nil {
+		return c.topClient
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -216,11 +222,15 @@ func (c *PDCluster) Client() pdclient.Client {
 		c.t.Fatalf("e2elib: create PD cluster client: %v", err)
 	}
 
+	c.topClient = cl
 	c.t.Cleanup(func() {
-		cl.Close()
+		if c.topClient != nil {
+			c.topClient.Close()
+			c.topClient = nil
+		}
 	})
 
-	return cl
+	return c.topClient
 }
 
 // ClientForNode creates a pdclient.Client connected only to a specific node.

@@ -508,7 +508,10 @@ func (s *PeerStorage) readEntriesFromEngine(lo, hi uint64) ([]raftpb.Entry, erro
 		data, err := s.engine.Get(cfnames.CFRaft, keys.RaftLogKey(s.regionID, idx))
 		if err != nil {
 			if err == traits.ErrNotFound {
-				break
+				if idx == lo {
+					break // First entry not found — compacted.
+				}
+				return nil, fmt.Errorf("raftstore: entry gap at index %d (region %d)", idx, s.regionID)
 			}
 			return nil, fmt.Errorf("raftstore: read entry %d: %w", idx, err)
 		}

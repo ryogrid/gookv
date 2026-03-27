@@ -350,11 +350,20 @@ func (w *SnapWorker) generateSnapshot(task GenSnapTask) GenSnapResult {
 		return GenSnapResult{Err: err}
 	}
 
+	// Build ConfState from region peers so receivers know the cluster membership.
+	var cs raftpb.ConfState
+	if task.Region != nil {
+		for _, peer := range task.Region.GetPeers() {
+			cs.Voters = append(cs.Voters, peer.GetId())
+		}
+	}
+
 	snap := raftpb.Snapshot{
 		Data: data,
 		Metadata: raftpb.SnapshotMetadata{
-			Index: task.SnapKey.Index,
-			Term:  task.SnapKey.Term,
+			Index:     task.SnapKey.Index,
+			Term:      task.SnapKey.Term,
+			ConfState: cs,
 		},
 	}
 

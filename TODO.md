@@ -16,9 +16,9 @@
 - [ ] C5/H5: Proposal callback index tracking breaks with batched proposals (peer.go:515-521)
 
 ### Medium
-- [ ] M1: readEntriesFromEngine silently stops on gap (storage.go:481-484)
+- [x] M1: readEntriesFromEngine silently stops on gap (storage.go:481-484)
 - [x] M2: onRaftLogGCTick underflow when appliedIdx=1 (peer.go:696)
-- [ ] M3: Snapshot ConfState not set in metadata (snapshot.go:353-359)
+- [x] M3: Snapshot ConfState not set in metadata (snapshot.go:353-359)
 - [ ] M4: scanRegionSize picks split key from first CF only (split/checker.go:140-191)
 - [ ] M5: ExecCommitMerge dead code and fragile fallback (merge.go:118-140)
 - [ ] M6: Proposal callback always calls success regardless of entry data (peer.go:493-521)
@@ -67,8 +67,8 @@
 - [x] H4: Checksum does not span regions (rawkv.go:394-419)
 
 ### Medium
-- [ ] M1: prewriteRegion returns conflict instead of retrying after lock resolve (committer.go:193-201)
-- [ ] M2: lockNotFoundRetries counter accumulates across retries (committer.go:294,344)
+- [x] M1: prewriteRegion returns conflict instead of retrying after lock resolve — by design (upper layer retries)
+- [x] M2: lockNotFoundRetries counter accumulates across retries — verified: counter is per-closure, no accumulation
 - [x] M3: isRetryableRegionError is dead code (request_sender.go:132-142)
 - [ ] M4: lock_resolver resolving map grows unboundedly (lock_resolver.go:22-23,69)
 - [x] M5: Scan reuses stale scanEnd after region error (rawkv.go:274-338)

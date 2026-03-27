@@ -35,6 +35,7 @@ type GokvNode struct {
 	logPath    string
 	configPath string
 	cmd        *exec.Cmd
+	logFile    *os.File
 	alloc      *PortAllocator
 	topClient  *client.Client
 	running    bool
@@ -123,18 +124,19 @@ func (n *GokvNode) Start() error {
 
 	n.cmd = exec.Command(binary, args...)
 
-	logFile, err := os.Create(n.logPath)
+	lf, err := os.Create(n.logPath)
 	if err != nil {
 		return fmt.Errorf("e2elib: create server log file: %w", err)
 	}
-	n.cmd.Stdout = logFile
-	n.cmd.Stderr = logFile
+	n.cmd.Stdout = lf
+	n.cmd.Stderr = lf
 
 	if err := n.cmd.Start(); err != nil {
-		logFile.Close()
+		lf.Close()
 		return fmt.Errorf("e2elib: start gookv-server: %w", err)
 	}
 
+	n.logFile = lf
 	n.running = true
 	return nil
 }
@@ -169,6 +171,12 @@ func (n *GokvNode) Stop() error {
 	}
 
 	n.running = false
+
+	// Close log file handle.
+	if n.logFile != nil {
+		_ = n.logFile.Close()
+		n.logFile = nil
+	}
 	return nil
 }
 

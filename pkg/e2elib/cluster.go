@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryogrid/gookv/pkg/client"
 )
@@ -61,7 +62,7 @@ func (c *GokvCluster) Start() error {
 	if err := c.pd.Start(); err != nil {
 		return fmt.Errorf("e2elib: start PD: %w", err)
 	}
-	if err := c.pd.WaitForReady(30 * secondDuration); err != nil {
+	if err := c.pd.WaitForReady(30 * time.Second); err != nil {
 		return fmt.Errorf("e2elib: PD not ready: %w", err)
 	}
 
@@ -131,7 +132,7 @@ func (c *GokvCluster) Start() error {
 
 	// Wait for all nodes to be ready.
 	for i, node := range c.nodes {
-		if err := node.WaitForReady(30 * secondDuration); err != nil {
+		if err := node.WaitForReady(30 * time.Second); err != nil {
 			return fmt.Errorf("e2elib: node %d not ready: %w", i, err)
 		}
 	}
@@ -139,9 +140,6 @@ func (c *GokvCluster) Start() error {
 	c.started = true
 	return nil
 }
-
-// secondDuration is a convenience constant for readability.
-const secondDuration = 1000000000 // time.Second in nanoseconds as a typed duration
 
 // Stop stops all nodes and the PD node.
 func (c *GokvCluster) Stop() error {
@@ -214,7 +212,7 @@ func (c *GokvCluster) AddNode() (*GokvNode, error) {
 	if err := node.Start(); err != nil {
 		return nil, fmt.Errorf("e2elib: start new node: %w", err)
 	}
-	if err := node.WaitForReady(30 * secondDuration); err != nil {
+	if err := node.WaitForReady(30 * time.Second); err != nil {
 		return nil, fmt.Errorf("e2elib: new node not ready: %w", err)
 	}
 

@@ -41,6 +41,7 @@ type PDClusterNode struct {
 	dataDir    string
 	logPath    string
 	cmd        *exec.Cmd
+	logFile    *os.File
 	running    bool
 }
 
@@ -140,17 +141,18 @@ func (c *PDCluster) Start() error {
 
 		node.cmd = exec.Command(binary, args...)
 
-		logFile, err := os.Create(logPath)
+		lf, err := os.Create(logPath)
 		if err != nil {
 			return fmt.Errorf("e2elib: create PD log: %w", err)
 		}
-		node.cmd.Stdout = logFile
-		node.cmd.Stderr = logFile
+		node.cmd.Stdout = lf
+		node.cmd.Stderr = lf
 
 		if err := node.cmd.Start(); err != nil {
-			logFile.Close()
+			lf.Close()
 			return fmt.Errorf("e2elib: start PD %d: %w", pdID, err)
 		}
+		node.logFile = lf
 		node.running = true
 
 		c.nodes = append(c.nodes, node)
@@ -287,6 +289,11 @@ func (n *PDClusterNode) Stop() error {
 	}
 
 	n.running = false
+
+	if n.logFile != nil {
+		_ = n.logFile.Close()
+		n.logFile = nil
+	}
 	return nil
 }
 
@@ -302,18 +309,19 @@ func (n *PDClusterNode) Restart() error {
 
 	n.cmd = exec.Command(binary, oldArgs...)
 
-	logFile, err := os.OpenFile(n.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	lf, err := os.OpenFile(n.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("e2elib: open PD log for restart: %w", err)
 	}
-	n.cmd.Stdout = logFile
-	n.cmd.Stderr = logFile
+	n.cmd.Stdout = lf
+	n.cmd.Stderr = lf
 
 	if err := n.cmd.Start(); err != nil {
-		logFile.Close()
+		lf.Close()
 		return fmt.Errorf("e2elib: restart PD %d: %w", n.id, err)
 	}
 
+	n.logFile = lf
 	n.running = true
 	return n.WaitForReady(30 * time.Second)
 }

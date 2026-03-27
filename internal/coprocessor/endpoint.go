@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/ryogrid/gookv/internal/engine/traits"
@@ -606,7 +607,7 @@ func encodeDatum(d Datum) []byte {
 	case KindFloat64:
 		buf := make([]byte, 9)
 		buf[0] = 0x03
-		binary.BigEndian.PutUint64(buf[1:], uint64(d.I64)) // float bits via I64
+		binary.BigEndian.PutUint64(buf[1:], math.Float64bits(d.F64))
 		return buf
 	case KindString:
 		buf := make([]byte, 3+len(d.Str))
@@ -648,8 +649,8 @@ func decodeDatum(data []byte) (Datum, int, error) {
 		if len(data) < 9 {
 			return Datum{}, 0, fmt.Errorf("truncated float64")
 		}
-		v := int64(binary.BigEndian.Uint64(data[1:9]))
-		return Datum{Kind: KindFloat64, I64: v}, 9, nil
+		v := math.Float64frombits(binary.BigEndian.Uint64(data[1:9]))
+		return Datum{Kind: KindFloat64, F64: v}, 9, nil
 	case 0x04: // String
 		if len(data) < 3 {
 			return Datum{}, 0, fmt.Errorf("truncated string length")

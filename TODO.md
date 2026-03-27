@@ -93,7 +93,7 @@
 ## 06 Entry/Config/Codec
 
 ### Critical
-- [ ] C-1: Float64 datum encoding reads d.I64 instead of Float64bits (endpoint.go:609,652)
+- [x] C-1: Float64 datum encoding reads d.I64 instead of Float64bits (endpoint.go:609,652)
 
 ### High
 - [ ] H-1: --store-id=0 with --initial-cluster creates invalid Raft peers (main.go)
@@ -109,12 +109,12 @@
 
 ### High
 - [ ] 1.1: GC test doesn't verify old version deleted (gc_worker_test.go)
-- [ ] 4.1: Log file handles leaked in e2elib process management (pdcluster.go, gokvnode.go)
-- [ ] 4.2: PDCluster Restart() leaks old log file handle (pdcluster.go)
+- [x] 4.1: Log file handles leaked in e2elib process management (pdcluster.go, gokvnode.go)
+- [x] 4.2: PDCluster Restart() leaks old log file handle (pdcluster.go)
 
 ### Medium
 - [ ] 4.4: PDCluster.Client() creates new client per call (pdcluster.go)
-- [ ] 3.2: secondDuration uses raw nanosecond constant (cluster.go:143-144)
+- [x] 3.2: secondDuration uses raw nanosecond constant (cluster.go:143-144)
 - [ ] 1.4: Cross-node replication test ignores all errors (cluster_server_test.go)
 - [ ] 1.5: TSO via follower test has no failure assertions (pd_replication_test.go)
 - [ ] 1.6: TSO forwarding test passes with zero successes (pd_replication_test.go)

@@ -192,6 +192,9 @@ See `review_results/` for detailed review reports and design documents.
 | 6 | PD | PD Raft dynamic membership change | Not implemented | PD cluster topology is fixed at startup via `--initial-cluster`. Adding or removing PD nodes at runtime requires a full cluster restart with updated topology. |
 | 7 | Transaction | Cross-region 2PC under high concurrency | **RESOLVED** | See 2.3. Fully functional after 10 cumulative fixes. |
 | 8 | Raftstore | Split key selection from dominant CF | Deferred | `scanRegionSize` picks split key from whichever CF reaches the midpoint first. Low impact — splits may be slightly unbalanced but data integrity is unaffected. |
+| 9 | Raftstore | Leader lease read path | Not implemented | Lease is confirmed but `appliedIndex >= commitIndex` check is missing. ReadIndex (ReadOnlySafe) is used instead. (`coordinator.go:266`) |
+| 10 | Server | Flow control integration in IsBusy | Not implemented | `StoreCoordinator.IsBusy()` always returns `false`. (`coordinator.go:464`) |
+| 11 | PD Client | `grpc.DialContext` + `WithBlock` migration | Deferred | 3 sites in `pkg/pdclient/client.go` still use deprecated `grpc.DialContext` with `grpc.WithBlock()`. `grpc.NewClient` does not support blocking dial; requires non-blocking connection pattern redesign. |
 
 ### 2.1 BatchCoprocessor
 

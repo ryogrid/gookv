@@ -150,6 +150,11 @@ func main() {
 
 	if hasInitialCluster {
 		// Bootstrap mode: static initial cluster topology.
+		if *storeID == 0 {
+			slog.Error("--store-id is required and must be non-zero when --initial-cluster is specified")
+			os.Exit(1)
+		}
+
 		clusterMap := parseInitialCluster(*initialCluster)
 		if len(clusterMap) == 0 {
 			slog.Error("Invalid --initial-cluster format")
@@ -448,13 +453,17 @@ func parseInitialCluster(s string) map[uint64]string {
 		}
 		eqIdx := strings.Index(part, "=")
 		if eqIdx < 0 {
-			continue
+			log.Fatalf("Invalid --initial-cluster entry (missing '='): %q", part)
 		}
 		id, err := strconv.ParseUint(part[:eqIdx], 10, 64)
 		if err != nil {
-			continue
+			log.Fatalf("Invalid --initial-cluster entry (bad ID): %q: %v", part, err)
 		}
-		result[id] = part[eqIdx+1:]
+		addr := part[eqIdx+1:]
+		if addr == "" {
+			log.Fatalf("Invalid --initial-cluster entry (empty address): %q", part)
+		}
+		result[id] = addr
 	}
 	return result
 }

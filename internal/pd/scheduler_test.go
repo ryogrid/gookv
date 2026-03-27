@@ -59,10 +59,11 @@ func TestExcessShedding_RemovesMostLoadedPeer(t *testing.T) {
 	}
 	meta.PutRegion(region, nil)
 
-	cmd := sched.scheduleExcessReplicaShedding(100, region)
+	leader := &metapb.Peer{Id: 1003, StoreId: 3}
+	cmd := sched.scheduleExcessReplicaShedding(100, region, leader)
 	require.NotNil(t, cmd, "should produce a shedding command")
 	assert.Equal(t, eraftpb.ConfChangeType_RemoveNode, cmd.ChangePeer.GetChangeType())
-	// Should remove the peer on store 1 (most regions = 10).
+	// Should remove the peer on store 1 (most regions = 10), not leader (store 3).
 	assert.Equal(t, uint64(1), cmd.ChangePeer.GetPeer().GetStoreId())
 	assert.Equal(t, uint64(1001), cmd.ChangePeer.GetPeer().GetId())
 }
@@ -81,7 +82,7 @@ func TestExcessShedding_NoPeersToRemove(t *testing.T) {
 	}
 	meta.PutRegion(region, nil)
 
-	cmd := sched.scheduleExcessReplicaShedding(100, region)
+	cmd := sched.scheduleExcessReplicaShedding(100, region, nil)
 	assert.Nil(t, cmd, "should not produce a command when peers == maxPeerCount")
 }
 

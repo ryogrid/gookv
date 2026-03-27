@@ -427,8 +427,8 @@ func (p *Peer) handleMessage(msg PeerMsg) {
 
 	case PeerMsgTypeDestroy:
 		p.stopped.Store(true)
-		// Drain mailbox.
-		close(p.Mailbox)
+		// Don't close Mailbox — external goroutines may still send to it.
+		// The Run() loop will exit via the stopped flag check.
 
 	case PeerMsgTypeReadIndex:
 		req := msg.Data.(*ReadIndexRequest)

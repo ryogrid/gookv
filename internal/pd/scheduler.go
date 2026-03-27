@@ -65,7 +65,7 @@ func (s *Scheduler) Schedule(regionID uint64, region *metapb.Region, leader *met
 		}
 	}
 	// Priority 1: Remove excess replicas.
-	if cmd := s.scheduleExcessReplicaShedding(regionID, region); cmd != nil {
+	if cmd := s.scheduleExcessReplicaShedding(regionID, region, leader); cmd != nil {
 		return cmd
 	}
 	// Priority 2: Repair under-replicated regions.
@@ -155,17 +155,21 @@ func (s *Scheduler) scheduleLeaderBalance(regionID uint64, region *metapb.Region
 
 // scheduleExcessReplicaShedding checks if a region has more peers than maxPeerCount
 // and removes the peer on the store with the highest region count.
-func (s *Scheduler) scheduleExcessReplicaShedding(regionID uint64, region *metapb.Region) *ScheduleCommand {
+func (s *Scheduler) scheduleExcessReplicaShedding(regionID uint64, region *metapb.Region, leader *metapb.Peer) *ScheduleCommand {
 	if len(region.GetPeers()) <= s.maxPeerCount {
 		return nil
 	}
 
 	regionCounts := s.meta.GetRegionCountPerStore()
 
-	// Find the peer on the store with the most regions.
+	// Find the peer on the store with the most regions, excluding the leader.
 	var removePeer *metapb.Peer
 	maxCount := -1
 	for _, peer := range region.GetPeers() {
+		// Never remove the leader peer — it would disrupt the region.
+		if leader != nil && peer.GetId() == leader.GetId() {
+			continue
+		}
 		count := regionCounts[peer.GetStoreId()]
 		if count > maxCount {
 			maxCount = count

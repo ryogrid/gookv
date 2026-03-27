@@ -9,7 +9,7 @@
 - [x] C4: ApplySnapshot passes nil key range; stale data not cleared (snapshot.go:384)
 
 ### High
-- [ ] H1: PeerMsgTypeDestroy closes Mailbox causing panic on concurrent sends (peer.go:425-428)
+- [x] H1: PeerMsgTypeDestroy closes Mailbox causing panic on concurrent sends (peer.go:425-428)
 - [x] H2: leaseExpiry accessed from multiple goroutines without sync (peer.go:131-132)
 - [x] H3: handleReady runs after peer destroyed (peer.go:376-378)
 - [ ] H4: Admin entries sent to applyFunc; relies on format incompatibility (peer.go:579-600)
@@ -36,9 +36,9 @@
 ### Potential/Medium
 - [ ] P1: ReadPool.Stop() doesn't drain pending tasks (flow/flow.go:112-114)
 - [ ] P3: Connection pool always uses index 0 (transport.go:249)
-- [ ] P4: TOCTOU in pd_resolver (pd_resolver.go:52-75)
+- [x] P4: TOCTOU in pd_resolver — performance only, not correctness (pd_resolver.go:52-75)
 - [x] P6: KvDeleteRange hardcodes region ID 1 (server.go:1541)
-- [ ] P7: RawPut/RawDelete skip region validation (server.go:1194-1233)
+- [x] P7: RawPut/RawDelete skip region validation (server.go:1194-1233)
 
 ## 03 Storage/MVCC Layer
 
@@ -83,11 +83,11 @@
 
 ### Moderate
 - [ ] M1: TSO logical overflow may produce non-monotonic timestamps (server.go:1199-1221)
-- [ ] M3: scheduleExcessReplicaShedding may remove leader (scheduler.go:156-187)
+- [x] M3: scheduleExcessReplicaShedding may remove leader (scheduler.go:156-187)
 - [x] M5: MockClient TSO race condition (pdclient/mock.go:64-80)
 
 ### Minor
-- [ ] m1: GetSafePoint uses Mutex instead of RWMutex (server.go:1256)
+- [x] m1: GetSafePoint uses Mutex instead of RWMutex (server.go:1256)
 - [ ] m5: Replace deprecated grpc.Dial with grpc.NewClient (various)
 
 ## 06 Entry/Config/Codec
@@ -96,10 +96,10 @@
 - [x] C-1: Float64 datum encoding reads d.I64 instead of Float64bits (endpoint.go:609,652)
 
 ### High
-- [ ] H-1: --store-id=0 with --initial-cluster creates invalid Raft peers (main.go)
+- [x] H-1: --store-id=0 with --initial-cluster creates invalid Raft peers (main.go)
 - [ ] H-2: SelectionExecutor truthiness check uses I64 for all types (coprocessor.go:357)
 - [ ] H-3: ReadableSize parser doesn't validate trailing chars (config.go:42-73)
-- [ ] H-4: parseInitialCluster silently drops malformed entries (main.go:442-460)
+- [x] H-4: parseInitialCluster silently drops malformed entries (main.go:442-460)
 
 ### Medium
 - [ ] M-2: EncodeRPNExpression only handles Int64/String constants (endpoint.go:500-528)

@@ -1259,6 +1259,10 @@ func proposeErrorToRegionError(err error, regionID uint64) *errorpb.Error {
 // RawPut implements the RawPut RPC.
 func (svc *tikvService) RawPut(ctx context.Context, req *kvrpcpb.RawPutRequest) (*kvrpcpb.RawPutResponse, error) {
 	resp := &kvrpcpb.RawPutResponse{}
+	if regErr := svc.validateRegionContext(req.GetContext(), req.GetKey()); regErr != nil {
+		resp.RegionError = regErr
+		return resp, nil
+	}
 	ttl := req.GetTtl()
 	if coord := svc.server.coordinator; coord != nil {
 		modify := svc.server.rawStorage.PutModify(req.GetCf(), req.GetKey(), req.GetValue(), ttl)
@@ -1281,6 +1285,10 @@ func (svc *tikvService) RawPut(ctx context.Context, req *kvrpcpb.RawPutRequest) 
 // RawDelete implements the RawDelete RPC.
 func (svc *tikvService) RawDelete(ctx context.Context, req *kvrpcpb.RawDeleteRequest) (*kvrpcpb.RawDeleteResponse, error) {
 	resp := &kvrpcpb.RawDeleteResponse{}
+	if regErr := svc.validateRegionContext(req.GetContext(), req.GetKey()); regErr != nil {
+		resp.RegionError = regErr
+		return resp, nil
+	}
 	if coord := svc.server.coordinator; coord != nil {
 		modify := svc.server.rawStorage.DeleteModify(req.GetCf(), req.GetKey())
 		regionID := svc.resolveRegionID(req.GetKey())

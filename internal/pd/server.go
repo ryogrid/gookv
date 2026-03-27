@@ -1239,7 +1239,7 @@ func (a *IDAllocator) Alloc() uint64 {
 
 // GCSafePointManager manages the GC safe point.
 type GCSafePointManager struct {
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	safePoint uint64
 }
 
@@ -1248,8 +1248,8 @@ func NewGCSafePointManager() *GCSafePointManager {
 }
 
 func (g *GCSafePointManager) GetSafePoint() uint64 {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	g.mu.RLock()
+	defer g.mu.RUnlock()
 	return g.safePoint
 }
 

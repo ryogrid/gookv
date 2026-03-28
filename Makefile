@@ -73,7 +73,9 @@ pd-cluster-stop:
 		if [ -f $$PID_FILE ]; then \
 			PID=$$(cat $$PID_FILE); \
 			if kill -0 $$PID 2>/dev/null; then \
-				kill $$PID; \
+				kill $$PID 2>/dev/null; \
+				sleep 1; \
+				if kill -0 $$PID 2>/dev/null; then kill -9 $$PID 2>/dev/null; fi; \
 				echo "  Node $$i (pid $$PID): stopped"; \
 			else \
 				echo "  Node $$i (pid $$PID): already stopped"; \
@@ -85,7 +87,9 @@ pd-cluster-stop:
 	if [ -f $$PID_FILE ]; then \
 		PID=$$(cat $$PID_FILE); \
 		if kill -0 $$PID 2>/dev/null; then \
-			kill $$PID; \
+			kill $$PID 2>/dev/null; \
+			sleep 1; \
+			if kill -0 $$PID 2>/dev/null; then kill -9 $$PID 2>/dev/null; fi; \
 			echo "  PD (pid $$PID): stopped"; \
 		else \
 			echo "  PD (pid $$PID): already stopped"; \
@@ -156,7 +160,9 @@ txn-demo-stop:
 		if [ -f $$PID_FILE ]; then \
 			PID=$$(cat $$PID_FILE); \
 			if kill -0 $$PID 2>/dev/null; then \
-				kill $$PID; \
+				kill $$PID 2>/dev/null; \
+				sleep 1; \
+				if kill -0 $$PID 2>/dev/null; then kill -9 $$PID 2>/dev/null; fi; \
 				echo "  Node $$i (pid $$PID): stopped"; \
 			else \
 				echo "  Node $$i (pid $$PID): already stopped"; \
@@ -168,7 +174,9 @@ txn-demo-stop:
 	if [ -f $$PID_FILE ]; then \
 		PID=$$(cat $$PID_FILE); \
 		if kill -0 $$PID 2>/dev/null; then \
-			kill $$PID; \
+			kill $$PID 2>/dev/null; \
+			sleep 1; \
+			if kill -0 $$PID 2>/dev/null; then kill -9 $$PID 2>/dev/null; fi; \
 			echo "  PD (pid $$PID): stopped"; \
 		else \
 			echo "  PD (pid $$PID): already stopped"; \
@@ -237,7 +245,9 @@ scale-demo-stop:
 		if [ -f $$PID_FILE ]; then \
 			PID=$$(cat $$PID_FILE); \
 			if kill -0 $$PID 2>/dev/null; then \
-				kill $$PID; \
+				kill $$PID 2>/dev/null; \
+				sleep 1; \
+				if kill -0 $$PID 2>/dev/null; then kill -9 $$PID 2>/dev/null; fi; \
 				echo "  Node $$i (pid $$PID): stopped"; \
 			else \
 				echo "  Node $$i (pid $$PID): already stopped"; \
@@ -249,7 +259,9 @@ scale-demo-stop:
 	if [ -f $$PID_FILE ]; then \
 		PID=$$(cat $$PID_FILE); \
 		if kill -0 $$PID 2>/dev/null; then \
-			kill $$PID; \
+			kill $$PID 2>/dev/null; \
+			sleep 1; \
+			if kill -0 $$PID 2>/dev/null; then kill -9 $$PID 2>/dev/null; fi; \
 			echo "  PD (pid $$PID): stopped"; \
 		else \
 			echo "  PD (pid $$PID): already stopped"; \
@@ -331,7 +343,9 @@ pd-failover-demo-stop:
 		if [ -f $$PID_FILE ]; then \
 			PID=$$(cat $$PID_FILE); \
 			if kill -0 $$PID 2>/dev/null; then \
-				kill $$PID; \
+				kill $$PID 2>/dev/null; \
+				sleep 1; \
+				if kill -0 $$PID 2>/dev/null; then kill -9 $$PID 2>/dev/null; fi; \
 				echo "  Node $$i (pid $$PID): stopped"; \
 			else \
 				echo "  Node $$i (pid $$PID): already stopped"; \
@@ -344,7 +358,9 @@ pd-failover-demo-stop:
 		if [ -f $$PID_FILE ]; then \
 			PID=$$(cat $$PID_FILE); \
 			if kill -0 $$PID 2>/dev/null; then \
-				kill $$PID; \
+				kill $$PID 2>/dev/null; \
+				sleep 1; \
+				if kill -0 $$PID 2>/dev/null; then kill -9 $$PID 2>/dev/null; fi; \
 				echo "  PD $$i (pid $$PID): stopped"; \
 			else \
 				echo "  PD $$i (pid $$PID): already stopped"; \
@@ -413,7 +429,9 @@ txn-integrity-demo-stop:
 		if [ -f $$PID_FILE ]; then \
 			PID=$$(cat $$PID_FILE); \
 			if kill -0 $$PID 2>/dev/null; then \
-				kill $$PID; \
+				kill $$PID 2>/dev/null; \
+				sleep 1; \
+				if kill -0 $$PID 2>/dev/null; then kill -9 $$PID 2>/dev/null; fi; \
 				echo "  Node $$i (pid $$PID): stopped"; \
 			else \
 				echo "  Node $$i (pid $$PID): already stopped"; \
@@ -425,7 +443,9 @@ txn-integrity-demo-stop:
 	if [ -f $$PID_FILE ]; then \
 		PID=$$(cat $$PID_FILE); \
 		if kill -0 $$PID 2>/dev/null; then \
-			kill $$PID; \
+			kill $$PID 2>/dev/null; \
+			sleep 1; \
+			if kill -0 $$PID 2>/dev/null; then kill -9 $$PID 2>/dev/null; fi; \
 			echo "  PD (pid $$PID): stopped"; \
 		else \
 			echo "  PD (pid $$PID): already stopped"; \

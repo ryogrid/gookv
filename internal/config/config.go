@@ -87,49 +87,49 @@ func (s ReadableSize) MarshalText() ([]byte, error) {
 
 // Config is the root configuration struct for gookv.
 type Config struct {
-	Log            LogConfig        `toml:"log"`
-	Server         ServerConfig     `toml:"server"`
-	Storage        StorageConfig    `toml:"storage"`
-	PD             PDConfig         `toml:"pd"`
-	RaftStore      RaftStoreConfig  `toml:"raft-store"`
-	Coprocessor    CoprocessorConfig `toml:"coprocessor"`
-	PessimisticTxn PessimisticTxnConfig `toml:"pessimistic-txn"`
-	SlowLogFile    string           `toml:"slow-log-file"`
-	SlowLogThreshold Duration       `toml:"slow-log-threshold"`
+	Log              LogConfig            `toml:"log"`
+	Server           ServerConfig         `toml:"server"`
+	Storage          StorageConfig        `toml:"storage"`
+	PD               PDConfig             `toml:"pd"`
+	RaftStore        RaftStoreConfig      `toml:"raft-store"`
+	Coprocessor      CoprocessorConfig    `toml:"coprocessor"`
+	PessimisticTxn   PessimisticTxnConfig `toml:"pessimistic-txn"`
+	SlowLogFile      string               `toml:"slow-log-file"`
+	SlowLogThreshold Duration             `toml:"slow-log-threshold"`
 }
 
 // LogConfig controls logging behavior.
 type LogConfig struct {
-	Level      string `toml:"level"`
-	Format     string `toml:"format"`
-	File       LogFileConfig `toml:"file"`
-	EnableTimestamp bool `toml:"enable-timestamp"`
+	Level           string        `toml:"level"`
+	Format          string        `toml:"format"`
+	File            LogFileConfig `toml:"file"`
+	EnableTimestamp bool          `toml:"enable-timestamp"`
 }
 
 // LogFileConfig controls log file rotation.
 type LogFileConfig struct {
 	Filename   string `toml:"filename"`
-	MaxSize    int    `toml:"max-size"`    // MB
+	MaxSize    int    `toml:"max-size"` // MB
 	MaxDays    int    `toml:"max-days"`
 	MaxBackups int    `toml:"max-backups"`
 }
 
 // ServerConfig controls the gRPC server.
 type ServerConfig struct {
-	Addr           string       `toml:"addr"`
-	StatusAddr     string       `toml:"status-addr"`
-	GRPCConcurrency int        `toml:"grpc-concurrency"`
+	Addr               string       `toml:"addr"`
+	StatusAddr         string       `toml:"status-addr"`
+	GRPCConcurrency    int          `toml:"grpc-concurrency"`
 	GRPCMaxRecvMsgSize ReadableSize `toml:"grpc-max-recv-msg-size"`
 	GRPCMaxSendMsgSize ReadableSize `toml:"grpc-max-send-msg-size"`
-	ClusterID      uint64       `toml:"cluster-id"`
+	ClusterID          uint64       `toml:"cluster-id"`
 }
 
 // StorageConfig controls the storage engine.
 type StorageConfig struct {
-	DataDir        string       `toml:"data-dir"`
-	ReserveSpace   ReadableSize `toml:"reserve-space"`
-	BlockCacheSize ReadableSize `toml:"block-cache-size"`
-	SchedulerConcurrency int   `toml:"scheduler-concurrency"`
+	DataDir              string       `toml:"data-dir"`
+	ReserveSpace         ReadableSize `toml:"reserve-space"`
+	BlockCacheSize       ReadableSize `toml:"block-cache-size"`
+	SchedulerConcurrency int          `toml:"scheduler-concurrency"`
 }
 
 // PDConfig controls the PD client.
@@ -139,15 +139,15 @@ type PDConfig struct {
 
 // RaftStoreConfig controls the raft store.
 type RaftStoreConfig struct {
-	RaftBaseTickInterval     Duration `toml:"raft-base-tick-interval"`
-	RaftHeartbeatTicks       int      `toml:"raft-heartbeat-ticks"`
-	RaftElectionTimeoutTicks int      `toml:"raft-election-timeout-ticks"`
+	RaftBaseTickInterval     Duration     `toml:"raft-base-tick-interval"`
+	RaftHeartbeatTicks       int          `toml:"raft-heartbeat-ticks"`
+	RaftElectionTimeoutTicks int          `toml:"raft-election-timeout-ticks"`
 	RegionMaxSize            ReadableSize `toml:"region-max-size"`
 	RegionSplitSize          ReadableSize `toml:"region-split-size"`
-	RaftLogGCThreshold       uint64   `toml:"raft-log-gc-threshold"`
-	RaftLogGCCountLimit      uint64   `toml:"raft-log-gc-count-limit"`
-	SplitCheckTickInterval   Duration `toml:"split-check-tick-interval"`
-	PdHeartbeatTickInterval  Duration `toml:"pd-heartbeat-tick-interval"`
+	RaftLogGCThreshold       uint64       `toml:"raft-log-gc-threshold"`
+	RaftLogGCCountLimit      uint64       `toml:"raft-log-gc-count-limit"`
+	SplitCheckTickInterval   Duration     `toml:"split-check-tick-interval"`
+	PdHeartbeatTickInterval  Duration     `toml:"pd-heartbeat-tick-interval"`
 
 	// Performance optimization flags.
 	EnableBatchRaftWrite bool `toml:"enable-batch-raft-write"`
@@ -156,16 +156,16 @@ type RaftStoreConfig struct {
 
 // CoprocessorConfig controls the coprocessor.
 type CoprocessorConfig struct {
-	RegionMaxKeys   uint64       `toml:"region-max-keys"`
-	RegionSplitKeys uint64       `toml:"region-split-keys"`
-	SplitRegionOnTable bool     `toml:"split-region-on-table"`
+	RegionMaxKeys      uint64 `toml:"region-max-keys"`
+	RegionSplitKeys    uint64 `toml:"region-split-keys"`
+	SplitRegionOnTable bool   `toml:"split-region-on-table"`
 }
 
 // PessimisticTxnConfig controls pessimistic transaction behavior.
 type PessimisticTxnConfig struct {
-	WaitForLockTimeout Duration `toml:"wait-for-lock-timeout"`
+	WaitForLockTimeout  Duration `toml:"wait-for-lock-timeout"`
 	WakeUpDelayDuration Duration `toml:"wake-up-delay-duration"`
-	Pipelined          bool      `toml:"pipelined"`
+	Pipelined           bool     `toml:"pipelined"`
 }
 
 // DefaultConfig returns a Config with sensible default values.
@@ -207,6 +207,8 @@ func DefaultConfig() *Config {
 			RaftLogGCThreshold:       50,
 			RaftLogGCCountLimit:      72000,
 			SplitCheckTickInterval:   Duration{10 * time.Second},
+			EnableBatchRaftWrite:     true,
+			EnableApplyPipeline:      true,
 		},
 		Coprocessor: CoprocessorConfig{
 			RegionMaxKeys:      1440000,

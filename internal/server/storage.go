@@ -69,6 +69,8 @@ func (s *Storage) ReleaseLatch(g *LatchGuard) {
 }
 
 // ApplyModifies writes the accumulated MVCC modifications to the engine atomically.
+// Uses NoSync because durability is guaranteed by the Raft log — on crash,
+// unapplied entries are replayed from the persisted (synced) Raft log.
 // Exported so coordinator can call it from applyFunc.
 func (s *Storage) ApplyModifies(modifies []mvcc.Modify) error {
 	if len(modifies) == 0 {
@@ -91,7 +93,7 @@ func (s *Storage) ApplyModifies(modifies []mvcc.Modify) error {
 			}
 		}
 	}
-	return wb.Commit()
+	return wb.CommitNoSync()
 }
 
 // Get performs a transactional point read at the given timestamp.

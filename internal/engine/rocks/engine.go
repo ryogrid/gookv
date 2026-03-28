@@ -444,6 +444,10 @@ func (wb *writeBatch) Commit() error {
 	return wb.batch.Commit(pebble.Sync)
 }
 
+func (wb *writeBatch) CommitNoSync() error {
+	return wb.batch.Commit(pebble.NoSync)
+}
+
 // iterator implements traits.Iterator.
 type iterator struct {
 	iter   *pebble.Iterator

@@ -100,8 +100,12 @@ type WriteBatch interface {
 	// PopSavePoint removes the most recent save point without rolling back.
 	PopSavePoint() error
 
-	// Commit atomically applies all mutations in the batch.
+	// Commit atomically applies all mutations in the batch with fsync.
 	Commit() error
+
+	// CommitNoSync atomically applies all mutations without fsync.
+	// Use when durability is guaranteed by another mechanism (e.g., Raft log).
+	CommitNoSync() error
 }
 
 // Iterator enables sequential access to keys within a column family.

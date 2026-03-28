@@ -360,7 +360,8 @@ func (w *GCWorker) applyModifies(txn *mvcc.MvccTxn) error {
 			}
 		}
 	}
-	return wb.Commit()
+	// NoSync: GC writes are recoverable by re-running GC after crash.
+	return wb.CommitNoSync()
 }
 
 // SafePointProvider abstracts PD safe point retrieval.

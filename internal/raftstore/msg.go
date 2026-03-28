@@ -73,8 +73,9 @@ type RaftCommand struct {
 
 // ApplyResult contains the outcome of applying committed entries.
 type ApplyResult struct {
-	RegionID uint64
-	Results  []ExecResult
+	RegionID     uint64
+	AppliedIndex uint64 // Last applied entry index from this batch (0 = no update).
+	Results      []ExecResult
 }
 
 // ExecResult represents the result of executing a single committed entry.

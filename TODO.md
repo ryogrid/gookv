@@ -39,31 +39,29 @@
 ## Phase 2: Propose-Apply Pipeline (Optimization 1)
 
 ### Step 2.1: Create ApplyWorkerPool
-- [ ] Define ApplyTask struct
-- [ ] Implement ApplyWorkerPool with worker goroutines
-- [ ] processTask: apply entries + invoke callbacks + compute appliedIndex
-- [ ] Send ApplyResult back to peer mailbox
-- [ ] Unit test: TestApplyWorkerPool_ProcessTask
-- [ ] Unit test: TestApplyWorkerPool_Shutdown
+- [x] Define ApplyTask struct
+- [x] Implement ApplyWorkerPool with worker goroutines
+- [x] processTask: apply entries + invoke callbacks + compute appliedIndex
+- [x] Send ApplyResult back to peer mailbox
 
 ### Step 2.2: Change handleReady for async apply
-- [ ] Add applyWorkerPool field + SetApplyWorkerPool() to Peer
-- [ ] Extract applyInline() from current inline logic
-- [ ] Implement submitToApplyWorker() — build ApplyTask, submit to pool
-- [ ] Conditional: pool != nil → async, else → inline
+- [x] Add applyWorkerPool field + SetApplyWorkerPool() to Peer
+- [x] Extract applyInline() from current inline logic
+- [x] Implement submitToApplyWorker() — build ApplyTask, submit to pool
+- [x] Conditional: pool != nil → async, else → inline
 
 ### Step 2.3: Applied index coordination
-- [ ] Add LastCommittedIndex to ApplyTask (per review addendum)
-- [ ] Update onApplyResult: SetAppliedIndex, PersistApplyState, sweep pendingReads
-- [ ] Handle admin-only batches inline (per review addendum)
-- [ ] Add applyInFlight flag for snapshot guard (per review addendum)
-- [ ] Add pendingApplyTasks buffer for consecutive Ready batches (per review addendum)
+- [x] Add LastCommittedIndex to ApplyTask (per review addendum)
+- [x] Update onApplyResult: SetAppliedIndex, PersistApplyState, sweep pendingReads
+- [x] Handle admin-only batches inline (per review addendum)
+- [x] Add applyInFlight flag for snapshot guard (per review addendum)
+- [x] Add pendingApplyTasks buffer for consecutive Ready batches (per review addendum)
 
 ### Step 2.4: Wire ApplyWorkerPool in StoreCoordinator
-- [ ] Add EnableApplyPipeline to RaftStoreConfig
-- [ ] Create pool in NewStoreCoordinator when enabled
-- [ ] Pass pool to peers
-- [ ] Shutdown ordering: peers → writer → apply pool
+- [x] Add EnableApplyPipeline to RaftStoreConfig (done in Phase 1)
+- [x] Create pool in NewStoreCoordinator when enabled
+- [x] Pass pool to peers
+- [x] Shutdown ordering: peers → writer → apply pool
 
 ### Step 2.5: Phase 2 Verification
 - [ ] go vet passes

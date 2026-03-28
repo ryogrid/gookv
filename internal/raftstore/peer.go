@@ -109,6 +109,14 @@ type Peer struct {
 	// nil = use inline SaveReady (default/legacy).
 	raftLogWriter *RaftLogWriter
 
+	// applyWorkerPool processes committed entries asynchronously.
+	// nil = use inline apply (default/legacy).
+	applyWorkerPool *ApplyWorkerPool
+	// applyInFlight is true when an async apply task is outstanding for this region.
+	applyInFlight bool
+	// pendingApplyTasks buffers apply tasks when an apply is already in-flight.
+	pendingApplyTasks []*ApplyTask
+
 	// raftLogSizeHint tracks estimated size of the Raft log.
 	raftLogSizeHint uint64
 
@@ -160,6 +168,13 @@ func (p *Peer) SetSplitResultCh(ch chan<- *SplitRegionResult) {
 // calling SaveReady directly.
 func (p *Peer) SetRaftLogWriter(w *RaftLogWriter) {
 	p.raftLogWriter = w
+}
+
+// SetApplyWorkerPool sets the async apply pool.
+// When set, handleReady submits committed data entries to the pool instead
+// of applying them inline. Admin entries are always applied inline.
+func (p *Peer) SetApplyWorkerPool(pool *ApplyWorkerPool) {
+	p.applyWorkerPool = pool
 }
 
 // pendingRead represents a pending read index request waiting for
@@ -633,47 +648,13 @@ func (p *Peer) handleReady() {
 				p.applySplitAdminEntry(&eCopy)
 			}
 		}
-		// Filter admin entries out before passing to applyFunc.
-		// Only send data entries (non-admin, with 8-byte proposal ID prefix) to the apply worker.
-		if p.applyFunc != nil {
-			var dataEntries []raftpb.Entry
-			for _, e := range rd.CommittedEntries {
-				if e.Type == raftpb.EntryNormal && !IsSplitAdmin(e.Data) && !IsCompactLog(e.Data) && len(e.Data) > 8 {
-					dataEntries = append(dataEntries, e)
-				}
-			}
-			if len(dataEntries) > 0 {
-				p.applyFunc(p.regionID, dataEntries)
-			}
-		}
-		// Invoke pending proposal callbacks for committed entries.
-		// Match by proposal ID embedded in the first 8 bytes of entry data.
-		for _, e := range rd.CommittedEntries {
-			if e.Type != raftpb.EntryNormal || len(e.Data) < 8 {
-				continue
-			}
-			proposalID := binary.BigEndian.Uint64(e.Data[:8])
-			if proposalID == 0 {
-				continue
-			}
-			if entry, ok := p.pendingProposals[proposalID]; ok {
-				if e.Term == entry.term {
-					entry.callback(nil) // success
-				} else {
-					entry.callback(errorResponse(
-						fmt.Errorf("term mismatch: proposed in %d, committed in %d",
-							entry.term, e.Term)))
-				}
-				delete(p.pendingProposals, proposalID)
-			}
-		}
-		// Update applied index so ReadIndex can confirm data is readable.
-		lastEntry := rd.CommittedEntries[len(rd.CommittedEntries)-1]
-		p.storage.SetAppliedIndex(lastEntry.Index)
 
-		// Persist ApplyState so it survives restarts.
-		if err := p.storage.PersistApplyState(); err != nil {
-			slog.Error("APPLY-STATE-PERSIST failed", "error", err, "region", p.regionID)
+		if p.applyWorkerPool != nil {
+			// Async path: send data entries to apply pool.
+			p.submitToApplyWorker(rd.CommittedEntries)
+		} else {
+			// Legacy path: inline apply (current behavior).
+			p.applyInline(rd.CommittedEntries)
 		}
 	}
 
@@ -732,11 +713,176 @@ func (p *Peer) sweepStaleProposals(maxAge time.Duration) {
 	}
 }
 
+// applyInline applies committed entries synchronously (legacy path).
+// This preserves the original inline apply behavior when applyWorkerPool is nil.
+func (p *Peer) applyInline(committedEntries []raftpb.Entry) {
+	// Filter admin entries out before passing to applyFunc.
+	// Only send data entries (non-admin, with 8-byte proposal ID prefix) to the apply worker.
+	if p.applyFunc != nil {
+		var dataEntries []raftpb.Entry
+		for _, e := range committedEntries {
+			if e.Type == raftpb.EntryNormal && !IsSplitAdmin(e.Data) && !IsCompactLog(e.Data) && len(e.Data) > 8 {
+				dataEntries = append(dataEntries, e)
+			}
+		}
+		if len(dataEntries) > 0 {
+			p.applyFunc(p.regionID, dataEntries)
+		}
+	}
+
+	// Invoke pending proposal callbacks for committed entries.
+	// Match by proposal ID embedded in the first 8 bytes of entry data.
+	for _, e := range committedEntries {
+		if e.Type != raftpb.EntryNormal || len(e.Data) < 8 {
+			continue
+		}
+		proposalID := binary.BigEndian.Uint64(e.Data[:8])
+		if proposalID == 0 {
+			continue
+		}
+		if entry, ok := p.pendingProposals[proposalID]; ok {
+			if e.Term == entry.term {
+				entry.callback(nil) // success
+			} else {
+				entry.callback(errorResponse(
+					fmt.Errorf("term mismatch: proposed in %d, committed in %d",
+						entry.term, e.Term)))
+			}
+			delete(p.pendingProposals, proposalID)
+		}
+	}
+
+	// Update applied index so ReadIndex can confirm data is readable.
+	lastEntry := committedEntries[len(committedEntries)-1]
+	p.storage.SetAppliedIndex(lastEntry.Index)
+
+	// Persist ApplyState so it survives restarts.
+	if err := p.storage.PersistApplyState(); err != nil {
+		slog.Error("APPLY-STATE-PERSIST failed", "error", err, "region", p.regionID)
+	}
+}
+
+// submitToApplyWorker builds an ApplyTask from committed entries and submits
+// it to the apply worker pool for async processing. Admin entries have already
+// been processed inline before this method is called.
+func (p *Peer) submitToApplyWorker(committedEntries []raftpb.Entry) {
+	// Capture LastCommittedIndex from the full committed entries slice
+	// (before filtering), including admin entries.
+	lastCommittedIndex := committedEntries[len(committedEntries)-1].Index
+
+	// Filter to data entries only.
+	var dataEntries []raftpb.Entry
+	for _, e := range committedEntries {
+		if e.Type == raftpb.EntryNormal && !IsSplitAdmin(e.Data) && !IsCompactLog(e.Data) && len(e.Data) > 8 {
+			dataEntries = append(dataEntries, e)
+		}
+	}
+
+	if len(dataEntries) == 0 {
+		// Admin-only batch: update applied index inline.
+		// No apply task is submitted, so no ApplyResult will arrive.
+		p.storage.SetAppliedIndex(lastCommittedIndex)
+		if err := p.storage.PersistApplyState(); err != nil {
+			slog.Error("APPLY-STATE-PERSIST failed", "error", err, "region", p.regionID)
+		}
+		// Sweep pending reads that may now be satisfiable.
+		if len(p.pendingReads) > 0 {
+			appliedIdx := p.storage.AppliedIndex()
+			for key, pr := range p.pendingReads {
+				if pr.readIndex > 0 && appliedIdx >= pr.readIndex {
+					pr.callback(nil)
+					delete(p.pendingReads, key)
+				}
+			}
+		}
+		return
+	}
+
+	// Extract callbacks for data entries from pendingProposals.
+	callbacks := make(map[uint64]proposalEntry)
+	for _, e := range dataEntries {
+		if e.Type != raftpb.EntryNormal || len(e.Data) < 8 {
+			continue
+		}
+		proposalID := binary.BigEndian.Uint64(e.Data[:8])
+		if proposalID == 0 {
+			continue
+		}
+		if entry, ok := p.pendingProposals[proposalID]; ok {
+			callbacks[proposalID] = entry
+			delete(p.pendingProposals, proposalID)
+		}
+	}
+
+	task := &ApplyTask{
+		RegionID:           p.regionID,
+		Entries:            dataEntries,
+		ApplyFunc:          p.applyFunc,
+		Callbacks:          callbacks,
+		CurrentTerm:        p.currentTerm,
+		ResultCh:           p.Mailbox,
+		LastCommittedIndex: lastCommittedIndex,
+	}
+
+	if p.applyInFlight {
+		// Previous apply is still in-flight. Buffer this task.
+		p.pendingApplyTasks = append(p.pendingApplyTasks, task)
+	} else {
+		p.applyInFlight = true
+		if err := p.applyWorkerPool.Submit(task); err != nil {
+			slog.Error("apply worker pool submit failed",
+				"region", p.regionID, "err", err)
+			p.applyInFlight = false
+		}
+	}
+}
+
 func (p *Peer) onApplyResult(result *ApplyResult) {
 	if result == nil {
 		return
 	}
-	// Process results and invoke pending proposal callbacks.
+
+	// Update applied index from async apply worker.
+	if result.AppliedIndex > 0 {
+		currentApplied := p.storage.AppliedIndex()
+		// Monotonicity guard: never regress the applied index.
+		if result.AppliedIndex > currentApplied {
+			p.storage.SetAppliedIndex(result.AppliedIndex)
+
+			// Persist apply state (same as current inline path).
+			if err := p.storage.PersistApplyState(); err != nil {
+				slog.Error("APPLY-STATE-PERSIST failed",
+					"error", err, "region", p.regionID)
+			}
+
+			// Sweep pending reads that may now be satisfiable.
+			if len(p.pendingReads) > 0 {
+				for key, pr := range p.pendingReads {
+					if pr.readIndex > 0 && result.AppliedIndex >= pr.readIndex {
+						pr.callback(nil)
+						delete(p.pendingReads, key)
+					}
+				}
+			}
+		}
+	}
+
+	// Clear in-flight flag so next batch can be submitted.
+	p.applyInFlight = false
+
+	// Submit the next queued task, if any (preserves per-region FIFO ordering).
+	if len(p.pendingApplyTasks) > 0 {
+		next := p.pendingApplyTasks[0]
+		p.pendingApplyTasks = p.pendingApplyTasks[1:]
+		p.applyInFlight = true
+		if err := p.applyWorkerPool.Submit(next); err != nil {
+			slog.Error("apply worker pool submit failed (queued task)",
+				"region", p.regionID, "err", err)
+			p.applyInFlight = false
+		}
+	}
+
+	// Process exec results (CompactLog, etc.) -- existing logic.
 	for _, r := range result.Results {
 		switch r.Type {
 		case ExecResultTypeCompactLog:

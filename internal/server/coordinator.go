@@ -55,7 +55,8 @@ type StoreCoordinator struct {
 	splitResultCh chan *raftstore.SplitRegionResult
 
 	// Performance optimization components (nil when disabled).
-	raftLogWriter *raftstore.RaftLogWriter
+	raftLogWriter   *raftstore.RaftLogWriter
+	applyWorkerPool *raftstore.ApplyWorkerPool
 }
 
 // StoreCoordinatorConfig holds the configuration for creating a StoreCoordinator.
@@ -104,6 +105,12 @@ func NewStoreCoordinator(cfg StoreCoordinatorConfig) *StoreCoordinator {
 	if cfg.EnableBatchRaftWrite {
 		sc.raftLogWriter = raftstore.NewRaftLogWriter(cfg.Engine, 256)
 		slog.Info("Raft log batch writer enabled")
+	}
+
+	// Create apply worker pool if enabled.
+	if cfg.EnableApplyPipeline {
+		sc.applyWorkerPool = raftstore.NewApplyWorkerPool(4)
+		slog.Info("Apply pipeline enabled")
 	}
 
 	// Create and start the split check worker if PD client is available.
@@ -181,6 +188,11 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 	// Wire Raft log batch writer if enabled.
 	if sc.raftLogWriter != nil {
 		peer.SetRaftLogWriter(sc.raftLogWriter)
+	}
+
+	// Wire apply worker pool if enabled.
+	if sc.applyWorkerPool != nil {
+		peer.SetApplyWorkerPool(sc.applyWorkerPool)
 	}
 
 	// Register with router.
@@ -466,6 +478,12 @@ func (sc *StoreCoordinator) Stop() {
 	if sc.raftLogWriter != nil {
 		sc.raftLogWriter.Stop()
 	}
+
+	// Stop apply worker pool AFTER all peers have exited and raft log writer stopped.
+	// Workers drain remaining tasks before returning.
+	if sc.applyWorkerPool != nil {
+		sc.applyWorkerPool.Stop()
+	}
 }
 
 // Router returns the router for message routing.
@@ -572,6 +590,11 @@ func (sc *StoreCoordinator) CreatePeer(req *raftstore.CreatePeerRequest) error {
 	// Wire Raft log batch writer if enabled.
 	if sc.raftLogWriter != nil {
 		peer.SetRaftLogWriter(sc.raftLogWriter)
+	}
+
+	// Wire apply worker pool if enabled.
+	if sc.applyWorkerPool != nil {
+		peer.SetApplyWorkerPool(sc.applyWorkerPool)
 	}
 
 	if err := sc.router.Register(regionID, peer.Mailbox); err != nil {

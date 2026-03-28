@@ -13,6 +13,7 @@
 - One tack per subagent for focused execution
 
 ### 3. Self-Improvement Loop
+- Load continuous-learning-v2 skill in all session
 - After ANY correction from the user: update `lessons.md` with the pattern
 - Write rules for yourself that prevent the same mistake
 - Ruthlessly iterate on these lessons until mistake rate drops

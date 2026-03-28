@@ -539,3 +539,71 @@ func limitSize(entries []raftpb.Entry, maxSize uint64) []raftpb.Entry {
 	}
 	return entries
 }
+
+// BuildWriteTask creates a WriteTask from a raft.Ready without persisting it.
+// The caller submits the task to a RaftLogWriter for batched persistence.
+func (s *PeerStorage) BuildWriteTask(rd raft.Ready) (*WriteTask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	task := &WriteTask{
+		RegionID: s.regionID,
+		Done:     make(chan error, 1),
+	}
+
+	// Serialize hard state.
+	if !raft.IsEmptyHardState(rd.HardState) {
+		hs := rd.HardState
+		task.HardState = &hs
+		data, err := hs.Marshal()
+		if err != nil {
+			return nil, fmt.Errorf("raftstore: marshal hard state: %w", err)
+		}
+		task.Ops = append(task.Ops, WriteOp{
+			CF:    cfnames.CFRaft,
+			Key:   keys.RaftStateKey(s.regionID),
+			Value: data,
+		})
+	}
+
+	// Serialize entries.
+	for i := range rd.Entries {
+		data, err := rd.Entries[i].Marshal()
+		if err != nil {
+			return nil, fmt.Errorf("raftstore: marshal entry %d: %w",
+				rd.Entries[i].Index, err)
+		}
+		task.Ops = append(task.Ops, WriteOp{
+			CF:    cfnames.CFRaft,
+			Key:   keys.RaftLogKey(s.regionID, rd.Entries[i].Index),
+			Value: data,
+		})
+	}
+
+	// Store entries for post-persist cache update.
+	if len(rd.Entries) > 0 {
+		task.Entries = rd.Entries
+	}
+
+	return task, nil
+}
+
+// ApplyWriteTaskPostPersist updates in-memory state after the WriteTask has
+// been persisted by the RaftLogWriter. Must be called by the peer goroutine
+// after receiving confirmation from task.Done.
+func (s *PeerStorage) ApplyWriteTaskPostPersist(task *WriteTask) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if task.HardState != nil {
+		s.hardState = *task.HardState
+	}
+
+	if len(task.Entries) > 0 {
+		s.appendToCache(task.Entries)
+		lastEntry := task.Entries[len(task.Entries)-1]
+		if lastEntry.Index > s.persistedLastIndex {
+			s.persistedLastIndex = lastEntry.Index
+		}
+	}
+}

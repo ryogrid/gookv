@@ -105,6 +105,10 @@ type Peer struct {
 	// pendingProposals tracks in-flight proposals: proposalID -> entry.
 	pendingProposals map[uint64]proposalEntry
 
+	// raftLogWriter batches Raft log persistence across regions.
+	// nil = use inline SaveReady (default/legacy).
+	raftLogWriter *RaftLogWriter
+
 	// raftLogSizeHint tracks estimated size of the Raft log.
 	raftLogSizeHint uint64
 
@@ -149,6 +153,13 @@ type Peer struct {
 // SetSplitResultCh sets the channel for receiving split results.
 func (p *Peer) SetSplitResultCh(ch chan<- *SplitRegionResult) {
 	p.splitResultCh = ch
+}
+
+// SetRaftLogWriter sets the batch writer for Raft log persistence.
+// When set, handleReady submits a WriteTask to the writer instead of
+// calling SaveReady directly.
+func (p *Peer) SetRaftLogWriter(w *RaftLogWriter) {
+	p.raftLogWriter = w
 }
 
 // pendingRead represents a pending read index request waiting for
@@ -576,10 +587,24 @@ func (p *Peer) handleReady() {
 	}
 
 	// Persist entries and hard state.
-	if err := p.storage.SaveReady(rd); err != nil {
-		// Fatal: persistence failure. In production, this should trigger
-		// a panic or store shutdown.
-		return
+	if p.raftLogWriter != nil {
+		// Batch write path: submit to shared writer for I/O coalescing.
+		task, err := p.storage.BuildWriteTask(rd)
+		if err != nil {
+			slog.Error("BuildWriteTask failed", "region", p.regionID, "err", err)
+			return
+		}
+		p.raftLogWriter.Submit(task)
+		if err := <-task.Done; err != nil {
+			slog.Error("RaftLogWriter batch commit failed", "region", p.regionID, "err", err)
+			return
+		}
+		p.storage.ApplyWriteTaskPostPersist(task)
+	} else {
+		// Legacy path: inline SaveReady with per-region fsync.
+		if err := p.storage.SaveReady(rd); err != nil {
+			return
+		}
 	}
 
 	// Apply snapshot if present.

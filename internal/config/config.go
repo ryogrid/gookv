@@ -148,6 +148,10 @@ type RaftStoreConfig struct {
 	RaftLogGCCountLimit      uint64   `toml:"raft-log-gc-count-limit"`
 	SplitCheckTickInterval   Duration `toml:"split-check-tick-interval"`
 	PdHeartbeatTickInterval  Duration `toml:"pd-heartbeat-tick-interval"`
+
+	// Performance optimization flags.
+	EnableBatchRaftWrite bool `toml:"enable-batch-raft-write"`
+	EnableApplyPipeline  bool `toml:"enable-apply-pipeline"`
 }
 
 // CoprocessorConfig controls the coprocessor.

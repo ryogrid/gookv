@@ -53,6 +53,9 @@ type StoreCoordinator struct {
 
 	// splitResultCh receives split results from peers for child region bootstrapping.
 	splitResultCh chan *raftstore.SplitRegionResult
+
+	// Performance optimization components (nil when disabled).
+	raftLogWriter *raftstore.RaftLogWriter
 }
 
 // StoreCoordinatorConfig holds the configuration for creating a StoreCoordinator.
@@ -65,7 +68,9 @@ type StoreCoordinatorConfig struct {
 	PeerCfg       raftstore.PeerConfig
 	PDTaskCh      chan<- interface{}       // Optional: channel for PD heartbeat tasks
 	PDClient      pdclient.Client          // Optional: PD client for split coordination
-	SplitCheckCfg split.SplitCheckWorkerConfig // Split check worker configuration
+	SplitCheckCfg        split.SplitCheckWorkerConfig // Split check worker configuration
+	EnableBatchRaftWrite bool                         // Enable Raft log batch writer
+	EnableApplyPipeline  bool                         // Enable async apply worker pool
 }
 
 // NewStoreCoordinator creates a new StoreCoordinator.
@@ -93,6 +98,12 @@ func NewStoreCoordinator(cfg StoreCoordinatorConfig) *StoreCoordinator {
 		cancels:       make(map[uint64]context.CancelFunc),
 		dones:         make(map[uint64]chan struct{}),
 		splitResultCh: make(chan *raftstore.SplitRegionResult, 16),
+	}
+
+	// Create Raft log batch writer if enabled.
+	if cfg.EnableBatchRaftWrite {
+		sc.raftLogWriter = raftstore.NewRaftLogWriter(cfg.Engine, 256)
+		slog.Info("Raft log batch writer enabled")
 	}
 
 	// Create and start the split check worker if PD client is available.
@@ -166,6 +177,11 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 
 	// Wire split result channel for Raft-based split.
 	peer.SetSplitResultCh(sc.splitResultCh)
+
+	// Wire Raft log batch writer if enabled.
+	if sc.raftLogWriter != nil {
+		peer.SetRaftLogWriter(sc.raftLogWriter)
+	}
 
 	// Register with router.
 	if err := sc.router.Register(regionID, peer.Mailbox); err != nil {
@@ -445,6 +461,11 @@ func (sc *StoreCoordinator) Stop() {
 	sc.peers = make(map[uint64]*raftstore.Peer)
 	sc.cancels = make(map[uint64]context.CancelFunc)
 	sc.dones = make(map[uint64]chan struct{})
+
+	// Stop Raft log writer AFTER all peers have exited (they may still submit tasks).
+	if sc.raftLogWriter != nil {
+		sc.raftLogWriter.Stop()
+	}
 }
 
 // Router returns the router for message routing.
@@ -547,6 +568,11 @@ func (sc *StoreCoordinator) CreatePeer(req *raftstore.CreatePeerRequest) error {
 
 	// Wire split result channel for Raft-based split.
 	peer.SetSplitResultCh(sc.splitResultCh)
+
+	// Wire Raft log batch writer if enabled.
+	if sc.raftLogWriter != nil {
+		peer.SetRaftLogWriter(sc.raftLogWriter)
+	}
 
 	if err := sc.router.Register(regionID, peer.Mailbox); err != nil {
 		return err

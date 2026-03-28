@@ -248,6 +248,8 @@ func main() {
 				SplitKeys: uint64(cfg.Coprocessor.RegionSplitKeys),
 				MaxKeys:   uint64(cfg.Coprocessor.RegionMaxKeys),
 			},
+			EnableBatchRaftWrite: cfg.RaftStore.EnableBatchRaftWrite,
+			EnableApplyPipeline:  cfg.RaftStore.EnableApplyPipeline,
 		})
 		srv.SetCoordinator(coord)
 
@@ -374,6 +376,8 @@ func main() {
 				SplitKeys: uint64(cfg.Coprocessor.RegionSplitKeys),
 				MaxKeys:   uint64(cfg.Coprocessor.RegionMaxKeys),
 			},
+			EnableBatchRaftWrite: cfg.RaftStore.EnableBatchRaftWrite,
+			EnableApplyPipeline:  cfg.RaftStore.EnableApplyPipeline,
 		})
 		srv.SetCoordinator(coord)
 

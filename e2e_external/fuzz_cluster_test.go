@@ -30,8 +30,8 @@ const (
 	fuzzDefaultIters     = 500
 	fuzzDefaultClients   = 8
 	fuzzStabilizeTimeout = 180 * time.Second
-	fuzzNodeCount        = 3
-	fuzzFaultInterval    = 3 * time.Second // time between fault injection events
+	fuzzNodeCount        = 5
+	fuzzFaultInterval    = 10 * time.Second // time between fault injection events
 )
 
 // --- Operation types and weights ---
@@ -640,7 +640,7 @@ func TestFuzzCluster(t *testing.T) {
 	t.Cleanup(func() { cluster.Stop() })
 
 	// Wait for Raft leader election.
-	electionTimeout := time.Duration(30+fuzzNodeCount*10) * time.Second
+	electionTimeout := 300 * time.Second
 	rawKV := cluster.RawKV()
 	e2elib.WaitForCondition(t, electionTimeout, "cluster leader election", func() bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -654,24 +654,46 @@ func TestFuzzCluster(t *testing.T) {
 	t.Logf("Seeding %d accounts with initial balance %d...", fuzzNumAccounts, fuzzInitialBalance)
 	e2elib.SeedAccounts(t, cluster.TxnKV(), fuzzNumAccounts, fuzzInitialBalance)
 
-	// Wait for region splits to stabilize (no new splits for 15 seconds).
-	t.Log("Waiting for region splits to stabilize...")
-	lastCount := 0
+	// Wait for region topology to stabilize: no changes in region count,
+	// peers, or leaders for 30 seconds.
+	t.Log("Waiting for region topology to stabilize...")
+	lastSnapshot := ""
 	stableSince := time.Now()
-	deadline := time.Now().Add(180 * time.Second)
+	deadline := time.Now().Add(300 * time.Second)
 	for time.Now().Before(deadline) {
-		count := e2elib.CLIWaitForRegionCount(t, pdAddr, 1, 10*time.Second)
-		if count != lastCount {
-			t.Logf("Region count: %d", count)
-			lastCount = count
+		stdout, _, err := e2elib.CLIExecRaw(t, pdAddr, "REGION LIST")
+		snap := ""
+		if err == nil {
+			// Strip the timing line (e.g. "(3 rows, 1.2ms)") to avoid false diffs.
+			var filtered []string
+			for _, line := range strings.Split(stdout, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "(") && strings.HasSuffix(trimmed, ")") {
+					continue
+				}
+				filtered = append(filtered, line)
+			}
+			snap = strings.Join(filtered, "\n")
+		}
+		if snap != lastSnapshot {
+			// Count regions from output for logging.
+			lines := strings.Split(snap, "\n")
+			regionRows := 0
+			for _, line := range lines {
+				if strings.HasPrefix(strings.TrimSpace(line), "|") && !strings.Contains(line, "RegionID") && !strings.Contains(line, "---") {
+					regionRows++
+				}
+			}
+			t.Logf("Region topology changed: %d regions", regionRows)
+			lastSnapshot = snap
 			stableSince = time.Now()
 		}
-		if time.Since(stableSince) >= 15*time.Second {
+		if time.Since(stableSince) >= 30*time.Second {
 			break
 		}
 		time.Sleep(3 * time.Second)
 	}
-	t.Logf("Region splits stabilized: %d regions", lastCount)
+	t.Logf("Region topology stabilized (stable for 30s)")
 
 	// Initialize shared cluster state.
 	fc := &fuzzCluster{

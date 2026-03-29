@@ -21,6 +21,8 @@ import (
 	"github.com/ryogrid/gookv/internal/raftstore/split"
 	"github.com/ryogrid/gookv/internal/server/transport"
 	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"github.com/ryogrid/gookv/pkg/cfnames"
+	"github.com/ryogrid/gookv/pkg/keys"
 	"github.com/ryogrid/gookv/pkg/pdclient"
 )
 
@@ -124,6 +126,79 @@ func NewStoreCoordinator(cfg StoreCoordinatorConfig) *StoreCoordinator {
 	}
 
 	return sc
+}
+
+// RecoverPersistedRegions scans the engine for regions that have persisted
+// Raft state (hard state or apply state) and recreates their peers.
+// This must be called at startup before processing any Raft messages,
+// so that restarted nodes don't lose already-committed data.
+func (sc *StoreCoordinator) RecoverPersistedRegions() int {
+	// Scan CFRaft for all keys to find persisted region IDs.
+	regionIDs := make(map[uint64]bool)
+
+	prefix := []byte{keys.LocalPrefix, keys.RegionRaftPrefix}
+	iter := sc.engine.NewIterator(cfnames.CFRaft, traits.IterOptions{})
+	defer iter.Close()
+
+	for iter.Seek(prefix); iter.Valid(); iter.Next() {
+		k := iter.Key()
+		if len(k) < 2 || k[0] != keys.LocalPrefix || k[1] != keys.RegionRaftPrefix {
+			break
+		}
+		regionID, err := keys.RegionIDFromRaftKey(k)
+		if err != nil {
+			continue
+		}
+		regionIDs[regionID] = true
+	}
+
+	recovered := 0
+	for regionID := range regionIDs {
+		sc.mu.RLock()
+		_, exists := sc.peers[regionID]
+		sc.mu.RUnlock()
+		if exists {
+			continue
+		}
+
+		// Query PD for complete region metadata.
+		var region *metapb.Region
+		if sc.pdClient != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			r, _, err := sc.pdClient.GetRegionByID(ctx, regionID)
+			cancel()
+			if err == nil && r != nil {
+				region = r
+			}
+		}
+		if region == nil {
+			continue // can't recover without region metadata
+		}
+
+		// Find our peer ID in the region.
+		var peerID uint64
+		for _, p := range region.GetPeers() {
+			if p.GetStoreId() == sc.storeID {
+				peerID = p.GetId()
+				break
+			}
+		}
+		if peerID == 0 {
+			continue // this store is no longer part of this region
+		}
+
+		req := &raftstore.CreatePeerRequest{
+			Region: region,
+			PeerID: peerID,
+		}
+		if err := sc.CreatePeer(req); err != nil {
+			slog.Warn("recover region failed", "region", regionID, "err", err)
+			continue
+		}
+		recovered++
+		slog.Info("recovered region", "region", regionID, "peer", peerID)
+	}
+	return recovered
 }
 
 // BootstrapRegion creates and starts a Raft peer for a region.

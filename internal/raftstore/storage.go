@@ -294,10 +294,17 @@ func (s *PeerStorage) SetDummyEntry() {
 }
 
 // HasPersistedRaftState checks whether the engine has persisted Raft state
-// for the given region. Returns true if a hard state key exists.
+// for the given region. Returns true if a hard state key OR an apply state key exists.
+// Checking both is necessary because after a ConfChange-added peer receives a snapshot,
+// the apply state may be persisted before the hard state, or vice versa.
 func HasPersistedRaftState(engine traits.KvEngine, regionID uint64) bool {
-	_, err := engine.Get(cfnames.CFRaft, keys.RaftStateKey(regionID))
-	return err == nil
+	if _, err := engine.Get(cfnames.CFRaft, keys.RaftStateKey(regionID)); err == nil {
+		return true
+	}
+	if _, err := engine.Get(cfnames.CFRaft, keys.ApplyStateKey(regionID)); err == nil {
+		return true
+	}
+	return false
 }
 
 // RecoverFromEngine restores PeerStorage state from the engine.

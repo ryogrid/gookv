@@ -270,22 +270,31 @@ func main() {
 			defer splitCancel()
 		}
 
+		// Recover any persisted regions from a previous run (restart case).
+		recovered := coord.RecoverPersistedRegions()
+		if recovered > 0 {
+			slog.Info("Recovered persisted regions", "count", recovered)
+		}
+
 		// Bootstrap a single region (region 1) spanning all stores.
-		peers := make([]*metapb.Peer, 0, len(clusterMap))
-		raftPeers := make([]raft.Peer, 0, len(clusterMap))
-		for sid := range clusterMap {
-			peers = append(peers, &metapb.Peer{Id: sid, StoreId: sid})
-			raftPeers = append(raftPeers, raft.Peer{ID: sid})
+		// Skip if regions were already recovered (restart scenario).
+		if recovered == 0 {
+			peers := make([]*metapb.Peer, 0, len(clusterMap))
+			raftPeers := make([]raft.Peer, 0, len(clusterMap))
+			for sid := range clusterMap {
+				peers = append(peers, &metapb.Peer{Id: sid, StoreId: sid})
+				raftPeers = append(raftPeers, raft.Peer{ID: sid})
+			}
+			region := &metapb.Region{
+				Id:    1,
+				Peers: peers,
+			}
+			if err := coord.BootstrapRegion(region, raftPeers); err != nil {
+				slog.Error("Failed to bootstrap region", "error", err)
+				os.Exit(1)
+			}
+			slog.Info("Raft cluster bootstrapped", "region", 1, "peers", len(raftPeers))
 		}
-		region := &metapb.Region{
-			Id:    1,
-			Peers: peers,
-		}
-		if err := coord.BootstrapRegion(region, raftPeers); err != nil {
-			slog.Error("Failed to bootstrap region", "error", err)
-			os.Exit(1)
-		}
-		slog.Info("Raft cluster bootstrapped", "region", 1, "peers", len(raftPeers))
 	} else if hasPD {
 		// Join mode: connect to PD, obtain store ID, register, start empty.
 		pdCtx, pdCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -394,8 +403,13 @@ func main() {
 		go coord.RunSplitResultHandler(splitCtx)
 		defer splitCancel()
 
+		// Recover any persisted regions from a previous run (restart case).
+		if n := coord.RecoverPersistedRegions(); n > 0 {
+			slog.Info("Recovered persisted regions", "count", n)
+		}
+
 		// NOTE: No BootstrapRegion — join mode starts empty; PD will assign regions.
-		slog.Info("join mode: store started (empty, waiting for PD region assignment)",
+		slog.Info("join mode: store started (waiting for PD region assignment)",
 			"store-id", joinStoreID)
 	}
 

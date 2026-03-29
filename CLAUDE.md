@@ -13,8 +13,7 @@
 - One tack per subagent for focused execution
 
 ### 3. Self-Improvement Loop
-- Load continuous-learning-v2 skill in all session
-- After ANY correction from the user: update `lessons.md` with the pattern
+- After ANY correction from the user: update `tasks/lessons.md` with the pattern
 - Write rules for yourself that prevent the same mistake
 - Ruthlessly iterate on these lessons until mistake rate drops
 - Review lessons at session start for relevant project
@@ -39,12 +38,12 @@
 
 ## Task Management
 
-1. **Plan First**: Write plan to `TODO.md` with checkable items
+1. **Plan First**: Write plan to `tasks/TODO.md` with checkable items
 2. **Verify Plan**: Check in before starting implementation
 3. **Track Progress**: Mark items complete as you go
 4. **Explain Changes**: High-level summary at each step
-5. **Document Results**: Add review section to `TODO.md`
-6. **Capture Lessons**: Update `lessons.md` after corrections
+5. **Document Results**: Add review section to `tasks/TODO.md`
+6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
 
 ## Core Principles
 

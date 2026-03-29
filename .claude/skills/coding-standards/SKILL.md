@@ -6,6 +6,10 @@ origin: ECC
 
 # Coding Standards & Best Practices
 
+> **Note (gookv project):** This project is a Go distributed KV store. The primary coding standards
+> are in the `golang-patterns` and `golang-testing` skills. The general principles below (KISS, DRY,
+> YAGNI, readability, error handling, testing structure) still apply — use idiomatic Go equivalents.
+
 Universal coding standards applicable across all projects.
 
 ## When to Activate

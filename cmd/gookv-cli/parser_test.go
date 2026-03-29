@@ -500,6 +500,133 @@ func TestParseMetaCommand(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ParseCommand tests for new PD admin commands
+// ---------------------------------------------------------------------------
+
+func tok(s string) Token { return Token{Raw: s, Value: []byte(s)} }
+
+func TestParseNewPDAdminCommands(t *testing.T) {
+	tests := []struct {
+		name    string
+		tokens  []Token
+		inTxn   bool
+		want    Command
+		wantErr bool
+	}{
+		{
+			name:   "BOOTSTRAP basic",
+			tokens: []Token{tok("BOOTSTRAP"), tok("1"), tok("127.0.0.1:20160")},
+			want:   Command{Type: CmdBootstrap, IntArg: 1, StrArg: "127.0.0.1:20160"},
+		},
+		{
+			name:   "BOOTSTRAP with regionID",
+			tokens: []Token{tok("BOOTSTRAP"), tok("1"), tok("127.0.0.1:20160"), tok("5")},
+			want:   Command{Type: CmdBootstrap, IntArg: 1, StrArg: "127.0.0.1:20160", Args: [][]byte{[]byte("5")}},
+		},
+		{
+			name:   "PUT STORE",
+			tokens: []Token{tok("PUT"), tok("STORE"), tok("2"), tok("127.0.0.1:20161")},
+			want:   Command{Type: CmdPutStore, IntArg: 2, StrArg: "127.0.0.1:20161"},
+		},
+		{
+			name:   "ALLOC ID",
+			tokens: []Token{tok("ALLOC"), tok("ID")},
+			want:   Command{Type: CmdAllocID},
+		},
+		{
+			name:   "IS BOOTSTRAPPED",
+			tokens: []Token{tok("IS"), tok("BOOTSTRAPPED")},
+			want:   Command{Type: CmdIsBootstrapped},
+		},
+		{
+			name:   "ASK SPLIT",
+			tokens: []Token{tok("ASK"), tok("SPLIT"), tok("1"), tok("2")},
+			want:   Command{Type: CmdAskSplit, IntArg: 1, Args: [][]byte{[]byte("2")}},
+		},
+		{
+			name:   "REPORT SPLIT",
+			tokens: []Token{tok("REPORT"), tok("SPLIT"), tok("1"), tok("100"), tok("splitkey")},
+			want:   Command{Type: CmdReportSplit, IntArg: 1, Args: [][]byte{[]byte("100"), []byte("splitkey")}},
+		},
+		{
+			name:   "STORE HEARTBEAT basic",
+			tokens: []Token{tok("STORE"), tok("HEARTBEAT"), tok("1")},
+			want:   Command{Type: CmdStoreHeartbeat, IntArg: 1},
+		},
+		{
+			name:   "STORE HEARTBEAT with REGIONS",
+			tokens: []Token{tok("STORE"), tok("HEARTBEAT"), tok("1"), tok("REGIONS"), tok("5")},
+			want:   Command{Type: CmdStoreHeartbeat, IntArg: 1, Args: [][]byte{[]byte("5")}},
+		},
+		{
+			name:   "GC SAFEPOINT SET",
+			tokens: []Token{tok("GC"), tok("SAFEPOINT"), tok("SET"), tok("1000")},
+			want:   Command{Type: CmdGCSafepoint, IntArg: 1000, StrArg: "SET"},
+		},
+		{
+			name:   "GC SAFEPOINT read",
+			tokens: []Token{tok("GC"), tok("SAFEPOINT")},
+			want:   Command{Type: CmdGCSafepoint},
+		},
+		// Error cases
+		{
+			name:    "BOOTSTRAP missing args",
+			tokens:  []Token{tok("BOOTSTRAP"), tok("1")},
+			wantErr: true,
+		},
+		{
+			name:    "ALLOC without ID",
+			tokens:  []Token{tok("ALLOC"), tok("FOO")},
+			wantErr: true,
+		},
+		{
+			name:    "IS without BOOTSTRAPPED",
+			tokens:  []Token{tok("IS"), tok("READY")},
+			wantErr: true,
+		},
+		{
+			name:    "ASK SPLIT missing count",
+			tokens:  []Token{tok("ASK"), tok("SPLIT"), tok("1")},
+			wantErr: true,
+		},
+		{
+			name:    "REPORT SPLIT missing args",
+			tokens:  []Token{tok("REPORT"), tok("SPLIT"), tok("1"), tok("100")},
+			wantErr: true,
+		},
+		{
+			name:    "STORE HEARTBEAT missing storeID",
+			tokens:  []Token{tok("STORE"), tok("HEARTBEAT")},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseCommand(tt.tokens, tt.inTxn)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want.Type, got.Type, "CommandType mismatch")
+			if tt.want.IntArg != 0 {
+				assert.Equal(t, tt.want.IntArg, got.IntArg, "IntArg mismatch")
+			}
+			if tt.want.StrArg != "" {
+				assert.Equal(t, tt.want.StrArg, got.StrArg, "StrArg mismatch")
+			}
+			if tt.want.Args != nil {
+				require.Equal(t, len(tt.want.Args), len(got.Args), "Args count mismatch")
+				for i, want := range tt.want.Args {
+					assert.Equal(t, want, got.Args[i], "Args[%d] mismatch", i)
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 

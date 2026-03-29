@@ -1,7 +1,9 @@
 package e2e_external_test
 
 import (
-	"context"
+	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,28 +17,24 @@ import (
 // gookv-server nodes and PD. The servers automatically send heartbeats.
 func TestPDClusterStoreAndRegionHeartbeat(t *testing.T) {
 	cluster := newClusterWithLeader(t)
-	pdClient := cluster.PD().Client()
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
 	// Wait for all stores to be registered via heartbeats.
-	storeCount := e2elib.WaitForStoreCount(t, pdClient, 3, 30*time.Second)
+	storeCount := e2elib.CLIWaitForStoreCount(t, pdAddr, 3, 30*time.Second)
 	assert.Equal(t, 3, storeCount)
 
-	// Verify each store has a correct address.
+	// Verify each store has a correct address via STORE STATUS.
 	for i := 1; i <= 3; i++ {
-		store, err := pdClient.GetStore(ctx, uint64(i))
-		require.NoError(t, err)
-		require.NotNil(t, store)
-		assert.NotEmpty(t, store.GetAddress(), "store %d should have an address", i)
+		out := e2elib.CLIExec(t, pdAddr, fmt.Sprintf("STORE STATUS %d", i))
+		assert.Contains(t, out, fmt.Sprintf("Store ID:  %d", i))
+		assert.Contains(t, out, "Address:")
 	}
 
 	// Verify region heartbeat: PD should know about region 1.
-	region, leader, err := pdClient.GetRegion(ctx, []byte(""))
-	require.NoError(t, err)
-	require.NotNil(t, region)
-	assert.Equal(t, uint64(1), region.GetId(), "region 1 should be registered")
+	out := e2elib.CLIExec(t, pdAddr, "REGION \"\"")
+	assert.Contains(t, out, "Region ID:  1", "region 1 should be registered")
 	// Leader should be set after heartbeats.
-	assert.NotNil(t, leader, "region should have a leader after heartbeats")
+	assert.NotContains(t, out, "Leader:    (none)", "region should have a leader after heartbeats")
 
 	t.Log("PD cluster store and region heartbeat passed")
 }
@@ -44,15 +42,13 @@ func TestPDClusterStoreAndRegionHeartbeat(t *testing.T) {
 // TestPDClusterTSOForTransactions tests using PD TSO for transaction timestamps.
 func TestPDClusterTSOForTransactions(t *testing.T) {
 	cluster := newClusterWithLeader(t)
-	pdClient := cluster.PD().Client()
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
 	// Allocate 100 timestamps and verify monotonicity.
 	var prevTS uint64
 	for i := 0; i < 100; i++ {
-		ts, err := pdClient.GetTS(ctx)
-		require.NoError(t, err)
-		currentTS := ts.ToUint64()
+		out := e2elib.CLIExec(t, pdAddr, "TSO")
+		currentTS := parseTSOTimestamp(t, out)
 		assert.Greater(t, currentTS, prevTS, "TSO should be strictly increasing (iter %d)", i)
 		prevTS = currentTS
 	}
@@ -63,31 +59,44 @@ func TestPDClusterTSOForTransactions(t *testing.T) {
 // TestPDClusterGCSafePoint tests GC safe point management via PD.
 func TestPDClusterGCSafePoint(t *testing.T) {
 	cluster := newClusterWithLeader(t)
-	pdClient := cluster.PD().Client()
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
 	// Initial GC safe point should be 0.
-	sp, err := pdClient.GetGCSafePoint(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(0), sp, "initial GC safe point should be 0")
+	out := e2elib.CLIExec(t, pdAddr, "GC SAFEPOINT")
+	assert.Contains(t, out, "0", "initial GC safe point should be 0")
 
 	// Update GC safe point.
-	newSP, err := pdClient.UpdateGCSafePoint(ctx, 1000)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1000), newSP)
+	out = e2elib.CLIExec(t, pdAddr, "GC SAFEPOINT SET 1000")
+	assert.Contains(t, out, "1000")
 
 	// Verify it was updated.
-	sp, err = pdClient.GetGCSafePoint(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1000), sp)
+	out = e2elib.CLIExec(t, pdAddr, "GC SAFEPOINT")
+	assert.Contains(t, out, "1000")
 
 	// GC safe point should not go backwards.
-	newSP, err = pdClient.UpdateGCSafePoint(ctx, 500)
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "GC SAFEPOINT SET 500")
 	// PD should keep the higher value.
-	sp, err = pdClient.GetGCSafePoint(ctx)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1000), sp, "GC safe point should not go backwards")
+	out = e2elib.CLIExec(t, pdAddr, "GC SAFEPOINT")
+	assert.Contains(t, out, "1000", "GC safe point should not go backwards")
 
 	t.Log("PD cluster GC safe point passed")
+}
+
+// parseTSOTimestamp extracts the raw timestamp value from TSO command output.
+// The output format is: "Timestamp:  <N>\n  physical: <P> (<date>)\n  logical:  <L>"
+func parseTSOTimestamp(t *testing.T, output string) uint64 {
+	t.Helper()
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Timestamp:") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				ts, err := strconv.ParseUint(parts[1], 10, 64)
+				require.NoError(t, err, "failed to parse TSO timestamp from: %s", line)
+				return ts
+			}
+		}
+	}
+	t.Fatalf("failed to find Timestamp in TSO output: %s", output)
+	return 0
 }

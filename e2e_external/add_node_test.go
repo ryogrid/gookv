@@ -1,7 +1,8 @@
 package e2e_external_test
 
 import (
-	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,20 +15,17 @@ import (
 // TestAddNode_JoinRegistersWithPD verifies a new node can join and register with PD.
 func TestAddNode_JoinRegistersWithPD(t *testing.T) {
 	cluster := newClusterWithLeader(t)
-	pdClient := cluster.PD().Client()
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
 	// Initially 3 stores.
-	stores, err := pdClient.GetAllStores(ctx)
-	require.NoError(t, err)
-	initialCount := len(stores)
+	initialCount := e2elib.CLIWaitForStoreCount(t, pdAddr, 3, 15*time.Second)
 
 	// Add a new node in join mode.
-	_, err = cluster.AddNode()
+	_, err := cluster.AddNode()
 	require.NoError(t, err)
 
 	// Wait for PD to register the new store.
-	finalCount := e2elib.WaitForStoreCount(t, pdClient, initialCount+1, 30*time.Second)
+	finalCount := e2elib.CLIWaitForStoreCount(t, pdAddr, initialCount+1, 30*time.Second)
 	assert.Equal(t, initialCount+1, finalCount)
 
 	t.Log("AddNode join registers with PD passed")
@@ -36,18 +34,18 @@ func TestAddNode_JoinRegistersWithPD(t *testing.T) {
 // TestAddNode_PDSchedulesRegionToNewStore verifies PD is aware of the new store.
 func TestAddNode_PDSchedulesRegionToNewStore(t *testing.T) {
 	cluster := newClusterWithLeader(t)
-	pdClient := cluster.PD().Client()
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
 	// Add a node.
 	newNode, err := cluster.AddNode()
 	require.NoError(t, err)
 
-	// Verify PD knows about the new store.
-	e2elib.WaitForCondition(t, 30*time.Second, "new store visible in PD", func() bool {
-		store, err := pdClient.GetStore(ctx, uint64(len(cluster.Nodes())))
-		return err == nil && store != nil && store.GetAddress() == newNode.Addr()
-	})
+	// Verify PD knows about the new store via CLI.
+	newStoreID := len(cluster.Nodes())
+	e2elib.CLIWaitForCondition(t, pdAddr, fmt.Sprintf("STORE STATUS %d", newStoreID),
+		func(output string) bool {
+			return strings.Contains(output, newNode.Addr())
+		}, 30*time.Second)
 
 	t.Log("PD schedules region to new store passed")
 }
@@ -55,31 +53,26 @@ func TestAddNode_PDSchedulesRegionToNewStore(t *testing.T) {
 // TestAddNode_FullMoveLifecycle verifies a join node can participate in KV operations.
 func TestAddNode_FullMoveLifecycle(t *testing.T) {
 	cluster := newClusterWithLeader(t)
-	rawKV := cluster.RawKV()
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
-	// Write initial data.
-	err := rawKV.Put(ctx, []byte("move-key"), []byte("move-val"))
-	require.NoError(t, err)
+	// Write initial data via CLI.
+	e2elib.CLIPut(t, pdAddr, "move-key", "move-val")
 
 	// Add a new node.
-	_, err = cluster.AddNode()
+	_, err := cluster.AddNode()
 	require.NoError(t, err)
 
 	// Verify data is still accessible after node addition.
-	val, notFound, err := rawKV.Get(ctx, []byte("move-key"))
-	require.NoError(t, err)
-	assert.False(t, notFound)
-	assert.Equal(t, []byte("move-val"), val)
+	val, found := e2elib.CLIGet(t, pdAddr, "move-key")
+	assert.True(t, found)
+	assert.Equal(t, "move-val", val)
 
 	// Write new data should also work.
-	err = rawKV.Put(ctx, []byte("after-add-key"), []byte("after-add-val"))
-	require.NoError(t, err)
+	e2elib.CLIPut(t, pdAddr, "after-add-key", "after-add-val")
 
-	val, notFound, err = rawKV.Get(ctx, []byte("after-add-key"))
-	require.NoError(t, err)
-	assert.False(t, notFound)
-	assert.Equal(t, []byte("after-add-val"), val)
+	val, found = e2elib.CLIGet(t, pdAddr, "after-add-key")
+	assert.True(t, found)
+	assert.Equal(t, "after-add-val", val)
 
 	t.Log("Full move lifecycle passed")
 }
@@ -87,32 +80,26 @@ func TestAddNode_FullMoveLifecycle(t *testing.T) {
 // TestAddNode_MultipleJoinNodes verifies multiple nodes can join sequentially.
 func TestAddNode_MultipleJoinNodes(t *testing.T) {
 	cluster := newClusterWithLeader(t)
-	pdClient := cluster.PD().Client()
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
-	stores, err := pdClient.GetAllStores(ctx)
-	require.NoError(t, err)
-	initialCount := len(stores)
+	initialCount := e2elib.CLIWaitForStoreCount(t, pdAddr, 3, 15*time.Second)
 
 	// Add two nodes sequentially.
-	_, err = cluster.AddNode()
+	_, err := cluster.AddNode()
 	require.NoError(t, err)
 	_, err = cluster.AddNode()
 	require.NoError(t, err)
 
 	// Wait for PD to know about both new stores.
-	finalCount := e2elib.WaitForStoreCount(t, pdClient, initialCount+2, 30*time.Second)
+	finalCount := e2elib.CLIWaitForStoreCount(t, pdAddr, initialCount+2, 30*time.Second)
 	assert.GreaterOrEqual(t, finalCount, initialCount+2)
 
-	// Cluster should still be operational.
-	rawKV := cluster.RawKV()
-	err = rawKV.Put(ctx, []byte("multi-join-key"), []byte("multi-join-val"))
-	require.NoError(t, err)
+	// Cluster should still be operational via CLI.
+	e2elib.CLIPut(t, pdAddr, "multi-join-key", "multi-join-val")
 
-	val, notFound, err := rawKV.Get(ctx, []byte("multi-join-key"))
-	require.NoError(t, err)
-	assert.False(t, notFound)
-	assert.Equal(t, []byte("multi-join-val"), val)
+	val, found := e2elib.CLIGet(t, pdAddr, "multi-join-key")
+	assert.True(t, found)
+	assert.Equal(t, "multi-join-val", val)
 
 	t.Log("Multiple join nodes passed")
 }

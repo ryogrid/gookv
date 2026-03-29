@@ -193,6 +193,26 @@ func (c *RegionCache) rebuildByID() {
 	}
 }
 
+// InsertFromEpochNotMatch inserts a region from an EpochNotMatch server response
+// directly into the cache, bypassing PD. This avoids waiting for PD to propagate
+// split metadata, which is the root cause of intermittent Put timeouts during splits.
+func (c *RegionCache) InsertFromEpochNotMatch(ctx context.Context, region *metapb.Region, resolver *PDStoreResolver) {
+	if region == nil || len(region.GetPeers()) == 0 {
+		return
+	}
+	// Use the first peer as best-effort leader. If wrong, the next request will
+	// get a NotLeader error and the cache will be corrected.
+	leader := region.GetPeers()[0]
+	addr, err := resolver.Resolve(ctx, leader.GetStoreId())
+	if err != nil {
+		return // can't resolve store; fall back to PD lookup on next retry
+	}
+	info := &RegionInfo{Region: region, Leader: leader, StoreAddr: addr}
+	c.mu.Lock()
+	c.insertLocked(info)
+	c.mu.Unlock()
+}
+
 // InvalidateRegion removes the cached entry for the given region ID.
 func (c *RegionCache) InvalidateRegion(regionID uint64) {
 	c.mu.Lock()

@@ -1,154 +1,113 @@
 package e2e_external_test
 
 import (
-	"context"
 	"fmt"
+	"strings"
 	"testing"
 
-	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ryogrid/gookv/pkg/e2elib"
 )
 
-// TestRawKVPutGetDelete tests basic raw KV operations via gRPC.
+// TestRawKVPutGetDelete tests basic raw KV operations via CLI.
 func TestRawKVPutGetDelete(t *testing.T) {
 	node := e2elib.NewStandaloneNode(t)
+	addr := node.Addr()
 
-	client := e2elib.DialTikvClient(t, node.Addr())
-	ctx := context.Background()
+	// PUT
+	e2elib.CLINodeExec(t, addr, "PUT raw-key-1 raw-value-1")
 
-	// RawPut
-	putResp, err := client.RawPut(ctx, &kvrpcpb.RawPutRequest{
-		Key:   []byte("raw-key-1"),
-		Value: []byte("raw-value-1"),
-	})
-	require.NoError(t, err)
-	assert.Empty(t, putResp.GetError())
+	// GET
+	val, found := e2elib.CLINodeGet(t, addr, "raw-key-1")
+	require.True(t, found, "key should be found after PUT")
+	assert.Equal(t, "raw-value-1", val)
 
-	// RawGet
-	getResp, err := client.RawGet(ctx, &kvrpcpb.RawGetRequest{
-		Key: []byte("raw-key-1"),
-	})
-	require.NoError(t, err)
-	assert.False(t, getResp.GetNotFound())
-	assert.Equal(t, []byte("raw-value-1"), getResp.GetValue())
+	// DELETE
+	e2elib.CLINodeExec(t, addr, "DELETE raw-key-1")
 
-	// RawDelete
-	delResp, err := client.RawDelete(ctx, &kvrpcpb.RawDeleteRequest{
-		Key: []byte("raw-key-1"),
-	})
-	require.NoError(t, err)
-	assert.Empty(t, delResp.GetError())
-
-	// RawGet after delete
-	getResp, err = client.RawGet(ctx, &kvrpcpb.RawGetRequest{
-		Key: []byte("raw-key-1"),
-	})
-	require.NoError(t, err)
-	assert.True(t, getResp.GetNotFound(), "key should be deleted")
+	// GET after delete
+	_, found = e2elib.CLINodeGet(t, addr, "raw-key-1")
+	assert.False(t, found, "key should be deleted")
 
 	t.Log("Raw KV put/get/delete passed")
 }
 
-// TestRawKVBatchOperations tests batch raw KV operations.
+// TestRawKVBatchOperations tests batch raw KV operations via CLI.
 func TestRawKVBatchOperations(t *testing.T) {
-	
 	node := e2elib.NewStandaloneNode(t)
-	
-	
+	addr := node.Addr()
 
-	client := e2elib.DialTikvClient(t, node.Addr())
-	ctx := context.Background()
-
-	// RawBatchPut
-	pairs := make([]*kvrpcpb.KvPair, 10)
+	// BPUT 10 keys
+	bputArgs := ""
 	for i := 0; i < 10; i++ {
-		pairs[i] = &kvrpcpb.KvPair{
-			Key:   []byte(fmt.Sprintf("batch-key-%02d", i)),
-			Value: []byte(fmt.Sprintf("batch-value-%02d", i)),
+		bputArgs += fmt.Sprintf(" batch-key-%02d batch-value-%02d", i, i)
+	}
+	e2elib.CLINodeExec(t, addr, "BPUT"+bputArgs)
+
+	// BGET 5 even-numbered keys
+	bgetArgs := ""
+	for i := 0; i < 5; i++ {
+		bgetArgs += fmt.Sprintf(" batch-key-%02d", i*2)
+	}
+	bgetOut := e2elib.CLINodeExec(t, addr, "BGET"+bgetArgs)
+	// Verify all 5 even keys appear in output
+	for i := 0; i < 5; i++ {
+		key := fmt.Sprintf("batch-key-%02d", i*2)
+		assert.True(t, strings.Contains(bgetOut, key),
+			"BGET output should contain %s", key)
+	}
+
+	// SCAN all 10 keys
+	scanOut := e2elib.CLINodeExec(t, addr, "SCAN batch-key-00 batch-key-99 LIMIT 100")
+	for i := 0; i < 10; i++ {
+		key := fmt.Sprintf("batch-key-%02d", i)
+		assert.True(t, strings.Contains(scanOut, key),
+			"SCAN output should contain %s", key)
+	}
+
+	// SCAN with limit 3
+	scanOut3 := e2elib.CLINodeExec(t, addr, "SCAN batch-key-00 batch-key-99 LIMIT 3")
+	// Count how many batch-key entries appear
+	matchCount := 0
+	for i := 0; i < 10; i++ {
+		key := fmt.Sprintf("batch-key-%02d", i)
+		if strings.Contains(scanOut3, key) {
+			matchCount++
 		}
 	}
-	batchPutResp, err := client.RawBatchPut(ctx, &kvrpcpb.RawBatchPutRequest{
-		Pairs: pairs,
-	})
-	require.NoError(t, err)
-	assert.Empty(t, batchPutResp.GetError())
-
-	// RawBatchGet
-	keys := make([][]byte, 5)
-	for i := 0; i < 5; i++ {
-		keys[i] = []byte(fmt.Sprintf("batch-key-%02d", i*2))
-	}
-	batchGetResp, err := client.RawBatchGet(ctx, &kvrpcpb.RawBatchGetRequest{
-		Keys: keys,
-	})
-	require.NoError(t, err)
-	assert.Len(t, batchGetResp.GetPairs(), 5, "should get 5 pairs")
-
-	// RawScan
-	scanResp, err := client.RawScan(ctx, &kvrpcpb.RawScanRequest{
-		StartKey: []byte("batch-key-00"),
-		EndKey:   []byte("batch-key-99"),
-		Limit:    100,
-	})
-	require.NoError(t, err)
-	assert.Len(t, scanResp.GetKvs(), 10, "scan should return all 10 keys")
-
-	// RawScan with limit
-	scanResp, err = client.RawScan(ctx, &kvrpcpb.RawScanRequest{
-		StartKey: []byte("batch-key-00"),
-		EndKey:   []byte("batch-key-99"),
-		Limit:    3,
-	})
-	require.NoError(t, err)
-	assert.Len(t, scanResp.GetKvs(), 3, "scan with limit 3 should return 3 keys")
+	assert.Equal(t, 3, matchCount, "scan with limit 3 should return 3 keys")
 
 	t.Log("Raw KV batch operations passed")
 }
 
-// TestRawKVDeleteRange tests the RawDeleteRange operation.
+// TestRawKVDeleteRange tests the DELETE RANGE operation via CLI.
 func TestRawKVDeleteRange(t *testing.T) {
-	
 	node := e2elib.NewStandaloneNode(t)
-	
-	
-
-	client := e2elib.DialTikvClient(t, node.Addr())
-	ctx := context.Background()
+	addr := node.Addr()
 
 	// Write some keys.
 	for i := 0; i < 5; i++ {
-		_, err := client.RawPut(ctx, &kvrpcpb.RawPutRequest{
-			Key:   []byte(fmt.Sprintf("dr-key-%02d", i)),
-			Value: []byte(fmt.Sprintf("dr-val-%02d", i)),
-		})
-		require.NoError(t, err)
+		e2elib.CLINodeExec(t, addr, fmt.Sprintf("PUT dr-key-%02d dr-val-%02d", i, i))
 	}
 
-	// DeleteRange: delete keys 01-03.
-	drResp, err := client.RawDeleteRange(ctx, &kvrpcpb.RawDeleteRangeRequest{
-		StartKey: []byte("dr-key-01"),
-		EndKey:   []byte("dr-key-04"),
-	})
-	require.NoError(t, err)
-	assert.Empty(t, drResp.GetError())
+	// DELETE RANGE: delete keys 01-03.
+	e2elib.CLINodeExec(t, addr, "DELETE RANGE dr-key-01 dr-key-04")
 
 	// Verify: key-00 and key-04 still exist.
-	getResp, err := client.RawGet(ctx, &kvrpcpb.RawGetRequest{Key: []byte("dr-key-00")})
-	require.NoError(t, err)
-	assert.False(t, getResp.GetNotFound(), "key-00 should still exist")
+	val00, found00 := e2elib.CLINodeGet(t, addr, "dr-key-00")
+	assert.True(t, found00, "key-00 should still exist")
+	assert.Equal(t, "dr-val-00", val00)
 
-	getResp, err = client.RawGet(ctx, &kvrpcpb.RawGetRequest{Key: []byte("dr-key-04")})
-	require.NoError(t, err)
-	assert.False(t, getResp.GetNotFound(), "key-04 should still exist")
+	val04, found04 := e2elib.CLINodeGet(t, addr, "dr-key-04")
+	assert.True(t, found04, "key-04 should still exist")
+	assert.Equal(t, "dr-val-04", val04)
 
 	// Verify: keys 01, 02, 03 deleted.
 	for i := 1; i <= 3; i++ {
-		getResp, err = client.RawGet(ctx, &kvrpcpb.RawGetRequest{Key: []byte(fmt.Sprintf("dr-key-%02d", i))})
-		require.NoError(t, err)
-		assert.True(t, getResp.GetNotFound(), "key-%02d should be deleted", i)
+		_, found := e2elib.CLINodeGet(t, addr, fmt.Sprintf("dr-key-%02d", i))
+		assert.False(t, found, "key-%02d should be deleted", i)
 	}
 
 	t.Log("Raw KV delete range passed")

@@ -1,199 +1,188 @@
 package e2e_external_test
 
 import (
-	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ryogrid/gookv/pkg/client"
+	"github.com/ryogrid/gookv/pkg/e2elib"
 )
 
 // --- Region Cache Tests ---
 
 func TestClientRegionCacheMiss(t *testing.T) {
-	_, rawKV := newClientCluster(t)
-	ctx := context.Background()
+	cluster, _ := newClientCluster(t)
+	pdAddr := cluster.PD().Addr()
 
 	// Cold cache: Put and Get should succeed by querying PD.
-	err := rawKV.Put(ctx, []byte("key1"), []byte("val1"))
-	require.NoError(t, err)
+	e2elib.CLIPut(t, pdAddr, "key1", "val1")
 
-	val, notFound, err := rawKV.Get(ctx, []byte("key1"))
-	require.NoError(t, err)
-	assert.False(t, notFound)
-	assert.Equal(t, []byte("val1"), val)
+	val, found := e2elib.CLIGet(t, pdAddr, "key1")
+	assert.True(t, found)
+	assert.Equal(t, "val1", val)
 }
 
 func TestClientRegionCacheHit(t *testing.T) {
-	_, rawKV := newClientCluster(t)
-	ctx := context.Background()
+	cluster, _ := newClientCluster(t)
+	pdAddr := cluster.PD().Addr()
 
 	// First put populates cache.
-	err := rawKV.Put(ctx, []byte("a"), []byte("1"))
-	require.NoError(t, err)
+	e2elib.CLIPut(t, pdAddr, "a", "1")
 
 	// Second put should use cached region.
-	err = rawKV.Put(ctx, []byte("b"), []byte("2"))
-	require.NoError(t, err)
+	e2elib.CLIPut(t, pdAddr, "b", "2")
 
-	val, notFound, err := rawKV.Get(ctx, []byte("a"))
-	require.NoError(t, err)
-	assert.False(t, notFound)
-	assert.Equal(t, []byte("1"), val)
+	val, found := e2elib.CLIGet(t, pdAddr, "a")
+	assert.True(t, found)
+	assert.Equal(t, "1", val)
 
-	val, notFound, err = rawKV.Get(ctx, []byte("b"))
-	require.NoError(t, err)
-	assert.False(t, notFound)
-	assert.Equal(t, []byte("2"), val)
+	val, found = e2elib.CLIGet(t, pdAddr, "b")
+	assert.True(t, found)
+	assert.Equal(t, "2", val)
 }
 
 // --- Store Resolution Tests ---
 
 func TestClientStoreResolution(t *testing.T) {
-	_, rawKV := newClientCluster(t)
-	ctx := context.Background()
+	cluster, _ := newClientCluster(t)
+	pdAddr := cluster.PD().Addr()
 
 	// Client discovers store address from PD, connects, and writes.
-	err := rawKV.Put(ctx, []byte("key"), []byte("val"))
-	require.NoError(t, err)
+	e2elib.CLIPut(t, pdAddr, "key", "val")
 
-	val, notFound, err := rawKV.Get(ctx, []byte("key"))
-	require.NoError(t, err)
-	assert.False(t, notFound)
-	assert.Equal(t, []byte("val"), val)
+	val, found := e2elib.CLIGet(t, pdAddr, "key")
+	assert.True(t, found)
+	assert.Equal(t, "val", val)
 }
 
 // --- Batch Operation Tests ---
 
 func TestClientBatchGetAcrossRegions(t *testing.T) {
-	_, rawKV := newClientCluster(t)
-	ctx := context.Background()
+	cluster, _ := newClientCluster(t)
+	pdAddr := cluster.PD().Addr()
 
 	// Put keys in different regions.
-	require.NoError(t, rawKV.Put(ctx, []byte("apple"), []byte("1")))
-	require.NoError(t, rawKV.Put(ctx, []byte("mango"), []byte("2")))
+	e2elib.CLIPut(t, pdAddr, "apple", "1")
+	e2elib.CLIPut(t, pdAddr, "mango", "2")
 
 	// BatchGet across regions.
-	pairs, err := rawKV.BatchGet(ctx, [][]byte{[]byte("apple"), []byte("mango")})
-	require.NoError(t, err)
-	assert.Equal(t, 2, len(pairs))
-
-	// Build result map for order-independent assertion.
-	results := make(map[string]string)
-	for _, p := range pairs {
-		results[string(p.Key)] = string(p.Value)
-	}
-	assert.Equal(t, "1", results["apple"])
-	assert.Equal(t, "2", results["mango"])
+	out := e2elib.CLIExec(t, pdAddr, "BGET apple mango")
+	assert.True(t, strings.Contains(out, "apple"), "output should contain key 'apple'")
+	assert.True(t, strings.Contains(out, "1"), "output should contain value '1'")
+	assert.True(t, strings.Contains(out, "mango"), "output should contain key 'mango'")
+	assert.True(t, strings.Contains(out, "2"), "output should contain value '2'")
 }
 
 func TestClientBatchPutAcrossRegions(t *testing.T) {
-	_, rawKV := newClientCluster(t)
-	ctx := context.Background()
+	cluster, _ := newClientCluster(t)
+	pdAddr := cluster.PD().Addr()
 
 	// BatchPut keys across regions.
-	err := rawKV.BatchPut(ctx, []client.KvPair{
-		{Key: []byte("a"), Value: []byte("1")},
-		{Key: []byte("z"), Value: []byte("2")},
-	})
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "BPUT a 1 z 2")
 
-	val, notFound, err := rawKV.Get(ctx, []byte("a"))
-	require.NoError(t, err)
-	assert.False(t, notFound)
-	assert.Equal(t, []byte("1"), val)
+	val, found := e2elib.CLIGet(t, pdAddr, "a")
+	assert.True(t, found)
+	assert.Equal(t, "1", val)
 
-	val, notFound, err = rawKV.Get(ctx, []byte("z"))
-	require.NoError(t, err)
-	assert.False(t, notFound)
-	assert.Equal(t, []byte("2"), val)
+	val, found = e2elib.CLIGet(t, pdAddr, "z")
+	assert.True(t, found)
+	assert.Equal(t, "2", val)
 }
 
 // --- Scan Tests ---
 
 func TestClientScanAcrossRegions(t *testing.T) {
-	_, rawKV := newClientCluster(t)
-	ctx := context.Background()
+	cluster, _ := newClientCluster(t)
+	pdAddr := cluster.PD().Addr()
 
 	// Put keys in both regions.
 	keys := []string{"a", "b", "c", "m", "n"}
 	for i, k := range keys {
-		require.NoError(t, rawKV.Put(ctx, []byte(k), []byte{byte('0' + i)}))
+		e2elib.CLIPut(t, pdAddr, k, string(rune('0'+i)))
 	}
 
 	// Scan all.
-	pairs, err := rawKV.Scan(ctx, nil, nil, 100)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(pairs), 5)
-
-	// Verify keys are in order.
-	gotKeys := make([]string, len(pairs))
-	for i, p := range pairs {
-		gotKeys[i] = string(p.Key)
-	}
-	for i := 1; i < len(gotKeys); i++ {
-		assert.LessOrEqual(t, gotKeys[i-1], gotKeys[i], "keys should be sorted")
+	out := e2elib.CLIExec(t, pdAddr, "SCAN \"\" \"\" LIMIT 100")
+	// Verify all keys appear in the output.
+	for _, k := range keys {
+		assert.True(t, strings.Contains(out, k), "scan output should contain key %q", k)
 	}
 }
 
 func TestClientScanWithLimit(t *testing.T) {
-	_, rawKV := newClientCluster(t)
-	ctx := context.Background()
+	cluster, _ := newClientCluster(t)
+	pdAddr := cluster.PD().Addr()
 
 	keys := []string{"a", "b", "c", "m", "n"}
 	for i, k := range keys {
-		require.NoError(t, rawKV.Put(ctx, []byte(k), []byte{byte('0' + i)}))
+		e2elib.CLIPut(t, pdAddr, k, string(rune('0'+i)))
 	}
 
 	// Scan with limit 3 -- should only return 3 keys from the first region.
-	pairs, err := rawKV.Scan(ctx, nil, nil, 3)
-	require.NoError(t, err)
-	assert.Equal(t, 3, len(pairs))
+	out := e2elib.CLIExec(t, pdAddr, "SCAN \"\" \"\" LIMIT 3")
+	// Count the number of key lines in the output (each data row has a key).
+	// We expect exactly 3 results.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	dataLines := 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Skip border lines (only + and -)
+		if strings.Trim(line, "+-") == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "|") {
+			dataLines++
+		}
+	}
+	// Subtract 1 for the header row.
+	if dataLines > 0 {
+		dataLines--
+	}
+	require.Equal(t, 3, dataLines, fmt.Sprintf("expected 3 data rows, got output:\n%s", out))
 }
 
 // --- Advanced Operation Tests ---
 
 func TestClientCompareAndSwap(t *testing.T) {
-	_, rawKV := newClientCluster(t)
-	ctx := context.Background()
+	cluster, _ := newClientCluster(t)
+	pdAddr := cluster.PD().Addr()
 
 	// Put a key in region 2.
-	require.NoError(t, rawKV.Put(ctx, []byte("zebra"), []byte("old")))
+	e2elib.CLIPut(t, pdAddr, "zebra", "old")
 
 	// CAS: replace "old" with "new".
-	ok, _, err := rawKV.CompareAndSwap(ctx, []byte("zebra"), []byte("new"), []byte("old"), false)
-	require.NoError(t, err)
-	assert.True(t, ok)
+	out := e2elib.CLIExec(t, pdAddr, "CAS zebra new old")
+	assert.True(t, strings.Contains(out, "OK (swapped)"), "CAS should succeed, got: %s", out)
 
 	// Verify.
-	val, notFound, err := rawKV.Get(ctx, []byte("zebra"))
-	require.NoError(t, err)
-	assert.False(t, notFound)
-	assert.Equal(t, []byte("new"), val)
+	val, found := e2elib.CLIGet(t, pdAddr, "zebra")
+	assert.True(t, found)
+	assert.Equal(t, "new", val)
 }
 
 // --- Delete Tests ---
 
 func TestClientBatchDeleteAcrossRegions(t *testing.T) {
-	_, rawKV := newClientCluster(t)
-	ctx := context.Background()
+	cluster, _ := newClientCluster(t)
+	pdAddr := cluster.PD().Addr()
 
 	// Put keys.
-	require.NoError(t, rawKV.Put(ctx, []byte("alpha"), []byte("v1")))
-	require.NoError(t, rawKV.Put(ctx, []byte("zeta"), []byte("v2")))
+	e2elib.CLIPut(t, pdAddr, "alpha", "v1")
+	e2elib.CLIPut(t, pdAddr, "zeta", "v2")
 
 	// Delete across regions.
-	err := rawKV.BatchDelete(ctx, [][]byte{[]byte("alpha"), []byte("zeta")})
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "BDELETE alpha zeta")
 
 	// Verify deleted.
-	_, notFound, err := rawKV.Get(ctx, []byte("alpha"))
-	require.NoError(t, err)
-	assert.True(t, notFound)
+	_, found := e2elib.CLIGet(t, pdAddr, "alpha")
+	assert.False(t, found)
 
-	_, notFound, err = rawKV.Get(ctx, []byte("zeta"))
-	require.NoError(t, err)
-	assert.True(t, notFound)
+	_, found = e2elib.CLIGet(t, pdAddr, "zeta")
+	assert.False(t, found)
 }

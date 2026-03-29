@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/ryogrid/gookv/pkg/client"
 	"github.com/ryogrid/gookv/pkg/pdclient"
 )
@@ -60,6 +61,15 @@ type pdAPI interface {
 	GetAllStores(ctx context.Context) ([]*metapb.Store, error)
 	GetGCSafePoint(ctx context.Context) (uint64, error)
 	GetClusterID(ctx context.Context) uint64
+	// PD admin methods (e2e CLI migration)
+	Bootstrap(ctx context.Context, store *metapb.Store, region *metapb.Region) (*pdpb.BootstrapResponse, error)
+	IsBootstrapped(ctx context.Context) (bool, error)
+	PutStore(ctx context.Context, store *metapb.Store) error
+	AllocID(ctx context.Context) (uint64, error)
+	AskBatchSplit(ctx context.Context, region *metapb.Region, count uint32) (*pdpb.AskBatchSplitResponse, error)
+	ReportBatchSplit(ctx context.Context, regions []*metapb.Region) error
+	StoreHeartbeat(ctx context.Context, stats *pdpb.StoreStats) error
+	UpdateGCSafePoint(ctx context.Context, safePoint uint64) (uint64, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +192,22 @@ func (e *Executor) Exec(ctx context.Context, cmd Command) (*Result, error) {
 		return e.execGCSafePoint(ctx, cmd)
 	case CmdStatus:
 		return e.execStatus(ctx, cmd)
+
+	// PD admin
+	case CmdBootstrap:
+		return e.execBootstrap(ctx, cmd)
+	case CmdPutStore:
+		return e.execPutStore(ctx, cmd)
+	case CmdAllocID:
+		return e.execAllocID(ctx, cmd)
+	case CmdIsBootstrapped:
+		return e.execIsBootstrapped(ctx, cmd)
+	case CmdAskSplit:
+		return e.execAskSplit(ctx, cmd)
+	case CmdReportSplit:
+		return e.execReportSplit(ctx, cmd)
+	case CmdStoreHeartbeat:
+		return e.execStoreHeartbeat(ctx, cmd)
 
 	// Meta (keyword forms)
 	case CmdHelp:
@@ -728,7 +754,17 @@ func (e *Executor) execTSO(ctx context.Context, _ Command) (*Result, error) {
 	return &Result{Type: ResultMessage, Message: msg}, nil
 }
 
-func (e *Executor) execGCSafePoint(ctx context.Context, _ Command) (*Result, error) {
+func (e *Executor) execGCSafePoint(ctx context.Context, cmd Command) (*Result, error) {
+	// GC SAFEPOINT SET <ts>
+	if cmd.StrArg == "SET" {
+		newSP, err := e.pdClient.UpdateGCSafePoint(ctx, uint64(cmd.IntArg))
+		if err != nil {
+			return nil, err
+		}
+		return &Result{Type: ResultScalar, Scalar: fmt.Sprintf("%d", newSP)}, nil
+	}
+
+	// GC SAFEPOINT (read)
 	safePoint, err := e.pdClient.GetGCSafePoint(ctx)
 	if err != nil {
 		return nil, err
@@ -759,6 +795,147 @@ func (e *Executor) execStatus(_ context.Context, cmd Command) (*Result, error) {
 	body := make([]byte, 4096)
 	n, _ := resp.Body.Read(body)
 	return &Result{Type: ResultMessage, Message: string(body[:n])}, nil
+}
+
+// ---------------------------------------------------------------------------
+// PD admin handlers (e2e CLI migration)
+// ---------------------------------------------------------------------------
+
+func (e *Executor) execBootstrap(ctx context.Context, cmd Command) (*Result, error) {
+	storeID := uint64(cmd.IntArg)
+	addr := cmd.StrArg
+	var regionID uint64 = 1
+	if len(cmd.Args) > 0 {
+		id, _ := strconv.ParseUint(string(cmd.Args[0]), 10, 64)
+		if id > 0 {
+			regionID = id
+		}
+	}
+	store := &metapb.Store{Id: storeID, Address: addr}
+	region := &metapb.Region{
+		Id:          regionID,
+		RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
+		Peers:       []*metapb.Peer{{Id: regionID + 1, StoreId: storeID}},
+	}
+	_, err := e.pdClient.Bootstrap(ctx, store, region)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Type: ResultOK, Message: fmt.Sprintf("Bootstrapped store %d at %s", storeID, addr)}, nil
+}
+
+func (e *Executor) execPutStore(ctx context.Context, cmd Command) (*Result, error) {
+	storeID := uint64(cmd.IntArg)
+	addr := cmd.StrArg
+	store := &metapb.Store{Id: storeID, Address: addr}
+	if err := e.pdClient.PutStore(ctx, store); err != nil {
+		return nil, err
+	}
+	return &Result{Type: ResultOK, Message: fmt.Sprintf("Registered store %d at %s", storeID, addr)}, nil
+}
+
+func (e *Executor) execAllocID(ctx context.Context, _ Command) (*Result, error) {
+	id, err := e.pdClient.AllocID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Type: ResultScalar, Scalar: fmt.Sprintf("%d", id)}, nil
+}
+
+func (e *Executor) execIsBootstrapped(ctx context.Context, _ Command) (*Result, error) {
+	bootstrapped, err := e.pdClient.IsBootstrapped(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Type: ResultScalar, Scalar: fmt.Sprintf("%v", bootstrapped)}, nil
+}
+
+func (e *Executor) execAskSplit(ctx context.Context, cmd Command) (*Result, error) {
+	regionID := uint64(cmd.IntArg)
+	count, _ := strconv.ParseUint(string(cmd.Args[0]), 10, 32)
+
+	region, _, err := e.pdClient.GetRegionByID(ctx, regionID)
+	if err != nil {
+		return nil, fmt.Errorf("get region %d: %w", regionID, err)
+	}
+	if region == nil {
+		return nil, fmt.Errorf("region %d not found", regionID)
+	}
+
+	resp, err := e.pdClient.AskBatchSplit(ctx, region, uint32(count))
+	if err != nil {
+		return nil, err
+	}
+
+	columns := []string{"NewRegionID", "NewPeerIDs"}
+	var tableRows [][]string
+	for _, id := range resp.GetIds() {
+		var peerIDs []string
+		for _, pid := range id.GetNewPeerIds() {
+			peerIDs = append(peerIDs, strconv.FormatUint(pid, 10))
+		}
+		tableRows = append(tableRows, []string{
+			strconv.FormatUint(id.GetNewRegionId(), 10),
+			strings.Join(peerIDs, ","),
+		})
+	}
+	return &Result{Type: ResultTable, Columns: columns, TableRows: tableRows}, nil
+}
+
+func (e *Executor) execReportSplit(ctx context.Context, cmd Command) (*Result, error) {
+	leftID := uint64(cmd.IntArg)
+	rightID, _ := strconv.ParseUint(string(cmd.Args[0]), 10, 64)
+	splitKey := cmd.Args[1]
+
+	// Fetch the left region to get its metadata
+	leftRegion, _, err := e.pdClient.GetRegionByID(ctx, leftID)
+	if err != nil {
+		return nil, fmt.Errorf("get left region %d: %w", leftID, err)
+	}
+	if leftRegion == nil {
+		return nil, fmt.Errorf("left region %d not found", leftID)
+	}
+
+	// Build the split report: left region keeps [startKey, splitKey), right gets [splitKey, endKey)
+	origEndKey := leftRegion.GetEndKey()
+	origEpoch := leftRegion.GetRegionEpoch()
+
+	left := &metapb.Region{
+		Id:          leftID,
+		StartKey:    leftRegion.GetStartKey(),
+		EndKey:      splitKey,
+		RegionEpoch: &metapb.RegionEpoch{ConfVer: origEpoch.GetConfVer(), Version: origEpoch.GetVersion() + 1},
+		Peers:       leftRegion.GetPeers(),
+	}
+	right := &metapb.Region{
+		Id:          rightID,
+		StartKey:    splitKey,
+		EndKey:      origEndKey,
+		RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
+		Peers:       leftRegion.GetPeers(), // inherit peers from parent
+	}
+
+	if err := e.pdClient.ReportBatchSplit(ctx, []*metapb.Region{left, right}); err != nil {
+		return nil, err
+	}
+	return &Result{Type: ResultOK, Message: "Split reported"}, nil
+}
+
+func (e *Executor) execStoreHeartbeat(ctx context.Context, cmd Command) (*Result, error) {
+	storeID := uint64(cmd.IntArg)
+	var regionCount uint32
+	if len(cmd.Args) > 0 {
+		n, _ := strconv.ParseUint(string(cmd.Args[0]), 10, 32)
+		regionCount = uint32(n)
+	}
+	stats := &pdpb.StoreStats{
+		StoreId:     storeID,
+		RegionCount: regionCount,
+	}
+	if err := e.pdClient.StoreHeartbeat(ctx, stats); err != nil {
+		return nil, err
+	}
+	return &Result{Type: ResultOK}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -807,13 +984,23 @@ Transaction Commands:
 Admin Commands:
   STORE LIST                          List all stores
   STORE STATUS <id>                   Show store details
+  STORE HEARTBEAT <id> [REGIONS <n>]  Send store heartbeat
   REGION <key>                        Find region for key
   REGION LIST [LIMIT <n>]             List all regions
   REGION ID <id>                      Find region by ID
   CLUSTER INFO                        Show cluster overview
   TSO                                 Allocate a timestamp
   GC SAFEPOINT                        Show GC safe point
+  GC SAFEPOINT SET <ts>               Update GC safe point
   STATUS [<addr>]                     Query server status
+
+PD Admin Commands:
+  BOOTSTRAP <storeID> <addr> [<rid>]  Bootstrap cluster
+  PUT STORE <id> <addr>               Register store
+  ALLOC ID                            Allocate unique ID
+  IS BOOTSTRAPPED                     Check bootstrap status
+  ASK SPLIT <regionID> <count>        Request split IDs
+  REPORT SPLIT <left> <right> <key>   Report completed split
 
 Meta Commands:
   \help, \h, \?                       Show this help

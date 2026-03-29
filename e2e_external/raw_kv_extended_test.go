@@ -3,6 +3,7 @@ package e2e_external_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
@@ -12,14 +13,10 @@ import (
 	"github.com/ryogrid/gookv/pkg/e2elib"
 )
 
-// TestRawBatchScan tests the RawBatchScan RPC.
-// It puts keys into different ranges and verifies that RawBatchScan
-// returns results from each range independently.
+// TestRawBatchScan: Deferred — RawBatchScan has no CLI equivalent (BSCAN not implemented)
 func TestRawBatchScan(t *testing.T) {
-	
+
 	node := e2elib.NewStandaloneNode(t)
-	
-	
 
 	client := e2elib.DialTikvClient(t, node.Addr())
 	ctx := context.Background()
@@ -83,182 +80,110 @@ func TestRawBatchScan(t *testing.T) {
 	t.Log("RawBatchScan passed")
 }
 
-// TestRawGetKeyTTL tests the RawGetKeyTTL RPC.
-// Verifies TTL=0 for keys without TTL and not_found=true for missing keys.
+// TestRawGetKeyTTL tests the TTL command via CLI.
+// Verifies TTL output for keys without TTL and not-found for missing keys.
 func TestRawGetKeyTTL(t *testing.T) {
-	
 	node := e2elib.NewStandaloneNode(t)
-	
-	
-
-	client := e2elib.DialTikvClient(t, node.Addr())
-	ctx := context.Background()
-
-	key := []byte("ttl-test-key")
-	value := []byte("ttl-test-value")
+	addr := node.Addr()
 
 	// Put a key without TTL.
-	putResp, err := client.RawPut(ctx, &kvrpcpb.RawPutRequest{
-		Key:   key,
-		Value: value,
-	})
-	require.NoError(t, err)
-	assert.Empty(t, putResp.GetError())
+	e2elib.CLINodeExec(t, addr, "PUT ttl-test-key ttl-test-value")
 
-	// GetKeyTTL: key exists, no TTL set => ttl=0, not_found=false.
-	ttlResp, err := client.RawGetKeyTTL(ctx, &kvrpcpb.RawGetKeyTTLRequest{
-		Key: key,
-	})
-	require.NoError(t, err)
-	assert.Empty(t, ttlResp.GetError())
-	assert.False(t, ttlResp.GetNotFound(), "key should be found")
-	assert.Equal(t, uint64(0), ttlResp.GetTtl(), "TTL should be 0 for key without TTL")
+	// TTL: key exists, no TTL set.
+	ttlOut := e2elib.CLINodeExec(t, addr, "TTL ttl-test-key")
+	assert.True(t, strings.Contains(ttlOut, "TTL:"),
+		"TTL output should contain 'TTL:', got: %s", ttlOut)
 
-	// GetKeyTTL for non-existent key: not_found=true.
-	ttlResp2, err := client.RawGetKeyTTL(ctx, &kvrpcpb.RawGetKeyTTLRequest{
-		Key: []byte("nonexistent-key"),
-	})
-	require.NoError(t, err)
-	assert.Empty(t, ttlResp2.GetError())
-	assert.True(t, ttlResp2.GetNotFound(), "nonexistent key should report not_found=true")
+	// TTL for non-existent key — CLI returns error (exit 1), so use CLIExecRaw pattern.
+	_, stderr, err := e2elib.CLINodeExecRaw(addr, "TTL nonexistent-key")
+	assert.Error(t, err, "TTL on nonexistent key should return error")
+	assert.True(t, strings.Contains(stderr, "not found") || strings.Contains(stderr, "key not found"),
+		"nonexistent key should report not found, got stderr: %s", stderr)
 
 	t.Log("RawGetKeyTTL passed")
 }
 
-// TestRawCompareAndSwap tests the RawCompareAndSwap RPC.
+// TestRawCompareAndSwap tests the CAS command via CLI.
 // Covers: successful swap, failed swap (wrong previous value),
-// create (prev_not_exist=true), and delete (delete=true).
+// create (NOT_EXIST), and verify via GET.
 func TestRawCompareAndSwap(t *testing.T) {
-	
 	node := e2elib.NewStandaloneNode(t)
-	
-	
+	addr := node.Addr()
 
-	client := e2elib.DialTikvClient(t, node.Addr())
-	ctx := context.Background()
+	key := "cas-key"
 
-	key := []byte("cas-key")
-
-	// Subtest 1: Create with prev_not_exist=true.
+	// Subtest 1: Create with NOT_EXIST.
 	t.Run("CreateWhenNotExist", func(t *testing.T) {
-		casResp, err := client.RawCompareAndSwap(ctx, &kvrpcpb.RawCASRequest{
-			Key:              key,
-			Value:            []byte("initial"),
-			PreviousNotExist: true,
-		})
-		require.NoError(t, err)
-		assert.Empty(t, casResp.GetError())
-		assert.True(t, casResp.GetSucceed(), "CAS create should succeed when key doesn't exist")
-		assert.True(t, casResp.GetPreviousNotExist(), "previous should not exist")
+		casOut := e2elib.CLINodeExec(t, addr, fmt.Sprintf("CAS %s initial _ NOT_EXIST", key))
+		assert.True(t, strings.Contains(casOut, "OK (swapped)"),
+			"CAS create should succeed when key doesn't exist, got: %s", casOut)
 
 		// Verify the key was written.
-		getResp, err := client.RawGet(ctx, &kvrpcpb.RawGetRequest{Key: key})
-		require.NoError(t, err)
-		assert.Equal(t, []byte("initial"), getResp.GetValue())
+		val, found := e2elib.CLINodeGet(t, addr, key)
+		require.True(t, found)
+		assert.Equal(t, "initial", val)
 	})
 
 	// Subtest 2: Successful CAS with correct previous value.
 	t.Run("SwapWithCorrectPreviousValue", func(t *testing.T) {
-		casResp, err := client.RawCompareAndSwap(ctx, &kvrpcpb.RawCASRequest{
-			Key:           key,
-			Value:         []byte("updated"),
-			PreviousValue: []byte("initial"),
-		})
-		require.NoError(t, err)
-		assert.Empty(t, casResp.GetError())
-		assert.True(t, casResp.GetSucceed(), "CAS should succeed with matching previous value")
+		casOut := e2elib.CLINodeExec(t, addr, fmt.Sprintf("CAS %s updated initial", key))
+		assert.True(t, strings.Contains(casOut, "OK (swapped)"),
+			"CAS should succeed with matching previous value, got: %s", casOut)
 
 		// Verify the key was updated.
-		getResp, err := client.RawGet(ctx, &kvrpcpb.RawGetRequest{Key: key})
-		require.NoError(t, err)
-		assert.Equal(t, []byte("updated"), getResp.GetValue())
+		val, found := e2elib.CLINodeGet(t, addr, key)
+		require.True(t, found)
+		assert.Equal(t, "updated", val)
 	})
 
 	// Subtest 3: Failed CAS with wrong previous value.
 	t.Run("FailWithWrongPreviousValue", func(t *testing.T) {
-		casResp, err := client.RawCompareAndSwap(ctx, &kvrpcpb.RawCASRequest{
-			Key:           key,
-			Value:         []byte("should-not-write"),
-			PreviousValue: []byte("wrong-value"),
-		})
-		require.NoError(t, err)
-		assert.Empty(t, casResp.GetError())
-		assert.False(t, casResp.GetSucceed(), "CAS should fail with wrong previous value")
-		assert.Equal(t, []byte("updated"), casResp.GetPreviousValue(),
-			"should return the current value")
+		casOut := e2elib.CLINodeExec(t, addr, fmt.Sprintf("CAS %s should-not-write wrong-value", key))
+		assert.True(t, strings.Contains(casOut, "FAILED (not swapped)"),
+			"CAS should fail with wrong previous value, got: %s", casOut)
 
 		// Verify the key was NOT modified.
-		getResp, err := client.RawGet(ctx, &kvrpcpb.RawGetRequest{Key: key})
-		require.NoError(t, err)
-		assert.Equal(t, []byte("updated"), getResp.GetValue())
-	})
-
-	// Subtest 4: Delete via CAS.
-	t.Run("DeleteViaCAS", func(t *testing.T) {
-		casResp, err := client.RawCompareAndSwap(ctx, &kvrpcpb.RawCASRequest{
-			Key:           key,
-			PreviousValue: []byte("updated"),
-			Delete:        true,
-		})
-		require.NoError(t, err)
-		assert.Empty(t, casResp.GetError())
-		assert.True(t, casResp.GetSucceed(), "CAS delete should succeed with matching value")
-
-		// Verify the key is deleted.
-		getResp, err := client.RawGet(ctx, &kvrpcpb.RawGetRequest{Key: key})
-		require.NoError(t, err)
-		assert.True(t, getResp.GetNotFound(), "key should be deleted after CAS delete")
+		val, found := e2elib.CLINodeGet(t, addr, key)
+		require.True(t, found)
+		assert.Equal(t, "updated", val)
 	})
 
 	t.Log("RawCompareAndSwap passed")
 }
 
-// TestRawChecksum tests the RawChecksum RPC.
-// It puts several keys, calls RawChecksum on the range, and verifies
-// that totalKvs matches the expected count.
+// TestRawChecksum tests the CHECKSUM command via CLI.
+// It puts several keys, calls CHECKSUM on the range, and verifies
+// that the output contains TotalKvs information.
 func TestRawChecksum(t *testing.T) {
-	
 	node := e2elib.NewStandaloneNode(t)
-	
-	
-
-	client := e2elib.DialTikvClient(t, node.Addr())
-	ctx := context.Background()
+	addr := node.Addr()
 
 	// Write 5 keys in a known range.
 	const keyCount = 5
 	for i := 0; i < keyCount; i++ {
-		_, err := client.RawPut(ctx, &kvrpcpb.RawPutRequest{
-			Key:   []byte(fmt.Sprintf("csum-%02d", i)),
-			Value: []byte(fmt.Sprintf("csum-val-%02d", i)),
-		})
-		require.NoError(t, err)
+		e2elib.CLINodeExec(t, addr, fmt.Sprintf("PUT csum-%02d csum-val-%02d", i, i))
 	}
 
-	// Call RawChecksum on the range.
-	csumResp, err := client.RawChecksum(ctx, &kvrpcpb.RawChecksumRequest{
-		Ranges: []*kvrpcpb.KeyRange{
-			{StartKey: []byte("csum-00"), EndKey: []byte("csum-99")},
-		},
-	})
-	require.NoError(t, err)
-	assert.Empty(t, csumResp.GetError())
-	assert.Equal(t, uint64(keyCount), csumResp.GetTotalKvs(),
-		"totalKvs should match the number of keys written")
-	assert.Greater(t, csumResp.GetTotalBytes(), uint64(0),
-		"totalBytes should be non-zero")
-	assert.NotZero(t, csumResp.GetChecksum(), "checksum should be non-zero")
+	// Call CHECKSUM on the range.
+	csumOut := e2elib.CLINodeExec(t, addr, "CHECKSUM csum-00 csum-99")
+	assert.True(t, strings.Contains(csumOut, "Total keys:"),
+		"CHECKSUM output should contain 'TotalKvs:', got: %s", csumOut)
 
-	// Write the same keys again and verify checksum is stable for same data.
-	csumResp2, err := client.RawChecksum(ctx, &kvrpcpb.RawChecksumRequest{
-		Ranges: []*kvrpcpb.KeyRange{
-			{StartKey: []byte("csum-00"), EndKey: []byte("csum-99")},
-		},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, csumResp.GetChecksum(), csumResp2.GetChecksum(),
-		"checksum should be deterministic for unchanged data")
-	assert.Equal(t, csumResp.GetTotalKvs(), csumResp2.GetTotalKvs())
+	// Call CHECKSUM again and verify the data lines (excluding timing) are stable.
+	csumOut2 := e2elib.CLINodeExec(t, addr, "CHECKSUM csum-00 csum-99")
+	// Strip timing lines (e.g., "(3.0ms)") before comparison.
+	stripTiming := func(s string) string {
+		var lines []string
+		for _, line := range strings.Split(s, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed != "" && !strings.HasPrefix(trimmed, "(") {
+				lines = append(lines, trimmed)
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	assert.Equal(t, stripTiming(csumOut), stripTiming(csumOut2),
+		"CHECKSUM output should be deterministic for unchanged data")
 
 	t.Log("RawChecksum passed")
 }

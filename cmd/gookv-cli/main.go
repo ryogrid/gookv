@@ -17,6 +17,7 @@ const version = "0.1.0"
 
 func main() {
 	pd := flag.String("pd", "127.0.0.1:2379", "PD server address(es), comma-separated")
+	addr := flag.String("addr", "", "Connect directly to KV node gRPC endpoint (bypasses PD)")
 	batch := flag.String("c", "", "Execute statement(s) and exit")
 	hexMode := flag.Bool("hex", false, "Start in hex display mode")
 	showVersion := flag.Bool("version", false, "Print version and exit")
@@ -27,29 +28,57 @@ func main() {
 		os.Exit(0)
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	endpoints := splitEndpoints(*pd)
-
-	c, err := client.NewClient(ctx, client.Config{
-		PDAddrs: endpoints,
+	// --addr and --pd are mutually exclusive (check if --pd was explicitly set)
+	pdExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "pd" {
+			pdExplicit = true
+		}
 	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: connect to PD: %v\n", err)
+	if *addr != "" && pdExplicit {
+		fmt.Fprintln(os.Stderr, "ERROR: --addr and --pd are mutually exclusive")
 		os.Exit(1)
 	}
-	defer func() { _ = c.Close() }()
 
-	exec := NewExecutor(c)
-	fmtr := NewFormatter(os.Stdout)
-	fmtr.SetErrOut(os.Stderr)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
 	// Set default stderr for executor warnings
 	defaultStderr = os.Stderr
 
+	fmtr := NewFormatter(os.Stdout)
+	fmtr.SetErrOut(os.Stderr)
+
 	if *hexMode {
 		fmtr.SetDisplayMode(DisplayHex)
+	}
+
+	var exec *Executor
+
+	if *addr != "" {
+		// Direct connection mode: bypass PD, connect to KV node directly
+		direct, err := newDirectRawKV(*addr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: connect to %s: %v\n", *addr, err)
+			os.Exit(1)
+		}
+		defer func() { _ = direct.Close() }()
+
+		exec = newTestExecutor(direct, nil, nil)
+	} else {
+		// PD connection mode (default)
+		endpoints := splitEndpoints(*pd)
+
+		c, err := client.NewClient(ctx, client.Config{
+			PDAddrs: endpoints,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: connect to PD: %v\n", err)
+			os.Exit(1)
+		}
+		defer func() { _ = c.Close() }()
+
+		exec = NewExecutor(c)
 	}
 
 	if *batch != "" {
@@ -60,8 +89,11 @@ func main() {
 		os.Exit(runPipe(ctx, exec, fmtr))
 	}
 
-	pdAddr := strings.Join(endpoints, ",")
-	os.Exit(runREPL(ctx, exec, fmtr, pdAddr))
+	displayAddr := *addr
+	if displayAddr == "" {
+		displayAddr = strings.Join(splitEndpoints(*pd), ",")
+	}
+	os.Exit(runREPL(ctx, exec, fmtr, displayAddr))
 }
 
 func splitEndpoints(s string) []string {

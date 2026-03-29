@@ -29,7 +29,7 @@ type RegionRequestSender struct {
 // NewRegionRequestSender creates a new sender.
 func NewRegionRequestSender(cache *RegionCache, resolver *PDStoreResolver, maxRetries int, dialTimeout time.Duration) *RegionRequestSender {
 	if maxRetries <= 0 {
-		maxRetries = 3
+		maxRetries = 10
 	}
 	if dialTimeout <= 0 {
 		dialTimeout = 5 * time.Second
@@ -50,9 +50,19 @@ type RPCFunc func(client tikvpb.TikvClient, info *RegionInfo) (regionErr *errorp
 
 // SendToRegion locates the region for the given key, sends the RPC,
 // and retries on retriable region errors.
+// Retries up to maxRetries times with exponential backoff (100ms, 200ms, 400ms, ...),
+// capped at 2s per sleep. Also respects the context deadline.
 func (s *RegionRequestSender) SendToRegion(ctx context.Context, key []byte, rpcFn RPCFunc) error {
 	var lastRegionErr string
+	backoff := 100 * time.Millisecond
+	const maxBackoff = 2 * time.Second
+
 	for attempt := 0; attempt <= s.maxRetries; attempt++ {
+		// Respect context cancellation between retries.
+		if ctx.Err() != nil {
+			break
+		}
+
 		info, err := s.cache.LocateKey(ctx, key)
 		if err != nil {
 			return fmt.Errorf("locate key: %w", err)
@@ -75,6 +85,8 @@ func (s *RegionRequestSender) SendToRegion(ctx context.Context, key []byte, rpcF
 			// gRPC handles reconnection automatically.
 			s.cache.InvalidateRegion(info.Region.GetId())
 			lastRegionErr = fmt.Sprintf("grpc: %v", err)
+			time.Sleep(backoff)
+			backoff = min(backoff*2, maxBackoff)
 			continue
 		}
 
@@ -87,9 +99,10 @@ func (s *RegionRequestSender) SendToRegion(ctx context.Context, key []byte, rpcF
 		if !s.handleRegionError(ctx, info, regionErr) {
 			return fmt.Errorf("region error: %s", regionErr.GetMessage())
 		}
-		// Brief backoff before retry to allow region state to stabilize
-		// (e.g., new region peers being created after a split).
-		time.Sleep(100 * time.Millisecond)
+		// Exponential backoff before retry to allow region state to stabilize
+		// (e.g., new region peers being created after a split, PD propagation).
+		time.Sleep(backoff)
+		backoff = min(backoff*2, maxBackoff)
 	}
 	return fmt.Errorf("max retries (%d) exhausted (last: %s, key=%x)", s.maxRetries, lastRegionErr, key)
 }
@@ -113,8 +126,17 @@ func (s *RegionRequestSender) handleRegionError(ctx context.Context, info *Regio
 		return true
 	}
 
-	if regionErr.GetEpochNotMatch() != nil ||
-		regionErr.GetRegionNotFound() != nil ||
+	if enm := regionErr.GetEpochNotMatch(); enm != nil {
+		s.cache.InvalidateRegion(regionID)
+		// Use CurrentRegions from the server response to update cache directly,
+		// bypassing PD which may not have propagated the split yet.
+		for _, region := range enm.GetCurrentRegions() {
+			s.cache.InsertFromEpochNotMatch(ctx, region, s.resolver)
+		}
+		return true
+	}
+
+	if regionErr.GetRegionNotFound() != nil ||
 		regionErr.GetKeyNotInRegion() != nil {
 		s.cache.InvalidateRegion(regionID)
 		return true

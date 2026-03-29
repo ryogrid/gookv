@@ -698,6 +698,256 @@ func TestAdminGCSafePointZero(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// PD admin executor tests (new commands)
+// ---------------------------------------------------------------------------
+
+func TestExecBootstrap(t *testing.T) {
+	ctx := context.Background()
+	pd := pdclient.NewMockClient(1)
+	exec := newTestExecutor(nil, nil, pd)
+
+	result, err := exec.Exec(ctx, Command{
+		Type:   CmdBootstrap,
+		IntArg: 1,
+		StrArg: "127.0.0.1:20160",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ResultOK, result.Type)
+	assert.Contains(t, result.Message, "Bootstrapped store 1")
+	assert.Contains(t, result.Message, "127.0.0.1:20160")
+
+	// Verify the store was actually registered
+	store, err := pd.GetStore(ctx, 1)
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:20160", store.GetAddress())
+
+	// Second bootstrap should fail
+	_, err = exec.Exec(ctx, Command{
+		Type:   CmdBootstrap,
+		IntArg: 2,
+		StrArg: "127.0.0.1:20161",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already bootstrapped")
+}
+
+func TestExecBootstrapWithRegionID(t *testing.T) {
+	ctx := context.Background()
+	pd := pdclient.NewMockClient(1)
+	exec := newTestExecutor(nil, nil, pd)
+
+	result, err := exec.Exec(ctx, Command{
+		Type:   CmdBootstrap,
+		IntArg: 1,
+		StrArg: "127.0.0.1:20160",
+		Args:   [][]byte{[]byte("5")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ResultOK, result.Type)
+
+	// Verify the region was created with regionID=5
+	region, _, err := pd.GetRegionByID(ctx, 5)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(5), region.GetId())
+}
+
+func TestExecPutStore(t *testing.T) {
+	ctx := context.Background()
+	pd := pdclient.NewMockClient(1)
+	exec := newTestExecutor(nil, nil, pd)
+
+	result, err := exec.Exec(ctx, Command{
+		Type:   CmdPutStore,
+		IntArg: 2,
+		StrArg: "127.0.0.1:20161",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ResultOK, result.Type)
+	assert.Contains(t, result.Message, "Registered store 2")
+	assert.Contains(t, result.Message, "127.0.0.1:20161")
+
+	// Verify store was registered
+	store, err := pd.GetStore(ctx, 2)
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:20161", store.GetAddress())
+}
+
+func TestExecAllocID(t *testing.T) {
+	ctx := context.Background()
+	pd := pdclient.NewMockClient(1)
+	exec := newTestExecutor(nil, nil, pd)
+
+	result, err := exec.Exec(ctx, Command{Type: CmdAllocID})
+	require.NoError(t, err)
+	assert.Equal(t, ResultScalar, result.Type)
+	// MockClient starts nextID at 1000 and increments by 1
+	assert.Equal(t, "1001", result.Scalar)
+
+	// Second alloc should increment
+	result, err = exec.Exec(ctx, Command{Type: CmdAllocID})
+	require.NoError(t, err)
+	assert.Equal(t, "1002", result.Scalar)
+}
+
+func TestExecIsBootstrapped(t *testing.T) {
+	ctx := context.Background()
+	pd := pdclient.NewMockClient(1)
+	exec := newTestExecutor(nil, nil, pd)
+
+	// Not bootstrapped yet
+	result, err := exec.Exec(ctx, Command{Type: CmdIsBootstrapped})
+	require.NoError(t, err)
+	assert.Equal(t, ResultScalar, result.Type)
+	assert.Equal(t, "false", result.Scalar)
+
+	// Bootstrap the cluster
+	_, err = exec.Exec(ctx, Command{
+		Type:   CmdBootstrap,
+		IntArg: 1,
+		StrArg: "127.0.0.1:20160",
+	})
+	require.NoError(t, err)
+
+	// Now bootstrapped
+	result, err = exec.Exec(ctx, Command{Type: CmdIsBootstrapped})
+	require.NoError(t, err)
+	assert.Equal(t, "true", result.Scalar)
+}
+
+func TestExecAskSplit(t *testing.T) {
+	ctx := context.Background()
+	pd := setupMockPD()
+	exec := newTestExecutor(nil, nil, pd)
+
+	result, err := exec.Exec(ctx, Command{
+		Type:   CmdAskSplit,
+		IntArg: 10, // existing region from setupMockPD
+		Args:   [][]byte{[]byte("2")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ResultTable, result.Type)
+	assert.Equal(t, []string{"NewRegionID", "NewPeerIDs"}, result.Columns)
+	assert.Equal(t, 2, len(result.TableRows)) // count=2
+}
+
+func TestExecAskSplitRegionNotFound(t *testing.T) {
+	ctx := context.Background()
+	pd := pdclient.NewMockClient(1)
+	exec := newTestExecutor(nil, nil, pd)
+
+	_, err := exec.Exec(ctx, Command{
+		Type:   CmdAskSplit,
+		IntArg: 999,
+		Args:   [][]byte{[]byte("1")},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "999")
+}
+
+func TestExecReportSplit(t *testing.T) {
+	ctx := context.Background()
+	pd := setupMockPD()
+	exec := newTestExecutor(nil, nil, pd)
+
+	result, err := exec.Exec(ctx, Command{
+		Type:   CmdReportSplit,
+		IntArg: 10, // left region (existing from setupMockPD)
+		Args:   [][]byte{[]byte("200"), []byte("f")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ResultOK, result.Type)
+	assert.Contains(t, result.Message, "Split reported")
+
+	// Verify regions were updated: left region should now end at "f"
+	left, _, err := pd.GetRegionByID(ctx, 10)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("f"), left.GetEndKey())
+
+	// Right region should exist with start key "f"
+	right, _, err := pd.GetRegionByID(ctx, 200)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("f"), right.GetStartKey())
+	assert.Equal(t, []byte("m"), right.GetEndKey()) // original end key of region 10
+}
+
+func TestExecStoreHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	pd := pdclient.NewMockClient(1)
+	exec := newTestExecutor(nil, nil, pd)
+
+	result, err := exec.Exec(ctx, Command{
+		Type:   CmdStoreHeartbeat,
+		IntArg: 1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ResultOK, result.Type)
+
+	// Verify stats were recorded
+	stats := pd.GetStoreStats(1)
+	require.NotNil(t, stats)
+	assert.Equal(t, uint64(1), stats.GetStoreId())
+	assert.Equal(t, uint32(0), stats.GetRegionCount())
+}
+
+func TestExecStoreHeartbeatWithRegions(t *testing.T) {
+	ctx := context.Background()
+	pd := pdclient.NewMockClient(1)
+	exec := newTestExecutor(nil, nil, pd)
+
+	result, err := exec.Exec(ctx, Command{
+		Type:   CmdStoreHeartbeat,
+		IntArg: 1,
+		Args:   [][]byte{[]byte("5")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ResultOK, result.Type)
+
+	// Verify region count in stats
+	stats := pd.GetStoreStats(1)
+	require.NotNil(t, stats)
+	assert.Equal(t, uint32(5), stats.GetRegionCount())
+}
+
+func TestExecGCSafePointSet(t *testing.T) {
+	ctx := context.Background()
+	pd := pdclient.NewMockClient(1)
+	exec := newTestExecutor(nil, nil, pd)
+
+	result, err := exec.Exec(ctx, Command{
+		Type:   CmdGCSafepoint,
+		IntArg: 1000,
+		StrArg: "SET",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ResultScalar, result.Type)
+	assert.Equal(t, "1000", result.Scalar)
+
+	// Verify the safe point was actually set
+	sp, err := pd.GetGCSafePoint(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1000), sp)
+}
+
+func TestExecGCSafePointSetOnlyForward(t *testing.T) {
+	ctx := context.Background()
+	pd := pdclient.NewMockClient(1)
+	exec := newTestExecutor(nil, nil, pd)
+
+	// Set to 1000
+	_, err := exec.Exec(ctx, Command{
+		Type: CmdGCSafepoint, IntArg: 1000, StrArg: "SET",
+	})
+	require.NoError(t, err)
+
+	// Try to set to 500 (should be ignored, PD only moves forward)
+	result, err := exec.Exec(ctx, Command{
+		Type: CmdGCSafepoint, IntArg: 500, StrArg: "SET",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "1000", result.Scalar) // returns old value
+}
+
+// ---------------------------------------------------------------------------
 // Meta command tests
 // ---------------------------------------------------------------------------
 

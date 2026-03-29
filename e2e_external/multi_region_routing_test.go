@@ -1,8 +1,8 @@
 package e2e_external_test
 
 import (
-	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +16,7 @@ import (
 // TestMultiRegionTransactions tests transactional prewrite/commit across regions.
 func TestMultiRegionTransactions(t *testing.T) {
 	cluster := newMultiRegionCluster(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Get a timestamp from PD for the transaction.
 	pdClient := cluster.PD().Client()
@@ -35,10 +35,10 @@ func TestMultiRegionTransactions(t *testing.T) {
 			Mutations: []*kvrpcpb.Mutation{
 				{Op: kvrpcpb.Op_Put, Key: primaryKey, Value: []byte("pv")},
 			},
-			PrimaryLock:    primaryKey,
-			StartVersion:   startTS,
-			LockTtl:        3000,
-			MinCommitTs:     startTS + 1,
+			PrimaryLock:  primaryKey,
+			StartVersion: startTS,
+			LockTtl:      3000,
+			MinCommitTs:  startTS + 1,
 		})
 		if err == nil && len(resp.GetErrors()) == 0 && resp.GetRegionError() == nil {
 			prewriteOK = true
@@ -75,24 +75,29 @@ func TestMultiRegionTransactions(t *testing.T) {
 // TestMultiRegionRawKVBatchScan tests RawBatchScan across regions.
 func TestMultiRegionRawKVBatchScan(t *testing.T) {
 	cluster := newMultiRegionCluster(t)
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
 	// Write keys across regions (retry on transient errors after split).
 	for i := 0; i < 10; i++ {
-		key := []byte(fmt.Sprintf("bscan-%02d", i))
-		val := []byte(fmt.Sprintf("val-%02d", i))
-		e2elib.WaitForCondition(t, 30*time.Second, fmt.Sprintf("put bscan-%02d", i), func() bool {
-			ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
-			defer cancel()
-			return cluster.RawKV().Put(ctx2, key, val) == nil
-		})
+		key := fmt.Sprintf("bscan-%02d", i)
+		val := fmt.Sprintf("val-%02d", i)
+		e2elib.CLIWaitForCondition(t, pdAddr, fmt.Sprintf("PUT %s %s", key, val),
+			func(output string) bool {
+				return strings.Contains(output, "OK")
+			}, 30*time.Second)
 	}
 
-	// Scan across regions.
-	rawKV := cluster.RawKV()
-	pairs, err := rawKV.Scan(ctx, []byte("bscan-00"), []byte("bscan-99"), 100)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(pairs), 10, "scan should return all keys")
+	// Scan across regions via CLI, polling until all keys are visible.
+	e2elib.CLIWaitForCondition(t, pdAddr, "SCAN bscan-00 bscan-99 LIMIT 100",
+		func(output string) bool {
+			count := 0
+			for _, line := range strings.Split(output, "\n") {
+				if strings.Contains(line, "bscan-") {
+					count++
+				}
+			}
+			return count >= 10
+		}, 30*time.Second)
 
 	t.Log("Multi-region RawKV batch scan passed")
 }
@@ -109,51 +114,45 @@ func TestMultiRegionSplitWithLiveTraffic(t *testing.T) {
 	require.NoError(t, cluster.Start())
 	t.Cleanup(func() { cluster.Stop() })
 
-	rawKV := cluster.RawKV()
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
-	// Wait for leader.
-	e2elib.WaitForCondition(t, 30*time.Second, "leader election", func() bool {
-		ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		return rawKV.Put(ctx2, []byte("__init__"), []byte("ok")) == nil
-	})
+	// Wait for leader via CLI.
+	e2elib.CLIWaitForCondition(t, pdAddr, "PUT __init__ ok",
+		func(output string) bool {
+			return strings.Contains(output, "OK")
+		}, 30*time.Second)
 
-	// Write 30 keys before split.
+	// Write 30 keys before split via CLI.
 	for i := 0; i < 30; i++ {
-		key := []byte(fmt.Sprintf("live-%04d", i))
-		val := []byte(fmt.Sprintf("value-%04d-padding-xxxxxxxxxxxxxxxxxxxxxxxx", i))
-		err := rawKV.Put(ctx, key, val)
-		require.NoError(t, err)
+		key := fmt.Sprintf("live-%04d", i)
+		val := fmt.Sprintf("value-%04d-padding-xxxxxxxxxxxxxxxxxxxxxxxx", i)
+		e2elib.CLIPut(t, pdAddr, key, val)
 	}
 
-	// Wait for split.
-	pdClient := cluster.PD().Client()
-	e2elib.WaitForSplit(t, pdClient, 60*time.Second)
+	// Wait for split via CLI (poll region count).
+	e2elib.CLIWaitForRegionCount(t, pdAddr, 2, 60*time.Second)
 
 	// Reset client to clear stale region cache after split.
 	cluster.ResetClient()
-	rawKV = cluster.RawKV()
 
-	// Wait for all regions to have leaders.
-	e2elib.WaitForCondition(t, 30*time.Second, "all regions operational after split", func() bool {
-		ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _, err := rawKV.Get(ctx2, []byte("live-0001"))
-		if err != nil {
-			return false
-		}
-		_, _, err = rawKV.Get(ctx2, []byte("live-0029"))
-		return err == nil
-	})
+	// Wait for all regions to have leaders (poll via CLI until reads succeed).
+	// After a split, PD needs time to propagate region metadata and leaders
+	// need to be elected on new regions, so use a generous timeout.
+	e2elib.CLIWaitForCondition(t, pdAddr, "GET live-0001",
+		func(output string) bool {
+			return !strings.Contains(output, "(not found)") && !strings.Contains(output, "error")
+		}, 60*time.Second)
+	e2elib.CLIWaitForCondition(t, pdAddr, "GET live-0029",
+		func(output string) bool {
+			return !strings.Contains(output, "(not found)") && !strings.Contains(output, "error")
+		}, 60*time.Second)
 
-	// All pre-split keys should still be readable.
+	// All pre-split keys should still be readable via CLI.
 	for i := 0; i < 30; i++ {
-		key := []byte(fmt.Sprintf("live-%04d", i))
-		val, notFound, err := rawKV.Get(ctx, key)
-		require.NoError(t, err, "key %s", key)
-		assert.False(t, notFound, "key %s should exist after split", key)
-		assert.Contains(t, string(val), fmt.Sprintf("value-%04d", i))
+		key := fmt.Sprintf("live-%04d", i)
+		val, found := e2elib.CLIGet(t, pdAddr, key)
+		assert.True(t, found, "key %s should exist after split", key)
+		assert.Contains(t, val, fmt.Sprintf("value-%04d", i))
 	}
 
 	t.Log("Split with live traffic passed")
@@ -162,10 +161,10 @@ func TestMultiRegionSplitWithLiveTraffic(t *testing.T) {
 // TestMultiRegionPDCoordinatedSplit tests auto-split with PD coordination.
 func TestMultiRegionPDCoordinatedSplit(t *testing.T) {
 	cluster := newMultiRegionCluster(t)
-	pdClient := cluster.PD().Client()
+	pdAddr := cluster.PD().Addr()
 
 	// After newMultiRegionCluster, split should have already occurred.
-	regionCount := e2elib.WaitForRegionCount(t, pdClient, 2, 5*time.Second)
+	regionCount := e2elib.CLIWaitForRegionCount(t, pdAddr, 2, 5*time.Second)
 	assert.GreaterOrEqual(t, regionCount, 2, "PD-coordinated split should create multiple regions")
 
 	t.Log("PD-coordinated split passed")
@@ -174,7 +173,7 @@ func TestMultiRegionPDCoordinatedSplit(t *testing.T) {
 // TestMultiRegionAsyncCommit tests async commit prewrite across regions.
 func TestMultiRegionAsyncCommit(t *testing.T) {
 	cluster := newMultiRegionCluster(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	pdClient := cluster.PD().Client()
 
 	ts, err := pdClient.GetTS(ctx)
@@ -211,7 +210,7 @@ func TestMultiRegionAsyncCommit(t *testing.T) {
 // TestMultiRegionScanLock tests ScanLock respects region boundaries.
 func TestMultiRegionScanLock(t *testing.T) {
 	cluster := newMultiRegionCluster(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	pdClient := cluster.PD().Client()
 
 	// Create a lock via prewrite.

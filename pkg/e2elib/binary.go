@@ -13,6 +13,7 @@ var envVarNames = map[string]string{
 	"gookv-server": "GOOKV_SERVER_BIN",
 	"gookv-pd":     "GOOKV_PD_BIN",
 	"gookv-ctl":    "GOOKV_CTL_BIN",
+	"gookv-cli":    "GOOKV_CLI_BIN",
 }
 
 // FindBinary returns the path to a gookv binary (gookv-server, gookv-pd, gookv-ctl).

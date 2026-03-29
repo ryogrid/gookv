@@ -3,6 +3,7 @@ package e2e_external_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,20 +83,17 @@ func newMultiRegionCluster(t *testing.T) *e2elib.GokvCluster {
 // TestMultiRegionKeyRouting verifies keys route to the correct region.
 func TestMultiRegionKeyRouting(t *testing.T) {
 	cluster := newMultiRegionCluster(t)
-	pdClient := cluster.PD().Client()
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
 	// After split, different keys should be in different regions.
-	region1, _, err := pdClient.GetRegion(ctx, []byte("split-seed-0001"))
-	require.NoError(t, err)
-	require.NotNil(t, region1)
+	out1 := e2elib.CLIExec(t, pdAddr, "REGION split-seed-0001")
+	assert.True(t, strings.Contains(out1, "Region ID:"), "REGION output should contain Region ID")
 
-	region2, _, err := pdClient.GetRegion(ctx, []byte("split-seed-0049"))
-	require.NoError(t, err)
-	require.NotNil(t, region2)
+	out2 := e2elib.CLIExec(t, pdAddr, "REGION split-seed-0049")
+	assert.True(t, strings.Contains(out2, "Region ID:"), "REGION output should contain Region ID")
 
-	// If split happened, at least the region IDs or key ranges should differ.
-	regionCount := e2elib.WaitForRegionCount(t, pdClient, 2, 5*time.Second)
+	// If split happened, at least 2 regions should exist.
+	regionCount := e2elib.CLIWaitForRegionCount(t, pdAddr, 2, 5*time.Second)
 	assert.GreaterOrEqual(t, regionCount, 2, "should have at least 2 regions after split")
 
 	t.Log("Multi-region key routing passed")
@@ -104,11 +102,11 @@ func TestMultiRegionKeyRouting(t *testing.T) {
 // TestMultiRegionIndependentLeaders verifies PD tracks leaders per region.
 func TestMultiRegionIndependentLeaders(t *testing.T) {
 	cluster := newMultiRegionCluster(t)
-	pdClient := cluster.PD().Client()
+	pdAddr := cluster.PD().Addr()
 
 	// Wait for leaders on both regions.
-	leaderStore1 := e2elib.WaitForRegionLeader(t, pdClient, []byte("split-seed-0001"), 30*time.Second)
-	leaderStore2 := e2elib.WaitForRegionLeader(t, pdClient, []byte("split-seed-0049"), 30*time.Second)
+	leaderStore1 := e2elib.CLIWaitForRegionLeader(t, pdAddr, "split-seed-0001", 30*time.Second)
+	leaderStore2 := e2elib.CLIWaitForRegionLeader(t, pdAddr, "split-seed-0049", 30*time.Second)
 
 	// Both should have leaders (may or may not be the same store).
 	assert.NotZero(t, leaderStore1, "region 1 should have a leader")
@@ -120,26 +118,24 @@ func TestMultiRegionIndependentLeaders(t *testing.T) {
 // TestMultiRegionRawKV tests RawPut/RawGet across multiple regions.
 func TestMultiRegionRawKV(t *testing.T) {
 	cluster := newMultiRegionCluster(t)
-	rawKV := cluster.RawKV()
-	ctx := context.Background()
+	pdAddr := cluster.PD().Addr()
 
 	// Write keys that should span multiple regions.
-	// Use retry for each Put since new regions after split may still be electing leaders.
+	// Use CLIWaitForCondition for each Put since new regions after split may still be electing leaders.
 	keys := []string{"aaa-key", "mmm-key", "zzz-key"}
 	for i, k := range keys {
-		e2elib.WaitForCondition(t, 30*time.Second, fmt.Sprintf("put %s", k), func() bool {
-			ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
-			defer cancel()
-			return rawKV.Put(ctx2, []byte(k), []byte(fmt.Sprintf("val-%d", i))) == nil
-		})
+		valStr := fmt.Sprintf("val-%d", i)
+		e2elib.CLIWaitForCondition(t, pdAddr, fmt.Sprintf("PUT %s %s", k, valStr),
+			func(output string) bool {
+				return strings.Contains(output, "OK")
+			}, 30*time.Second)
 	}
 
 	// Read back all keys.
 	for i, k := range keys {
-		val, notFound, err := rawKV.Get(ctx, []byte(k))
-		require.NoError(t, err)
-		assert.False(t, notFound, "key %s should exist", k)
-		assert.Equal(t, []byte(fmt.Sprintf("val-%d", i)), val)
+		val, found := e2elib.CLIGet(t, pdAddr, k)
+		assert.True(t, found, "key %s should exist", k)
+		assert.Equal(t, fmt.Sprintf("val-%d", i), val)
 	}
 
 	t.Log("Multi-region RawKV passed")

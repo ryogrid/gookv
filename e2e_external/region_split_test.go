@@ -1,18 +1,18 @@
 package e2e_external_test
 
 import (
-	"context"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ryogrid/gookv/pkg/e2elib"
 )
 
-// TestRegionSplitWithPD tests the end-to-end region split flow via PD APIs.
+// TestRegionSplitWithPD tests the end-to-end region split flow via PD CLI commands.
 // This test exercises the PD split ID allocation and reporting path.
 func TestRegionSplitWithPD(t *testing.T) {
 	e2elib.SkipIfNoBinary(t, "gookv-pd")
@@ -24,89 +24,39 @@ func TestRegionSplitWithPD(t *testing.T) {
 	require.NoError(t, pd.Start())
 	require.NoError(t, pd.WaitForReady(15*time.Second))
 
-	pdClient := pd.Client()
-	ctx := context.Background()
+	pdAddr := pd.Addr()
 
 	// Bootstrap cluster.
-	store := &metapb.Store{Id: 1, Address: "127.0.0.1:20160"}
-	region := &metapb.Region{
-		Id:       1,
-		StartKey: nil,
-		EndKey:   nil,
-		RegionEpoch: &metapb.RegionEpoch{
-			ConfVer: 1,
-			Version: 1,
-		},
-		Peers: []*metapb.Peer{
-			{Id: 1, StoreId: 1},
-		},
-	}
-	_, err := pdClient.Bootstrap(ctx, store, region)
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "BOOTSTRAP 1 127.0.0.1:20160")
 
 	// Request split IDs from PD.
-	splitResp, err := pdClient.AskBatchSplit(ctx, region, 1)
-	require.NoError(t, err)
-	require.Len(t, splitResp.GetIds(), 1, "should get 1 split ID set")
+	out := e2elib.CLIExec(t, pdAddr, "ASK SPLIT 1 1")
+	assert.Contains(t, out, "NewRegionID", "should get split ID table")
 
-	splitID := splitResp.GetIds()[0]
-	newRegionID := splitID.GetNewRegionId()
+	newRegionID, peerIDs := parseAskSplitRow(t, out, 0)
 	assert.NotZero(t, newRegionID, "new region ID should be non-zero")
-	require.NotEmpty(t, splitID.GetNewPeerIds(), "should have new peer IDs")
+	require.NotEmpty(t, peerIDs, "should have new peer IDs")
 
-	// Build peers for the new region from the allocated peer IDs.
-	var newPeers []*metapb.Peer
-	for i, pid := range splitID.GetNewPeerIds() {
-		storeID := uint64(1)
-		if i < len(region.GetPeers()) {
-			storeID = region.GetPeers()[i].GetStoreId()
-		}
-		newPeers = append(newPeers, &metapb.Peer{Id: pid, StoreId: storeID})
-	}
-
-	// Simulate split: create left and right regions.
-	splitKey := []byte("m")
-	leftRegion := &metapb.Region{
-		Id:       region.GetId(),
-		StartKey: nil,
-		EndKey:   splitKey,
-		RegionEpoch: &metapb.RegionEpoch{
-			ConfVer: 1,
-			Version: 2, // bumped
-		},
-		Peers: region.GetPeers(),
-	}
-	rightRegion := &metapb.Region{
-		Id:       newRegionID,
-		StartKey: splitKey,
-		EndKey:   nil,
-		RegionEpoch: &metapb.RegionEpoch{
-			ConfVer: 1,
-			Version: 2,
-		},
-		Peers: newPeers,
-	}
-
-	// Report split to PD.
-	err = pdClient.ReportBatchSplit(ctx, []*metapb.Region{leftRegion, rightRegion})
-	require.NoError(t, err)
+	// Report the split: REPORT SPLIT <leftRegionID> <rightRegionID> <splitKey>
+	e2elib.CLIExec(t, pdAddr, "REPORT SPLIT 1 "+strconv.FormatUint(newRegionID, 10)+" m")
 
 	// Verify PD metadata: key before split point should be in left region.
-	e2elib.WaitForCondition(t, 10*time.Second, "PD reflects split", func() bool {
-		r, _, err := pdClient.GetRegion(ctx, []byte("a"))
-		return err == nil && r != nil && string(r.GetEndKey()) == string(splitKey)
-	})
+	e2elib.CLIWaitForCondition(t, pdAddr, "REGION a", func(output string) bool {
+		// The left region should have EndKey containing "m"
+		return strings.Contains(output, "Region ID:  1") && strings.Contains(output, "6d") // "m" in hex
+	}, 10*time.Second)
 
-	gotLeft, _, err := pdClient.GetRegion(ctx, []byte("a"))
-	require.NoError(t, err)
-	assert.Equal(t, region.GetId(), gotLeft.GetId(), "left region should keep original ID")
-	assert.Equal(t, splitKey, gotLeft.GetEndKey())
+	outLeft := e2elib.CLIExec(t, pdAddr, "REGION a")
+	assert.Contains(t, outLeft, "Region ID:  1", "left region should keep original ID")
+	// EndKey should contain the hex encoding of "m" (0x6d)
+	assert.Contains(t, outLeft, "6d", "left region EndKey should be 'm'")
 
 	// Key after split point should be in right region.
-	gotRight, _, err := pdClient.GetRegion(ctx, []byte("z"))
-	require.NoError(t, err)
-	assert.Equal(t, newRegionID, gotRight.GetId(), "right region should have new ID")
-	assert.Equal(t, splitKey, gotRight.GetStartKey())
+	outRight := e2elib.CLIExec(t, pdAddr, "REGION z")
+	assert.Contains(t, outRight, "Region ID:  "+strconv.FormatUint(newRegionID, 10),
+		"right region should have new ID")
+	// StartKey should contain the hex encoding of "m" (0x6d)
+	assert.Contains(t, outRight, "6d", "right region StartKey should be 'm'")
 
 	t.Log("Region split with PD passed")
 }

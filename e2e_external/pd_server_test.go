@@ -1,11 +1,10 @@
 package e2e_external_test
 
 import (
-	"context"
+	"strconv"
+	"strings"
 	"testing"
 
-	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -29,46 +28,31 @@ func startPDOnly(t *testing.T) *e2elib.PDNode {
 // TestPDServerBootstrapAndTSO verifies PD bootstrap, TSO allocation, and cluster metadata.
 func TestPDServerBootstrapAndTSO(t *testing.T) {
 	pd := startPDOnly(t)
-	client := pd.Client()
-	ctx := context.Background()
+	pdAddr := pd.Addr()
 
 	// Before bootstrap, IsBootstrapped should be false.
-	bootstrapped, err := client.IsBootstrapped(ctx)
-	require.NoError(t, err)
-	assert.False(t, bootstrapped, "cluster should not be bootstrapped initially")
+	out := e2elib.CLIExec(t, pdAddr, "IS BOOTSTRAPPED")
+	assert.Equal(t, "false", parseScalarValue(out), "cluster should not be bootstrapped initially")
 
 	// Bootstrap the cluster.
-	store := &metapb.Store{Id: 1, Address: "127.0.0.1:20160"}
-	region := &metapb.Region{
-		Id:       1,
-		StartKey: nil,
-		EndKey:   nil,
-		Peers:    []*metapb.Peer{{Id: 1, StoreId: 1}},
-		RegionEpoch: &metapb.RegionEpoch{
-			ConfVer: 1,
-			Version: 1,
-		},
-	}
-	_, err = client.Bootstrap(ctx, store, region)
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "BOOTSTRAP 1 127.0.0.1:20160")
 
 	// After bootstrap, IsBootstrapped should be true.
-	bootstrapped, err = client.IsBootstrapped(ctx)
-	require.NoError(t, err)
-	assert.True(t, bootstrapped, "cluster should be bootstrapped")
+	out = e2elib.CLIExec(t, pdAddr, "IS BOOTSTRAPPED")
+	assert.Equal(t, "true", parseScalarValue(out), "cluster should be bootstrapped")
 
 	// TSO allocation: timestamps must be monotonically increasing.
-	ts1, err := client.GetTS(ctx)
-	require.NoError(t, err)
-	ts2, err := client.GetTS(ctx)
-	require.NoError(t, err)
-	assert.Greater(t, ts2.ToUint64(), ts1.ToUint64(), "TSO must be monotonically increasing")
+	out1 := e2elib.CLIExec(t, pdAddr, "TSO")
+	ts1 := parseTSOTimestamp(t, out1)
+	out2 := e2elib.CLIExec(t, pdAddr, "TSO")
+	ts2 := parseTSOTimestamp(t, out2)
+	assert.Greater(t, ts2, ts1, "TSO must be monotonically increasing")
 
 	// AllocID: IDs must be unique and increasing.
-	id1, err := client.AllocID(ctx)
-	require.NoError(t, err)
-	id2, err := client.AllocID(ctx)
-	require.NoError(t, err)
+	out1 = e2elib.CLIExec(t, pdAddr, "ALLOC ID")
+	id1 := parseUint64Value(t, out1)
+	out2 = e2elib.CLIExec(t, pdAddr, "ALLOC ID")
+	id2 := parseUint64Value(t, out2)
 	assert.Greater(t, id2, id1, "AllocID must be monotonically increasing")
 
 	t.Log("PD bootstrap, TSO, and AllocID passed")
@@ -77,41 +61,28 @@ func TestPDServerBootstrapAndTSO(t *testing.T) {
 // TestPDServerStoreAndRegionMetadata verifies store and region metadata management via PD.
 func TestPDServerStoreAndRegionMetadata(t *testing.T) {
 	pd := startPDOnly(t)
-	client := pd.Client()
-	ctx := context.Background()
+	pdAddr := pd.Addr()
 
 	// Bootstrap.
-	store := &metapb.Store{Id: 1, Address: "127.0.0.1:20160"}
-	region := &metapb.Region{
-		Id:    1,
-		Peers: []*metapb.Peer{{Id: 1, StoreId: 1}},
-	}
-	_, err := client.Bootstrap(ctx, store, region)
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "BOOTSTRAP 1 127.0.0.1:20160")
 
 	// Put additional stores.
-	err = client.PutStore(ctx, &metapb.Store{Id: 2, Address: "127.0.0.1:20161"})
-	require.NoError(t, err)
-	err = client.PutStore(ctx, &metapb.Store{Id: 3, Address: "127.0.0.1:20162"})
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "PUT STORE 2 127.0.0.1:20161")
+	e2elib.CLIExec(t, pdAddr, "PUT STORE 3 127.0.0.1:20162")
 
 	// GetStore should return the stored metadata.
-	s, err := client.GetStore(ctx, 2)
-	require.NoError(t, err)
-	require.NotNil(t, s)
-	assert.Equal(t, uint64(2), s.GetId())
-	assert.Equal(t, "127.0.0.1:20161", s.GetAddress())
+	out := e2elib.CLIExec(t, pdAddr, "STORE STATUS 2")
+	assert.True(t, strings.Contains(out, "Store ID:  2"))
+	assert.True(t, strings.Contains(out, "127.0.0.1:20161"))
 
 	// GetRegionByID should return the bootstrapped region.
-	r, _, err := client.GetRegionByID(ctx, 1)
-	require.NoError(t, err)
-	require.NotNil(t, r)
-	assert.Equal(t, uint64(1), r.GetId())
+	out = e2elib.CLIExec(t, pdAddr, "REGION ID 1")
+	assert.True(t, strings.Contains(out, "Region ID:  1"))
 
 	// GetRegion by key should return region covering the key.
-	r, _, err = client.GetRegion(ctx, []byte("some-key"))
-	require.NoError(t, err)
-	require.NotNil(t, r, "region should cover any key since it has no start/end key bounds")
+	out = e2elib.CLIExec(t, pdAddr, "REGION some-key")
+	assert.True(t, strings.Contains(out, "Region ID:"),
+		"region should cover any key since it has no start/end key bounds")
 
 	t.Log("PD store and region metadata passed")
 }
@@ -119,61 +90,32 @@ func TestPDServerStoreAndRegionMetadata(t *testing.T) {
 // TestPDAskBatchSplitAndReport verifies the AskBatchSplit and ReportBatchSplit RPCs.
 func TestPDAskBatchSplitAndReport(t *testing.T) {
 	pd := startPDOnly(t)
-	client := pd.Client()
-	ctx := context.Background()
+	pdAddr := pd.Addr()
 
 	// Bootstrap.
-	store := &metapb.Store{Id: 1, Address: "127.0.0.1:20160"}
-	region := &metapb.Region{
-		Id:    1,
-		Peers: []*metapb.Peer{{Id: 1, StoreId: 1}},
-	}
-	_, err := client.Bootstrap(ctx, store, region)
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "BOOTSTRAP 1 127.0.0.1:20160")
 
 	// AskBatchSplit for 1 split.
-	resp, err := client.AskBatchSplit(ctx, region, 1)
-	require.NoError(t, err)
-	require.Len(t, resp.GetIds(), 1, "should get 1 split ID")
+	out := e2elib.CLIExec(t, pdAddr, "ASK SPLIT 1 1")
+	// Output is a table with NewRegionID and NewPeerIDs columns.
+	// Verify we got a non-zero new region ID.
+	assert.True(t, strings.Contains(out, "NewRegionID"), "should have NewRegionID column")
+	// Parse the table to get the new region ID and peer IDs.
+	newRegionID, newPeerIDs := parseAskSplitRow(t, out, 0)
+	assert.NotZero(t, newRegionID, "new region ID should be non-zero")
+	assert.NotEmpty(t, newPeerIDs, "new peer IDs should be allocated")
 
-	splitID := resp.GetIds()[0]
-	assert.NotZero(t, splitID.GetNewRegionId(), "new region ID should be non-zero")
-	assert.NotEmpty(t, splitID.GetNewPeerIds(), "new peer IDs should be allocated")
-
-	// Report the split: create two regions (left and right).
-	leftRegion := &metapb.Region{
-		Id:       region.GetId(),
-		StartKey: nil,
-		EndKey:   []byte("m"),
-		Peers:    []*metapb.Peer{{Id: 1, StoreId: 1}},
-		RegionEpoch: &metapb.RegionEpoch{
-			Version: 2,
-			ConfVer: 1,
-		},
-	}
-	rightRegion := &metapb.Region{
-		Id:       splitID.GetNewRegionId(),
-		StartKey: []byte("m"),
-		EndKey:   nil,
-		Peers:    []*metapb.Peer{{Id: splitID.GetNewPeerIds()[0], StoreId: 1}},
-		RegionEpoch: &metapb.RegionEpoch{
-			Version: 2,
-			ConfVer: 1,
-		},
-	}
-	err = client.ReportBatchSplit(ctx, []*metapb.Region{leftRegion, rightRegion})
-	require.NoError(t, err)
+	// Report the split: REPORT SPLIT <leftRegionID> <rightRegionID> <splitKey>
+	e2elib.CLIExec(t, pdAddr, "REPORT SPLIT 1 "+strconv.FormatUint(newRegionID, 10)+" m")
 
 	// Verify PD now has both regions.
-	rLeft, _, err := client.GetRegion(ctx, []byte("abc"))
-	require.NoError(t, err)
-	require.NotNil(t, rLeft)
-	assert.Equal(t, leftRegion.GetId(), rLeft.GetId(), "key 'abc' should map to the left region")
+	outLeft := e2elib.CLIExec(t, pdAddr, "REGION abc")
+	assert.True(t, strings.Contains(outLeft, "Region ID:  1"),
+		"key 'abc' should map to the left region (region 1)")
 
-	rRight, _, err := client.GetRegion(ctx, []byte("xyz"))
-	require.NoError(t, err)
-	require.NotNil(t, rRight)
-	assert.Equal(t, rightRegion.GetId(), rRight.GetId(), "key 'xyz' should map to the right region")
+	outRight := e2elib.CLIExec(t, pdAddr, "REGION xyz")
+	assert.True(t, strings.Contains(outRight, "Region ID:  "+strconv.FormatUint(newRegionID, 10)),
+		"key 'xyz' should map to the right region")
 
 	t.Log("PD AskBatchSplit and ReportBatchSplit passed")
 }
@@ -181,25 +123,88 @@ func TestPDAskBatchSplitAndReport(t *testing.T) {
 // TestPDStoreHeartbeat verifies sending store heartbeats to PD.
 func TestPDStoreHeartbeat(t *testing.T) {
 	pd := startPDOnly(t)
-	client := pd.Client()
-	ctx := context.Background()
+	pdAddr := pd.Addr()
 
 	// Bootstrap.
-	store := &metapb.Store{Id: 1, Address: "127.0.0.1:20160"}
-	region := &metapb.Region{
-		Id:    1,
-		Peers: []*metapb.Peer{{Id: 1, StoreId: 1}},
-	}
-	_, err := client.Bootstrap(ctx, store, region)
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "BOOTSTRAP 1 127.0.0.1:20160")
 
 	// Send a store heartbeat (should not error).
-	err = client.StoreHeartbeat(ctx, &pdpb.StoreStats{
-		StoreId:     1,
-		RegionCount: 5,
-		IsBusy:      false,
-	})
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "STORE HEARTBEAT 1 REGIONS 5")
 
 	t.Log("PD store heartbeat passed")
+}
+
+// parseScalarValue extracts a scalar value from CLI output (first line, stripped of timing).
+func parseScalarValue(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	// Return the first line, which is the scalar value.
+	// The timing line starts with '(' and is on a separate line.
+	return strings.TrimSpace(lines[0])
+}
+
+// parseUint64Value extracts a uint64 from the scalar CLI output.
+func parseUint64Value(t *testing.T, output string) uint64 {
+	t.Helper()
+	s := parseScalarValue(output)
+	v, err := strconv.ParseUint(s, 10, 64)
+	require.NoError(t, err, "failed to parse uint64 from: %q", s)
+	return v
+}
+
+// parseAskSplitRow extracts the NewRegionID and NewPeerIDs from ASK SPLIT table output.
+// rowIdx selects which row (0-based) to parse.
+func parseAskSplitRow(t *testing.T, output string, rowIdx int) (uint64, []uint64) {
+	t.Helper()
+	lines := strings.Split(output, "\n")
+	dataRows := 0
+	headerSeen := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Skip border lines
+		if strings.Trim(line, "+-") == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "|") {
+			continue
+		}
+		// First data line with | is the header
+		if !headerSeen {
+			headerSeen = true
+			continue
+		}
+		if dataRows == rowIdx {
+			// Parse this row
+			cells := strings.Split(line, "|")
+			// cells[0] is empty (before first |), cells[1] is NewRegionID, cells[2] is NewPeerIDs
+			if len(cells) < 3 {
+				t.Fatalf("unexpected ASK SPLIT row format: %s", line)
+			}
+			regionIDStr := strings.TrimSpace(cells[1])
+			peerIDsStr := strings.TrimSpace(cells[2])
+
+			regionID, err := strconv.ParseUint(regionIDStr, 10, 64)
+			require.NoError(t, err, "failed to parse NewRegionID from: %q", regionIDStr)
+
+			var peerIDs []uint64
+			for _, pidStr := range strings.Split(peerIDsStr, ",") {
+				pidStr = strings.TrimSpace(pidStr)
+				if pidStr == "" {
+					continue
+				}
+				pid, err := strconv.ParseUint(pidStr, 10, 64)
+				require.NoError(t, err, "failed to parse peer ID from: %q", pidStr)
+				peerIDs = append(peerIDs, pid)
+			}
+			return regionID, peerIDs
+		}
+		dataRows++
+	}
+	t.Fatalf("ASK SPLIT row %d not found in output: %s", rowIdx, output)
+	return 0, nil
 }

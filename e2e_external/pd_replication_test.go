@@ -2,6 +2,9 @@ package e2e_external_test
 
 import (
 	"context"
+	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +52,16 @@ func bootstrapPDCluster(t *testing.T, client pdclient.Client) {
 	require.NoError(t, err)
 }
 
+// bootstrapPDClusterViaCLI bootstraps the PD cluster via CLI if not already bootstrapped.
+func bootstrapPDClusterViaCLI(t *testing.T, pdAddr string) {
+	t.Helper()
+	out, _, err := e2elib.CLIExecRaw(t, pdAddr, "IS BOOTSTRAPPED")
+	if err == nil && strings.TrimSpace(strings.Split(out, "\n")[0]) == "true" {
+		return
+	}
+	e2elib.CLIExec(t, pdAddr, "BOOTSTRAP 1 127.0.0.1:20160")
+}
+
 // waitForPDClusterLeader waits until the PD cluster has a leader that can serve requests.
 func waitForPDClusterLeader(t *testing.T, client pdclient.Client, timeout time.Duration) {
 	t.Helper()
@@ -63,13 +76,12 @@ func waitForPDClusterLeader(t *testing.T, client pdclient.Client, timeout time.D
 // TestPDReplication_LeaderElection verifies that 3 PD nodes elect a leader.
 func TestPDReplication_LeaderElection(t *testing.T) {
 	cluster := newPDCluster(t)
-	client := cluster.Client()
 
 	// The cluster should be operational (leader elected).
-	ctx := context.Background()
-	bootstrapped, err := client.IsBootstrapped(ctx)
-	require.NoError(t, err)
-	assert.True(t, bootstrapped)
+	// Check via CLI on the first node.
+	pdAddr := cluster.Node(0).Addr()
+	out := e2elib.CLIExec(t, pdAddr, "IS BOOTSTRAPPED")
+	assert.Equal(t, "true", parseScalarValue(out))
 
 	t.Log("PD replication leader election passed")
 }
@@ -77,25 +89,23 @@ func TestPDReplication_LeaderElection(t *testing.T) {
 // TestPDReplication_WriteForwarding verifies writes on a follower are forwarded to leader.
 func TestPDReplication_WriteForwarding(t *testing.T) {
 	cluster := newPDCluster(t)
-	ctx := context.Background()
 
-	// Try each node — at least one should be a follower.
+	// Try each node -- at least one should be a follower.
 	// PutStore on a follower should be forwarded to the leader.
 	for i := 0; i < 3; i++ {
-		nodeClient := cluster.ClientForNode(i)
-		err := nodeClient.PutStore(ctx, &metapb.Store{Id: 100, Address: "127.0.0.1:99999"})
+		nodeAddr := cluster.Node(i).Addr()
+		_, _, err := e2elib.CLIExecRaw(t, nodeAddr, "PUT STORE 100 127.0.0.1:99999")
 		if err == nil {
 			// Write succeeded (either leader or forwarded).
 			break
 		}
 	}
 
-	// Wait for the store to be visible (replication may take a moment).
-	clusterClient := cluster.Client()
-	e2elib.WaitForCondition(t, 10*time.Second, "store visible after forwarding", func() bool {
-		store, err := clusterClient.GetStore(ctx, 100)
-		return err == nil && store != nil && store.GetAddress() == "127.0.0.1:99999"
-	})
+	// Wait for the store to be visible on the leader (replication may take a moment).
+	leaderAddr := cluster.Node(0).Addr()
+	e2elib.CLIWaitForCondition(t, leaderAddr, "STORE STATUS 100", func(output string) bool {
+		return strings.Contains(output, "127.0.0.1:99999")
+	}, 10*time.Second)
 
 	t.Log("PD replication write forwarding passed")
 }
@@ -103,15 +113,13 @@ func TestPDReplication_WriteForwarding(t *testing.T) {
 // TestPDReplication_Bootstrap verifies bootstrap is visible on all nodes.
 func TestPDReplication_Bootstrap(t *testing.T) {
 	cluster := newPDCluster(t)
-	ctx := context.Background()
 
 	// All nodes should report bootstrapped.
 	for i := 0; i < 3; i++ {
-		nodeClient := cluster.ClientForNode(i)
-		e2elib.WaitForCondition(t, 10*time.Second, "node bootstrapped", func() bool {
-			bootstrapped, err := nodeClient.IsBootstrapped(ctx)
-			return err == nil && bootstrapped
-		})
+		nodeAddr := cluster.Node(i).Addr()
+		e2elib.CLIWaitForCondition(t, nodeAddr, "IS BOOTSTRAPPED", func(output string) bool {
+			return strings.TrimSpace(strings.Split(output, "\n")[0]) == "true"
+		}, 10*time.Second)
 	}
 
 	t.Log("PD replication bootstrap passed")
@@ -120,14 +128,12 @@ func TestPDReplication_Bootstrap(t *testing.T) {
 // TestPDReplication_TSOMonotonicity verifies TSO is strictly increasing.
 func TestPDReplication_TSOMonotonicity(t *testing.T) {
 	cluster := newPDCluster(t)
-	client := cluster.Client()
-	ctx := context.Background()
+	pdAddr := cluster.Node(0).Addr()
 
 	var prevTS uint64
 	for i := 0; i < 100; i++ {
-		ts, err := client.GetTS(ctx)
-		require.NoError(t, err)
-		currentTS := ts.ToUint64()
+		out := e2elib.CLIExec(t, pdAddr, "TSO")
+		currentTS := parseTSOTimestamp(t, out)
 		assert.Greater(t, currentTS, prevTS, "TSO should be strictly increasing (iter %d)", i)
 		prevTS = currentTS
 	}
@@ -138,36 +144,25 @@ func TestPDReplication_TSOMonotonicity(t *testing.T) {
 // TestPDReplication_LeaderFailover verifies operations continue after leader stops.
 func TestPDReplication_LeaderFailover(t *testing.T) {
 	cluster := newPDCluster(t)
-	client := cluster.Client()
-	ctx := context.Background()
 
-	// Write initial store.
-	err := client.PutStore(ctx, &metapb.Store{Id: 10, Address: "127.0.0.1:10010"})
-	require.NoError(t, err)
+	// Write initial store via CLI on node 0.
+	e2elib.CLIExec(t, cluster.Node(0).Addr(), "PUT STORE 10 127.0.0.1:10010")
 
 	// Stop one node (may or may not be the leader).
 	require.NoError(t, cluster.StopNode(0))
 
-	// Create a client connected to the surviving nodes.
-	survivingAddrs := []string{cluster.Node(1).Addr(), cluster.Node(2).Addr()}
-	survCtx, survCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	survClient, err := pdclient.NewClient(survCtx, pdclient.Config{Endpoints: survivingAddrs})
-	survCancel()
-	require.NoError(t, err)
-	t.Cleanup(func() { survClient.Close() })
+	// Use surviving nodes for subsequent CLI operations.
+	survivingAddr := cluster.Node(1).Addr()
 
-	// Wait for operations to resume on surviving nodes.
-	e2elib.WaitForCondition(t, 30*time.Second, "PD cluster operational after failover", func() bool {
-		ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, err := survClient.GetTS(ctx2)
-		return err == nil
-	})
+	// Wait for operations to resume on surviving nodes (TSO must work).
+	e2elib.CLIWaitForCondition(t, survivingAddr, "TSO", func(output string) bool {
+		return parseTSOTimestampRaw(output) > 0
+	}, 30*time.Second)
 
-	// Verify the store we wrote is still accessible.
-	store, err := survClient.GetStore(ctx, 10)
-	require.NoError(t, err)
-	assert.Equal(t, "127.0.0.1:10010", store.GetAddress())
+	// Verify the store we wrote is still accessible via a surviving node.
+	e2elib.CLIWaitForCondition(t, survivingAddr, "STORE STATUS 10", func(output string) bool {
+		return strings.Contains(output, "127.0.0.1:10010")
+	}, 10*time.Second)
 
 	t.Log("PD replication leader failover passed")
 }
@@ -183,29 +178,25 @@ func TestPDReplication_SingleNodeCompat(t *testing.T) {
 	require.NoError(t, pd.Start())
 	require.NoError(t, pd.WaitForReady(15*time.Second))
 
-	client := pd.Client()
-	ctx := context.Background()
+	pdAddr := pd.Addr()
 
 	// Bootstrap.
-	_, err := client.Bootstrap(ctx, &metapb.Store{Id: 1, Address: "127.0.0.1:20160"},
-		&metapb.Region{Id: 1, RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
-			Peers: []*metapb.Peer{{Id: 1, StoreId: 1}}})
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "BOOTSTRAP 1 127.0.0.1:20160")
 
 	// TSO monotonicity.
 	var prevTS uint64
 	for i := 0; i < 10; i++ {
-		ts, err := client.GetTS(ctx)
-		require.NoError(t, err)
-		assert.Greater(t, ts.ToUint64(), prevTS)
-		prevTS = ts.ToUint64()
+		out := e2elib.CLIExec(t, pdAddr, "TSO")
+		ts := parseTSOTimestamp(t, out)
+		assert.Greater(t, ts, prevTS)
+		prevTS = ts
 	}
 
 	// AllocID increasing.
 	var prevID uint64
 	for i := 0; i < 10; i++ {
-		id, err := client.AllocID(ctx)
-		require.NoError(t, err)
+		out := e2elib.CLIExec(t, pdAddr, "ALLOC ID")
+		id := parseUint64Value(t, out)
 		assert.Greater(t, id, prevID)
 		prevID = id
 	}
@@ -216,13 +207,12 @@ func TestPDReplication_SingleNodeCompat(t *testing.T) {
 // TestPDReplication_IDAllocMonotonicity verifies AllocID returns unique increasing IDs.
 func TestPDReplication_IDAllocMonotonicity(t *testing.T) {
 	cluster := newPDCluster(t)
-	client := cluster.Client()
-	ctx := context.Background()
+	pdAddr := cluster.Node(0).Addr()
 
 	var prevID uint64
 	for i := 0; i < 50; i++ {
-		id, err := client.AllocID(ctx)
-		require.NoError(t, err)
+		out := e2elib.CLIExec(t, pdAddr, "ALLOC ID")
+		id := parseUint64Value(t, out)
 		assert.Greater(t, id, prevID, "AllocID should be strictly increasing (iter %d)", i)
 		prevID = id
 	}
@@ -233,21 +223,18 @@ func TestPDReplication_IDAllocMonotonicity(t *testing.T) {
 // TestPDReplication_GCSafePoint verifies GC safe point is visible on all nodes.
 func TestPDReplication_GCSafePoint(t *testing.T) {
 	cluster := newPDCluster(t)
-	client := cluster.Client()
-	ctx := context.Background()
+	pdAddr := cluster.Node(0).Addr()
 
 	// Update GC safe point.
-	newSP, err := client.UpdateGCSafePoint(ctx, 2000)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(2000), newSP)
+	out := e2elib.CLIExec(t, pdAddr, "GC SAFEPOINT SET 2000")
+	assert.Contains(t, out, "2000")
 
 	// Verify visible from each node.
 	for i := 0; i < 3; i++ {
-		nodeClient := cluster.ClientForNode(i)
-		e2elib.WaitForCondition(t, 10*time.Second, "GC safe point visible", func() bool {
-			sp, err := nodeClient.GetGCSafePoint(ctx)
-			return err == nil && sp == 2000
-		})
+		nodeAddr := cluster.Node(i).Addr()
+		e2elib.CLIWaitForCondition(t, nodeAddr, "GC SAFEPOINT", func(output string) bool {
+			return strings.Contains(output, "2000")
+		}, 10*time.Second)
 	}
 
 	t.Log("PD replication GC safe point passed")
@@ -256,14 +243,12 @@ func TestPDReplication_GCSafePoint(t *testing.T) {
 // TestPDReplication_RegionHeartbeat verifies region heartbeat works on replicated PD.
 func TestPDReplication_RegionHeartbeat(t *testing.T) {
 	cluster := newPDCluster(t)
-	client := cluster.Client()
-	ctx := context.Background()
+	pdAddr := cluster.Node(0).Addr()
 
 	// Region 1 was created during bootstrap. Wait for PD to know about it.
-	e2elib.WaitForCondition(t, 10*time.Second, "region 1 visible", func() bool {
-		region, _, err := client.GetRegionByID(ctx, 1)
-		return err == nil && region != nil && region.GetId() == 1
-	})
+	e2elib.CLIWaitForCondition(t, pdAddr, "REGION ID 1", func(output string) bool {
+		return strings.Contains(output, "Region ID:  1")
+	}, 10*time.Second)
 
 	t.Log("PD replication region heartbeat passed")
 }
@@ -271,23 +256,23 @@ func TestPDReplication_RegionHeartbeat(t *testing.T) {
 // TestPDReplication_AskBatchSplit verifies split ID allocation on replicated PD.
 func TestPDReplication_AskBatchSplit(t *testing.T) {
 	cluster := newPDCluster(t)
-	client := cluster.Client()
-	ctx := context.Background()
+	pdAddr := cluster.Node(0).Addr()
 
-	region, _, err := client.GetRegionByID(ctx, 1)
-	require.NoError(t, err)
+	// Verify region 1 exists.
+	out := e2elib.CLIExec(t, pdAddr, "REGION ID 1")
+	assert.Contains(t, out, "Region ID:  1")
 
 	// Ask for 2 splits.
-	resp, err := client.AskBatchSplit(ctx, region, 2)
-	require.NoError(t, err)
-	require.Len(t, resp.GetIds(), 2)
+	out = e2elib.CLIExec(t, pdAddr, "ASK SPLIT 1 2")
+	assert.Contains(t, out, "NewRegionID")
 
-	// All IDs should be unique.
+	// Parse both rows and verify all IDs are unique.
 	ids := make(map[uint64]bool)
-	for _, split := range resp.GetIds() {
-		assert.False(t, ids[split.GetNewRegionId()], "region IDs should be unique")
-		ids[split.GetNewRegionId()] = true
-		for _, pid := range split.GetNewPeerIds() {
+	for rowIdx := 0; rowIdx < 2; rowIdx++ {
+		regionID, peerIDs := parseAskSplitRow(t, out, rowIdx)
+		assert.False(t, ids[regionID], "region IDs should be unique")
+		ids[regionID] = true
+		for _, pid := range peerIDs {
 			assert.False(t, ids[pid], "peer IDs should be unique")
 			ids[pid] = true
 		}
@@ -300,19 +285,23 @@ func TestPDReplication_AskBatchSplit(t *testing.T) {
 // from clients connected to different nodes all produce unique IDs.
 func TestPDReplication_ConcurrentWritesFromMultipleClients(t *testing.T) {
 	cluster := newPDCluster(t)
-	ctx := context.Background()
 
 	var mu sync.Mutex
 	allIDs := make(map[uint64]bool)
 	var wg sync.WaitGroup
 
 	for i := 0; i < 3; i++ {
-		nodeClient := cluster.ClientForNode(i)
+		nodeAddr := cluster.Node(i).Addr()
 		wg.Add(1)
-		go func(c pdclient.Client) {
+		go func(addr string) {
 			defer wg.Done()
 			for j := 0; j < 10; j++ {
-				id, err := c.AllocID(ctx)
+				out, _, err := e2elib.CLIExecRaw(t, addr, "ALLOC ID")
+				if err != nil {
+					continue
+				}
+				s := parseScalarValue(out)
+				id, err := strconv.ParseUint(s, 10, 64)
 				if err != nil {
 					continue
 				}
@@ -320,7 +309,7 @@ func TestPDReplication_ConcurrentWritesFromMultipleClients(t *testing.T) {
 				allIDs[id] = true
 				mu.Unlock()
 			}
-		}(nodeClient)
+		}(nodeAddr)
 	}
 
 	wg.Wait()
@@ -332,25 +321,25 @@ func TestPDReplication_ConcurrentWritesFromMultipleClients(t *testing.T) {
 // TestPDReplication_TSOViaFollower verifies TSO works when connected to a follower.
 func TestPDReplication_TSOViaFollower(t *testing.T) {
 	cluster := newPDCluster(t)
-	ctx := context.Background()
 
-	// Try each node — at least one is a follower; TSO should work via forwarding.
+	// Try each node -- at least one is a follower; TSO should work via forwarding.
 	successCount := 0
 	for i := 0; i < 3; i++ {
-		nodeClient := cluster.ClientForNode(i)
+		nodeAddr := cluster.Node(i).Addr()
 		var prevTS uint64
 		ok := true
 		for j := 0; j < 10; j++ {
-			ts, err := nodeClient.GetTS(ctx)
+			out, _, err := e2elib.CLIExecRaw(t, nodeAddr, "TSO")
 			if err != nil {
 				ok = false
 				break
 			}
-			if ts.ToUint64() <= prevTS {
+			ts := parseTSOTimestampRaw(out)
+			if ts == 0 || ts <= prevTS {
 				ok = false
 				break
 			}
-			prevTS = ts.ToUint64()
+			prevTS = ts
 		}
 		if ok {
 			successCount++
@@ -365,21 +354,24 @@ func TestPDReplication_TSOViaFollower(t *testing.T) {
 // TestPDReplication_TSOViaFollowerForwarding verifies TSO forwarding via streaming proxy.
 func TestPDReplication_TSOViaFollowerForwarding(t *testing.T) {
 	cluster := newPDCluster(t)
-	ctx := context.Background()
 
 	// Connect to each node and verify 20 TSO calls succeed with monotonicity.
 	successCount := 0
 	for i := 0; i < 3; i++ {
-		nodeClient := cluster.ClientForNode(i)
+		nodeAddr := cluster.Node(i).Addr()
 		var prevTS uint64
 		nodeOk := true
 		for j := 0; j < 20; j++ {
-			ts, err := nodeClient.GetTS(ctx)
+			out, _, err := e2elib.CLIExecRaw(t, nodeAddr, "TSO")
 			if err != nil {
 				nodeOk = false
 				break
 			}
-			currentTS := ts.ToUint64()
+			currentTS := parseTSOTimestampRaw(out)
+			if currentTS == 0 {
+				nodeOk = false
+				break
+			}
 			if prevTS > 0 && currentTS <= prevTS {
 				nodeOk = false
 				break
@@ -398,15 +390,13 @@ func TestPDReplication_TSOViaFollowerForwarding(t *testing.T) {
 // TestPDReplication_RegionHeartbeatViaFollower verifies region heartbeat via follower forwarding.
 func TestPDReplication_RegionHeartbeatViaFollower(t *testing.T) {
 	cluster := newPDCluster(t)
-	ctx := context.Background()
 
-	// All nodes should be able to serve GetRegionByID after bootstrap.
+	// All nodes should be able to serve REGION ID 1 after bootstrap.
 	for i := 0; i < 3; i++ {
-		nodeClient := cluster.ClientForNode(i)
-		e2elib.WaitForCondition(t, 10*time.Second, "region visible via follower", func() bool {
-			region, _, err := nodeClient.GetRegionByID(ctx, 1)
-			return err == nil && region != nil
-		})
+		nodeAddr := cluster.Node(i).Addr()
+		e2elib.CLIWaitForCondition(t, nodeAddr, "REGION ID 1", func(output string) bool {
+			return strings.Contains(output, "Region ID:")
+		}, 10*time.Second)
 	}
 
 	t.Log("PD replication region heartbeat via follower passed")
@@ -419,19 +409,23 @@ func TestPDReplication_5NodeCluster(t *testing.T) {
 	cluster := e2elib.NewPDCluster(t, e2elib.PDClusterConfig{NumNodes: 5})
 	require.NoError(t, cluster.Start())
 
-	client := cluster.Client()
-	bootstrapPDCluster(t, client)
+	// Bootstrap via CLI using the first node.
+	pdAddr := cluster.Node(0).Addr()
 
-	ctx := context.Background()
+	// Wait for leader election, then bootstrap.
+	e2elib.WaitForCondition(t, 30*time.Second, "5-node cluster leader election", func() bool {
+		_, _, err := e2elib.CLIExecRaw(t, pdAddr, "IS BOOTSTRAPPED")
+		return err == nil
+	})
+	bootstrapPDClusterViaCLI(t, pdAddr)
 
 	// PutStore should work.
-	err := client.PutStore(ctx, &metapb.Store{Id: 1, Address: "127.0.0.1:20160"})
-	require.NoError(t, err)
+	e2elib.CLIExec(t, pdAddr, "PUT STORE 1 127.0.0.1:20160")
 
 	// GetTS should work.
-	ts, err := client.GetTS(ctx)
-	require.NoError(t, err)
-	assert.NotZero(t, ts.ToUint64())
+	out := e2elib.CLIExec(t, pdAddr, "TSO")
+	ts := parseTSOTimestamp(t, out)
+	assert.NotZero(t, ts)
 
 	t.Log("PD replication 5-node cluster passed")
 }
@@ -439,29 +433,46 @@ func TestPDReplication_5NodeCluster(t *testing.T) {
 // TestPDReplication_CatchUpRecovery verifies a restarted node catches up via Raft log.
 func TestPDReplication_CatchUpRecovery(t *testing.T) {
 	cluster := newPDCluster(t)
-	client := cluster.Client()
-	ctx := context.Background()
 
 	// Stop node 0.
 	require.NoError(t, cluster.StopNode(0))
 
-	// Write stores while node 0 is down.
+	// Write stores while node 0 is down, using a surviving node.
+	survivingAddr := cluster.Node(1).Addr()
 	for i := uint64(20); i < 25; i++ {
-		e2elib.WaitForCondition(t, 10*time.Second, "PutStore after node down", func() bool {
-			err := client.PutStore(ctx, &metapb.Store{Id: i, Address: "127.0.0.1:30000"})
-			return err == nil
-		})
+		stmt := fmt.Sprintf("PUT STORE %d 127.0.0.1:30000", i)
+		e2elib.CLIWaitForCondition(t, survivingAddr, stmt, func(output string) bool {
+			return true // CLIWaitForCondition only calls checkFn on success (no error).
+		}, 10*time.Second)
 	}
 
 	// Restart node 0.
 	require.NoError(t, cluster.RestartNode(0))
 
-	// Wait for node 0 to catch up.
-	node0Client := cluster.ClientForNode(0)
-	e2elib.WaitForCondition(t, 30*time.Second, "node 0 catch up", func() bool {
-		store, err := node0Client.GetStore(ctx, 24)
-		return err == nil && store != nil
-	})
+	// Wait for node 0 to catch up — verify store 24 is visible via node 0.
+	node0Addr := cluster.Node(0).Addr()
+	e2elib.CLIWaitForCondition(t, node0Addr, "STORE STATUS 24", func(output string) bool {
+		return strings.Contains(output, "127.0.0.1:30000")
+	}, 30*time.Second)
 
 	t.Log("PD replication catch-up recovery passed")
 }
+
+// parseTSOTimestampRaw extracts the raw timestamp from TSO output without fataling.
+// Returns 0 if parsing fails.
+func parseTSOTimestampRaw(output string) uint64 {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Timestamp:") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				ts, err := strconv.ParseUint(parts[1], 10, 64)
+				if err == nil {
+					return ts
+				}
+			}
+		}
+	}
+	return 0
+}
+

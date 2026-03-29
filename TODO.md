@@ -1,57 +1,42 @@
-# gookv-cli Implementation Tracker
+# E2E CLI Migration
 
-## Step 1: Scaffold + PD accessor
-- [x] Create cmd/gookv-cli/main.go (flags, client init, mode dispatch)
-- [x] Add PD() accessor to pkg/client/client.go
-- [x] Add gookv-cli to Makefile build target
+## Phase 1: Foundation
+- [x] Add --addr flag to gookv-cli (main.go)
+- [x] Implement directRawKV adapter (direct.go)
+- [x] Add new CmdType constants to parser.go (BOOTSTRAP, PUT STORE, ALLOC ID, IS BOOTSTRAPPED, ASK SPLIT, REPORT SPLIT, STORE HEARTBEAT)
+- [x] Add parser cases for new commands
+- [x] Extend GC SAFEPOINT parsing for SET subcommand
+- [x] Extend pdAPI interface with 8 new methods
+- [x] Implement 7 new executor handlers + extend GC handler
+- [x] Add dispatch cases in Exec()
+- [x] Unit tests: parser tests for new commands
+- [x] Unit tests: executor tests for new handlers
+- [x] Add "gookv-cli" to e2elib FindBinary
+- [x] Implement e2elib CLI wrappers (cli.go): CLIExec, CLINodeExec, CLIExecRaw
+- [x] Implement convenience wrappers: CLIPut, CLIGet, CLIDelete, CLINodeGet
+- [x] Implement output parsing: parseScalar, countTableRows, parseLeaderStoreID, parseCLIGetOutput
+- [x] Unit tests for output parsing functions
+- [x] go vet + make build verification
+- [x] Convert Category A tests (24 tests)
+- [x] Convert Category B tests (7 tests, --addr) — TestRawBatchScan deferred (no BSCAN)
+- [x] Implement polling/waiting CLI helpers (CLIWaitForCondition, CLIWaitForStoreCount, CLIWaitForRegionLeader, CLIWaitForRegionCount)
+- [x] Implement CLIParallel
 
-## Step 2: Tokenizer + Statement Splitter
-- [x] Implement Tokenize() in cmd/gookv-cli/parser.go
-- [x] Implement SplitStatements() in cmd/gookv-cli/parser.go
-- [x] Implement IsMetaCommand() in cmd/gookv-cli/parser.go
-- [x] Unit tests for tokenizer + splitter
+## Phase 2: PD Admin Commands
+- [x] Convert Category C tests (16 tests)
 
-## Step 3: Command Parser
-- [x] Implement ParseCommand() with full command dispatch
-- [x] Context-sensitive GET/SET/DELETE dispatch
-- [x] Unit tests for command parser
+## Phase 3: Hybrid Tests
+- [x] Convert Category D tests (15 tests)
 
-## Step 4: Output Formatter
-- [x] Implement Formatter with table/plain/hex modes
-- [x] Timing display support
-- [x] Unit tests for formatter
-
-## Step 5: Raw KV Executor
-- [x] Implement handlers for all 12 RawKVClient operations
-- [x] Unit tests with mock rawKVAPI interface
-
-## Step 6: Transaction Executor
-- [x] Implement BEGIN/SET/GET/DELETE/BGET/COMMIT/ROLLBACK
-- [x] Transaction state tracking
-- [x] Unit tests for txn lifecycle
-
-## Step 7: Admin Executor
-- [x] Implement STORE LIST/STATUS, REGION/REGION LIST/REGION ID
-- [x] Implement CLUSTER INFO, TSO, GC SAFEPOINT, STATUS
-- [x] Unit tests with mock PD client
-
-## Step 8: REPL Loop
-- [x] Implement readline integration with prompt states
-- [x] History file, Ctrl-C/Ctrl-D handling
-- [x] Stdin pipe detection for batch mode
-
-## Step 9: Meta Commands
-- [x] Implement \help, \quit, \timing, \format, \pagesize
-- [x] HELP; and EXIT; keyword aliases
-
-## Step 10: Build Integration
-- [x] Add readline + tablewriter to go.mod
-- [x] Verify make build produces gookv-cli
-- [x] go vet clean
-- [x] All tests pass
+## Deferred
+- TestRawBatchScan: RawBatchScan has no CLI equivalent (BSCAN not implemented; would need new RawKVClient.BatchScan method)
 
 ## Final Verification
-- [x] TODO.md has no unchecked items
-- [x] No new TODO/FIXME comments in cmd/gookv-cli/
-- [x] make build produces gookv-cli binary
-- [x] ./gookv-cli --version prints version
+- [x] go vet ./... clean
+- [x] make build succeeds
+- [x] make test passes
+- [x] make test-e2e passes
+- [x] make test-e2e-external — all test groups pass individually; full suite exceeds 900s Makefile timeout (running with 1800s)
+- [x] TODO.md reconciliation — no unchecked items (except deferred TestRawBatchScan)
+- [x] No stale TODO/FIXME comments in modified files
+- [x] Report deferred items

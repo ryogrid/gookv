@@ -327,6 +327,15 @@ const (
 	CmdMetaFormat  // \format table/plain/hex
 	CmdMetaPagesize // \pagesize N
 	CmdMetaHex     // \x toggle
+
+	// PD admin (new for e2e CLI migration)
+	CmdBootstrap      // BOOTSTRAP <storeID> <addr> [<regionID>]
+	CmdPutStore       // PUT STORE <id> <addr>
+	CmdAllocID        // ALLOC ID
+	CmdIsBootstrapped // IS BOOTSTRAPPED
+	CmdAskSplit       // ASK SPLIT <regionID> <count>
+	CmdReportSplit    // REPORT SPLIT <leftRegionID> <rightRegionID> <splitKey>
+	CmdStoreHeartbeat // STORE HEARTBEAT <storeID> [REGIONS <n>]
 )
 
 // CAS NOT_EXIST flag bit.
@@ -406,6 +415,16 @@ func ParseCommand(tokens []Token, inTxn bool) (Command, error) {
 		return parseNoArgs(CmdHelp, args, "HELP")
 	case "EXIT", "QUIT":
 		return parseNoArgs(CmdExit, args, keyword)
+	case "BOOTSTRAP":
+		return parseBootstrap(args)
+	case "ALLOC":
+		return parseAlloc(args)
+	case "IS":
+		return parseIs(args)
+	case "ASK":
+		return parseAsk(args)
+	case "REPORT":
+		return parseReport(args)
 	default:
 		return Command{}, fmt.Errorf("unknown command: %s", keyword)
 	}
@@ -478,6 +497,17 @@ func parseGet(args []Token, inTxn bool) (Command, error) {
 func parsePut(args []Token) (Command, error) {
 	if len(args) < 2 {
 		return Command{}, fmt.Errorf("PUT requires at least 2 arguments (key value), got %d", len(args))
+	}
+	// Check for PUT STORE <id> <addr>
+	if strings.ToUpper(string(args[0].Value)) == "STORE" {
+		if len(args) != 3 {
+			return Command{}, fmt.Errorf("PUT STORE requires exactly 2 arguments (id addr), got %d", len(args)-1)
+		}
+		id, err := strconv.ParseInt(string(args[1].Value), 10, 64)
+		if err != nil {
+			return Command{}, fmt.Errorf("PUT STORE: invalid store ID: %s", args[1].Raw)
+		}
+		return Command{Type: CmdPutStore, IntArg: id, StrArg: string(args[2].Value)}, nil
 	}
 	if len(args) == 2 {
 		return Command{Type: CmdPut, Args: [][]byte{args[0].Value, args[1].Value}}, nil
@@ -662,7 +692,7 @@ func parseNoArgs(cmdType CommandType, args []Token, name string) (Command, error
 
 func parseStore(args []Token) (Command, error) {
 	if len(args) == 0 {
-		return Command{}, fmt.Errorf("STORE requires a subcommand (LIST or STATUS)")
+		return Command{}, fmt.Errorf("STORE requires a subcommand (LIST, STATUS, or HEARTBEAT)")
 	}
 	sub := strings.ToUpper(string(args[0].Value))
 	switch sub {
@@ -680,8 +710,26 @@ func parseStore(args []Token) (Command, error) {
 			return Command{}, fmt.Errorf("STORE STATUS: invalid store ID: %s", args[1].Raw)
 		}
 		return Command{Type: CmdStoreStatus, IntArg: id}, nil
+	case "HEARTBEAT":
+		if len(args) < 2 {
+			return Command{}, fmt.Errorf("STORE HEARTBEAT requires a store ID")
+		}
+		id, err := strconv.ParseInt(string(args[1].Value), 10, 64)
+		if err != nil {
+			return Command{}, fmt.Errorf("STORE HEARTBEAT: invalid store ID: %s", args[1].Raw)
+		}
+		cmd := Command{Type: CmdStoreHeartbeat, IntArg: id}
+		// Optional REGIONS <n>
+		if len(args) >= 4 && strings.ToUpper(string(args[2].Value)) == "REGIONS" {
+			n, err := strconv.ParseInt(string(args[3].Value), 10, 64)
+			if err != nil {
+				return Command{}, fmt.Errorf("STORE HEARTBEAT REGIONS: invalid number: %s", args[3].Raw)
+			}
+			cmd.Args = [][]byte{[]byte(strconv.FormatInt(n, 10))}
+		}
+		return cmd, nil
 	default:
-		return Command{}, fmt.Errorf("unknown STORE subcommand: %s (expected LIST or STATUS)", sub)
+		return Command{}, fmt.Errorf("unknown STORE subcommand: %s (expected LIST, STATUS, or HEARTBEAT)", sub)
 	}
 }
 
@@ -735,10 +783,18 @@ func parseGC(args []Token) (Command, error) {
 	if len(args) == 0 || strings.ToUpper(string(args[0].Value)) != "SAFEPOINT" {
 		return Command{}, fmt.Errorf("GC requires subcommand SAFEPOINT")
 	}
-	if len(args) != 1 {
-		return Command{}, fmt.Errorf("GC SAFEPOINT takes no additional arguments")
+	if len(args) == 1 {
+		return Command{Type: CmdGCSafepoint}, nil
 	}
-	return Command{Type: CmdGCSafepoint}, nil
+	// GC SAFEPOINT SET <timestamp>
+	if len(args) == 3 && strings.ToUpper(string(args[1].Value)) == "SET" {
+		ts, err := strconv.ParseUint(string(args[2].Value), 10, 64)
+		if err != nil {
+			return Command{}, fmt.Errorf("GC SAFEPOINT SET: invalid timestamp: %s", args[2].Raw)
+		}
+		return Command{Type: CmdGCSafepoint, IntArg: int64(ts), StrArg: "SET"}, nil
+	}
+	return Command{}, fmt.Errorf("GC SAFEPOINT: unexpected arguments (expected: GC SAFEPOINT [SET <ts>])")
 }
 
 func parseStatus(args []Token) (Command, error) {
@@ -749,4 +805,83 @@ func parseStatus(args []Token) (Command, error) {
 		return Command{Type: CmdStatus, StrArg: string(args[0].Value)}, nil
 	}
 	return Command{}, fmt.Errorf("STATUS takes 0 or 1 arguments, got %d", len(args))
+}
+
+// ---------------------------------------------------------------------------
+// PD admin parsers (e2e CLI migration)
+// ---------------------------------------------------------------------------
+
+func parseBootstrap(args []Token) (Command, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return Command{}, fmt.Errorf("BOOTSTRAP requires 2-3 arguments (storeID addr [regionID]), got %d", len(args))
+	}
+	storeID, err := strconv.ParseInt(string(args[0].Value), 10, 64)
+	if err != nil {
+		return Command{}, fmt.Errorf("BOOTSTRAP: invalid store ID: %s", args[0].Raw)
+	}
+	addr := string(args[1].Value)
+	cmd := Command{Type: CmdBootstrap, IntArg: storeID, StrArg: addr}
+	if len(args) == 3 {
+		regionID, err := strconv.ParseInt(string(args[2].Value), 10, 64)
+		if err != nil {
+			return Command{}, fmt.Errorf("BOOTSTRAP: invalid region ID: %s", args[2].Raw)
+		}
+		cmd.Args = [][]byte{[]byte(strconv.FormatInt(regionID, 10))}
+	}
+	return cmd, nil
+}
+
+func parseAlloc(args []Token) (Command, error) {
+	if len(args) != 1 || strings.ToUpper(string(args[0].Value)) != "ID" {
+		return Command{}, fmt.Errorf("expected ALLOC ID")
+	}
+	return Command{Type: CmdAllocID}, nil
+}
+
+func parseIs(args []Token) (Command, error) {
+	if len(args) != 1 || strings.ToUpper(string(args[0].Value)) != "BOOTSTRAPPED" {
+		return Command{}, fmt.Errorf("expected IS BOOTSTRAPPED")
+	}
+	return Command{Type: CmdIsBootstrapped}, nil
+}
+
+func parseAsk(args []Token) (Command, error) {
+	if len(args) < 1 || strings.ToUpper(string(args[0].Value)) != "SPLIT" {
+		return Command{}, fmt.Errorf("expected ASK SPLIT <regionID> <count>")
+	}
+	if len(args) != 3 {
+		return Command{}, fmt.Errorf("ASK SPLIT requires exactly 2 arguments (regionID count), got %d", len(args)-1)
+	}
+	regionID, err := strconv.ParseInt(string(args[1].Value), 10, 64)
+	if err != nil {
+		return Command{}, fmt.Errorf("ASK SPLIT: invalid region ID: %s", args[1].Raw)
+	}
+	count, err := strconv.ParseInt(string(args[2].Value), 10, 64)
+	if err != nil {
+		return Command{}, fmt.Errorf("ASK SPLIT: invalid count: %s", args[2].Raw)
+	}
+	return Command{Type: CmdAskSplit, IntArg: regionID, Args: [][]byte{[]byte(strconv.FormatInt(count, 10))}}, nil
+}
+
+func parseReport(args []Token) (Command, error) {
+	if len(args) < 1 || strings.ToUpper(string(args[0].Value)) != "SPLIT" {
+		return Command{}, fmt.Errorf("expected REPORT SPLIT <leftRegionID> <rightRegionID> <splitKey>")
+	}
+	if len(args) != 4 {
+		return Command{}, fmt.Errorf("REPORT SPLIT requires exactly 3 arguments (leftRegionID rightRegionID splitKey), got %d", len(args)-1)
+	}
+	leftID, err := strconv.ParseInt(string(args[1].Value), 10, 64)
+	if err != nil {
+		return Command{}, fmt.Errorf("REPORT SPLIT: invalid left region ID: %s", args[1].Raw)
+	}
+	rightID, err := strconv.ParseInt(string(args[2].Value), 10, 64)
+	if err != nil {
+		return Command{}, fmt.Errorf("REPORT SPLIT: invalid right region ID: %s", args[2].Raw)
+	}
+	splitKey := args[3].Value
+	return Command{
+		Type:   CmdReportSplit,
+		IntArg: leftID,
+		Args:   [][]byte{[]byte(strconv.FormatInt(rightID, 10)), splitKey},
+	}, nil
 }

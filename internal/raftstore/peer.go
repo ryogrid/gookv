@@ -265,6 +265,23 @@ func (p *Peer) PeerID() uint64 { return p.peerID }
 // IsLeader returns whether this peer believes it is the Raft leader.
 func (p *Peer) IsLeader() bool { return p.isLeader.Load() }
 
+// GetLeaderPeer returns the metapb.Peer of the current Raft leader, or nil if unknown.
+func (p *Peer) GetLeaderPeer() *metapb.Peer {
+	lead := p.rawNode.Status().Lead
+	if lead == 0 {
+		return nil
+	}
+	p.regionMu.RLock()
+	region := p.region
+	p.regionMu.RUnlock()
+	for _, peer := range region.GetPeers() {
+		if peer.GetId() == lead {
+			return peer
+		}
+	}
+	return nil
+}
+
 // IsStopped returns whether this peer has been stopped.
 func (p *Peer) IsStopped() bool { return p.stopped.Load() }
 

@@ -1069,9 +1069,22 @@ func (svc *tikvService) validateRegionContext(reqCtx *kvrpcpb.Context, key []byt
 		}
 	}
 	if !peer.IsLeader() {
+		nl := &errorpb.NotLeader{RegionId: regionID}
+		leaderPeer := peer.GetLeaderPeer()
+		if leaderPeer != nil {
+			nl.Leader = leaderPeer
+		}
+		status := peer.Status()
+		slog.Warn("not leader",
+			"region", regionID,
+			"myPeer", peer.PeerID(),
+			"raftLead", status.Lead,
+			"leaderPeer", leaderPeer,
+			"isLeader", peer.IsLeader(),
+		)
 		return &errorpb.Error{
 			Message:   fmt.Sprintf("not leader for region %d", regionID),
-			NotLeader: &errorpb.NotLeader{RegionId: regionID},
+			NotLeader: nl,
 		}
 	}
 	// Check region epoch.

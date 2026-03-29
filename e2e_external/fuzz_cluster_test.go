@@ -707,17 +707,18 @@ func TestFuzzCluster(t *testing.T) {
 	}
 
 	// Verify initial invariant. Retry because post-split leader propagation takes time.
+	// ResetClient once to start fresh, then let the client learn leaders via retries.
+	cluster.ResetClient()
 	initClient := &fuzzClient{fc: fc, rng: rand.New(rand.NewPCG(uint64(seed), uint64(seed>>32)))}
 	var initTotal int
 	var initErr error
-	for attempt := 0; attempt < 5; attempt++ {
-		cluster.ResetClient()
+	for attempt := 0; attempt < 10; attempt++ {
 		initTotal, initErr = initClient.doAudit()
 		if initErr == nil {
 			break
 		}
 		t.Logf("Initial audit attempt %d: %v (retrying...)", attempt+1, initErr)
-		time.Sleep(10 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
 	require.NoError(t, initErr, "initial audit failed after retries")
 	require.Equal(t, fuzzExpectedTotal, initTotal, "initial total balance mismatch")
@@ -804,14 +805,13 @@ func TestFuzzCluster(t *testing.T) {
 	}
 	var finalTotal int
 	var finalErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 10; attempt++ {
 		finalTotal, finalErr = auditClient.doAudit()
 		if finalErr == nil {
 			break
 		}
 		t.Logf("Final audit attempt %d failed: %v (retrying...)", attempt+1, finalErr)
 		time.Sleep(5 * time.Second)
-		cluster.ResetClient()
 	}
 	require.NoError(t, finalErr, "final audit failed after retries")
 	assert.Equal(t, fuzzExpectedTotal, finalTotal, "final total balance mismatch")

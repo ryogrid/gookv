@@ -29,7 +29,7 @@
 - [x] Convert Category D tests (15 tests)
 
 ## Deferred
-- TestRawBatchScan: RawBatchScan has no CLI equivalent (BSCAN not implemented; would need new RawKVClient.BatchScan method)
+- (none — all items implemented)
 
 ## Final Verification
 - [x] go vet ./... clean

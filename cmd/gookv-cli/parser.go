@@ -336,6 +336,7 @@ const (
 	CmdAskSplit       // ASK SPLIT <regionID> <count>
 	CmdReportSplit    // REPORT SPLIT <leftRegionID> <rightRegionID> <splitKey>
 	CmdStoreHeartbeat // STORE HEARTBEAT <storeID> [REGIONS <n>]
+	CmdBatchScan      // BSCAN <s1> <e1> [<s2> <e2> ...] [EACH_LIMIT <n>]
 )
 
 // CAS NOT_EXIST flag bit.
@@ -389,6 +390,8 @@ func ParseCommand(tokens []Token, inTxn bool) (Command, error) {
 		return parseBPut(args)
 	case "BDELETE":
 		return parseBDelete(args)
+	case "BSCAN":
+		return parseBScan(args)
 	case "CAS":
 		return parseCAS(args)
 	case "CHECKSUM":
@@ -884,4 +887,40 @@ func parseReport(args []Token) (Command, error) {
 		IntArg: leftID,
 		Args:   [][]byte{[]byte(strconv.FormatInt(rightID, 10)), splitKey},
 	}, nil
+}
+
+func parseBScan(args []Token) (Command, error) {
+	// BSCAN <s1> <e1> [<s2> <e2> ...] [EACH_LIMIT <n>]
+	if len(args) < 2 {
+		return Command{}, fmt.Errorf("BSCAN requires at least 2 arguments (start end), got %d", len(args))
+	}
+
+	// Check for optional EACH_LIMIT at the end.
+	var eachLimit int64
+	remaining := args
+	if len(args) >= 2 {
+		secondLast := strings.ToUpper(string(args[len(args)-2].Value))
+		if secondLast == "EACH_LIMIT" {
+			limit, err := strconv.ParseInt(string(args[len(args)-1].Value), 10, 64)
+			if err != nil {
+				return Command{}, fmt.Errorf("BSCAN EACH_LIMIT: invalid number: %s", args[len(args)-1].Raw)
+			}
+			eachLimit = limit
+			remaining = args[:len(args)-2]
+		}
+	}
+
+	if len(remaining)%2 != 0 {
+		return Command{}, fmt.Errorf("BSCAN requires an even number of range arguments (start end pairs), got %d", len(remaining))
+	}
+	if len(remaining) == 0 {
+		return Command{}, fmt.Errorf("BSCAN requires at least one range (start end)")
+	}
+
+	// Pack all range keys as Args.
+	rangeArgs := make([][]byte, len(remaining))
+	for i, a := range remaining {
+		rangeArgs[i] = a.Value
+	}
+	return Command{Type: CmdBatchScan, Args: rangeArgs, IntArg: eachLimit}, nil
 }

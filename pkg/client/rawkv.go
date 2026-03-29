@@ -337,6 +337,26 @@ func (c *RawKVClient) Scan(ctx context.Context, startKey, endKey []byte, limit i
 	return result, nil
 }
 
+// KeyRange represents a key range for batch operations.
+type KeyRange struct {
+	StartKey []byte
+	EndKey   []byte
+}
+
+// BatchScan retrieves key-value pairs from multiple ranges, up to eachLimit per range.
+// Each range is scanned independently, crossing region boundaries as needed.
+func (c *RawKVClient) BatchScan(ctx context.Context, ranges []KeyRange, eachLimit int) ([]KvPair, error) {
+	var result []KvPair
+	for _, r := range ranges {
+		pairs, err := c.Scan(ctx, r.StartKey, r.EndKey, eachLimit)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, pairs...)
+	}
+	return result, nil
+}
+
 // DeleteRange deletes all keys in a range, spanning region boundaries.
 func (c *RawKVClient) DeleteRange(ctx context.Context, startKey, endKey []byte) error {
 	currentKey := startKey

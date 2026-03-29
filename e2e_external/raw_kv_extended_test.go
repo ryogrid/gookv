@@ -1,81 +1,53 @@
 package e2e_external_test
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ryogrid/gookv/pkg/e2elib"
 )
 
-// TestRawBatchScan: Deferred — RawBatchScan has no CLI equivalent (BSCAN not implemented)
+// TestRawBatchScan tests the BSCAN command via CLI (--addr mode).
 func TestRawBatchScan(t *testing.T) {
-
 	node := e2elib.NewStandaloneNode(t)
-
-	client := e2elib.DialTikvClient(t, node.Addr())
-	ctx := context.Background()
+	addr := node.Addr()
 
 	// Write keys in two separate ranges.
-	// Range 1: "bs-a-00" .. "bs-a-04"
-	// Range 2: "bs-b-00" .. "bs-b-02"
 	for i := 0; i < 5; i++ {
-		_, err := client.RawPut(ctx, &kvrpcpb.RawPutRequest{
-			Key:   []byte(fmt.Sprintf("bs-a-%02d", i)),
-			Value: []byte(fmt.Sprintf("val-a-%02d", i)),
-		})
-		require.NoError(t, err)
+		e2elib.CLINodeExec(t, addr, fmt.Sprintf("PUT bs-a-%02d val-a-%02d", i, i))
 	}
 	for i := 0; i < 3; i++ {
-		_, err := client.RawPut(ctx, &kvrpcpb.RawPutRequest{
-			Key:   []byte(fmt.Sprintf("bs-b-%02d", i)),
-			Value: []byte(fmt.Sprintf("val-b-%02d", i)),
-		})
-		require.NoError(t, err)
+		e2elib.CLINodeExec(t, addr, fmt.Sprintf("PUT bs-b-%02d val-b-%02d", i, i))
 	}
 
-	// BatchScan both ranges.
-	batchScanResp, err := client.RawBatchScan(ctx, &kvrpcpb.RawBatchScanRequest{
-		Ranges: []*kvrpcpb.KeyRange{
-			{StartKey: []byte("bs-a-00"), EndKey: []byte("bs-a-99")},
-			{StartKey: []byte("bs-b-00"), EndKey: []byte("bs-b-99")},
-		},
-		EachLimit: 10,
-	})
-	require.NoError(t, err)
+	// BatchScan both ranges with EACH_LIMIT 10.
+	out := e2elib.CLINodeExec(t, addr, "BSCAN bs-a-00 bs-a-99 bs-b-00 bs-b-99 EACH_LIMIT 10")
 	// Expect 5 + 3 = 8 total pairs across both ranges.
-	assert.Len(t, batchScanResp.GetKvs(), 8,
-		"should get 8 KV pairs total across both ranges")
-
-	// Verify that both range prefixes are represented.
 	aCount, bCount := 0, 0
-	for _, kv := range batchScanResp.GetKvs() {
-		if len(kv.GetKey()) >= 4 && string(kv.GetKey()[:4]) == "bs-a" {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "bs-a-") {
 			aCount++
 		}
-		if len(kv.GetKey()) >= 4 && string(kv.GetKey()[:4]) == "bs-b" {
+		if strings.Contains(line, "bs-b-") {
 			bCount++
 		}
 	}
-	assert.Equal(t, 5, aCount, "range A should have 5 keys")
-	assert.Equal(t, 3, bCount, "range B should have 3 keys")
+	assert.Equal(t, 5, aCount, "range A should have 5 keys, output:\n%s", out)
+	assert.Equal(t, 3, bCount, "range B should have 3 keys, output:\n%s", out)
 
-	// Test with EachLimit=2: should return at most 2 per range.
-	batchScanResp2, err := client.RawBatchScan(ctx, &kvrpcpb.RawBatchScanRequest{
-		Ranges: []*kvrpcpb.KeyRange{
-			{StartKey: []byte("bs-a-00"), EndKey: []byte("bs-a-99")},
-			{StartKey: []byte("bs-b-00"), EndKey: []byte("bs-b-99")},
-		},
-		EachLimit: 2,
-	})
-	require.NoError(t, err)
-	assert.Len(t, batchScanResp2.GetKvs(), 4,
-		"should get 2+2=4 KV pairs with EachLimit=2")
+	// Test with EACH_LIMIT 2: should return at most 2 per range.
+	out2 := e2elib.CLINodeExec(t, addr, "BSCAN bs-a-00 bs-a-99 bs-b-00 bs-b-99 EACH_LIMIT 2")
+	total := 0
+	for _, line := range strings.Split(out2, "\n") {
+		if strings.Contains(line, "bs-a-") || strings.Contains(line, "bs-b-") {
+			total++
+		}
+	}
+	assert.Equal(t, 4, total, "should get 2+2=4 KV pairs with EACH_LIMIT 2, output:\n%s", out2)
 
 	t.Log("RawBatchScan passed")
 }

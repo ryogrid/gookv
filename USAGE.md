@@ -314,9 +314,17 @@ PD will automatically schedule region replicas onto the new node. Use `gookv-ctl
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--pd` | `127.0.0.1:2379` | PD server address(es), comma-separated |
+| `--addr` | | Connect directly to a KV node (bypasses PD; mutually exclusive with `--pd`) |
 | `-c` | | Execute statement(s) and exit |
 | `--version` | | Print version and exit |
 | `--hex` | | Start in hex display mode |
+
+**`--addr` mode**: Connects directly to a single KV node's gRPC endpoint without PD-based region routing. Only raw KV commands are available (no transactions, no PD admin commands). Useful for testing a standalone node.
+
+```bash
+# Connect to a standalone node directly
+./gookv-cli --addr 127.0.0.1:20160 -c "PUT key val; GET key;"
+```
 
 ### Statement Syntax
 
@@ -374,6 +382,7 @@ Available raw KV commands:
 | `DELETE RANGE <start> <end>` | Delete a range |
 | `CAS <key> <new> <old> [NOT_EXIST]` | Compare and swap |
 | `CHECKSUM [<start> <end>]` | Compute range checksum |
+| `BSCAN <s1> <e1> [<s2> <e2> ...] [EACH_LIMIT <n>]` | Batch scan multiple ranges |
 
 ### Transactions
 
@@ -453,7 +462,22 @@ Available administrative commands:
 | `CLUSTER INFO` | Show cluster topology |
 | `TSO` | Allocate and display a timestamp |
 | `GC SAFEPOINT` | Show GC safe point |
+| `GC SAFEPOINT SET <ts>` | Update GC safe point |
 | `STATUS [<addr>]` | Query server health |
+
+### PD Admin Commands (Developer / E2E Testing)
+
+These commands interact with PD's internal cluster management APIs. They are primarily used by the E2E test framework (`pkg/e2elib`) to set up and verify test scenarios programmatically. They are not needed for normal cluster operation.
+
+| Command | Description |
+|---------|-------------|
+| `BOOTSTRAP <storeID> <addr> [<regionID>]` | Bootstrap the cluster with an initial store and region |
+| `PUT STORE <id> <addr>` | Register or update a store in PD |
+| `ALLOC ID` | Allocate a new unique ID from PD |
+| `IS BOOTSTRAPPED` | Check whether the cluster has been bootstrapped |
+| `ASK SPLIT <regionID> <count>` | Request new region/peer IDs for a split operation |
+| `REPORT SPLIT <leftID> <rightID> <splitKey>` | Report a completed split to PD |
+| `STORE HEARTBEAT <storeID> [REGIONS <n>]` | Send a store heartbeat to PD |
 
 ### Meta Commands (Backslash)
 

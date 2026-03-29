@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -119,6 +120,29 @@ func (m *mockRawKV) Checksum(_ context.Context, startKey, endKey []byte) (uint64
 		return m.checksumFn(nil, startKey, endKey)
 	}
 	return 0xDEADBEEF, 42, 1024, nil
+}
+
+func (m *mockRawKV) BatchScan(_ context.Context, ranges []client.KeyRange, eachLimit int) ([]client.KvPair, error) {
+	var result []client.KvPair
+	for _, r := range ranges {
+		count := 0
+		// Collect keys in range, sorted.
+		var keys []string
+		for k := range m.data {
+			if k >= string(r.StartKey) && (len(r.EndKey) == 0 || k < string(r.EndKey)) {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if count >= eachLimit {
+				break
+			}
+			result = append(result, client.KvPair{Key: []byte(k), Value: m.data[k]})
+			count++
+		}
+	}
+	return result, nil
 }
 
 // ---------------------------------------------------------------------------

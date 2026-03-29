@@ -34,6 +34,7 @@ type rawKVAPI interface {
 	DeleteRange(ctx context.Context, startKey, endKey []byte) error
 	CompareAndSwap(ctx context.Context, key, value, prevValue []byte, prevNotExist bool) (bool, []byte, error)
 	Checksum(ctx context.Context, startKey, endKey []byte) (uint64, uint64, uint64, error)
+	BatchScan(ctx context.Context, ranges []client.KeyRange, eachLimit int) ([]client.KvPair, error)
 }
 
 // txnKVAPI is the subset of client.TxnKVClient methods used by the executor.
@@ -156,6 +157,8 @@ func (e *Executor) Exec(ctx context.Context, cmd Command) (*Result, error) {
 		return e.execRawCAS(ctx, cmd)
 	case CmdChecksum:
 		return e.execRawChecksum(ctx, cmd)
+	case CmdBatchScan:
+		return e.execRawBatchScan(ctx, cmd)
 
 	// Transactional
 	case CmdBegin:
@@ -386,6 +389,32 @@ func (e *Executor) execRawChecksum(ctx context.Context, cmd Command) (*Result, e
 		TotalKvs:   totalKvs,
 		TotalBytes: totalBytes,
 	}, nil
+}
+
+func (e *Executor) execRawBatchScan(ctx context.Context, cmd Command) (*Result, error) {
+	args := cmd.Args
+	if len(args)%2 != 0 {
+		return nil, fmt.Errorf("BSCAN requires pairs of start/end keys")
+	}
+	eachLimit := int(cmd.IntArg)
+	if eachLimit <= 0 {
+		eachLimit = e.defaultScanLimit
+	}
+
+	var ranges []client.KeyRange
+	for i := 0; i < len(args); i += 2 {
+		ranges = append(ranges, client.KeyRange{StartKey: args[i], EndKey: args[i+1]})
+	}
+
+	pairs, err := e.rawKV.BatchScan(ctx, ranges, eachLimit)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]KvPairResult, len(pairs))
+	for i, p := range pairs {
+		rows[i] = KvPairResult{Key: p.Key, Value: p.Value}
+	}
+	return &Result{Type: ResultRows, Rows: rows}, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -192,3 +192,28 @@ func (d *directRawKV) Checksum(ctx context.Context, startKey, endKey []byte) (ui
 	}
 	return resp.GetChecksum(), resp.GetTotalKvs(), resp.GetTotalBytes(), nil
 }
+
+func (d *directRawKV) BatchScan(ctx context.Context, ranges []client.KeyRange, eachLimit int) ([]client.KvPair, error) {
+	var kvRanges []*kvrpcpb.KeyRange
+	for _, r := range ranges {
+		kvRanges = append(kvRanges, &kvrpcpb.KeyRange{StartKey: r.StartKey, EndKey: r.EndKey})
+	}
+	resp, err := d.tikv.RawBatchScan(ctx, &kvrpcpb.RawBatchScanRequest{
+		Ranges:    kvRanges,
+		EachLimit: uint32(eachLimit),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp.GetRegionError() != nil {
+		return nil, fmt.Errorf("RawBatchScan: region error: %s", resp.GetRegionError().GetMessage())
+	}
+	var pairs []client.KvPair
+	for _, kv := range resp.GetKvs() {
+		if kv.GetError() != nil {
+			continue
+		}
+		pairs = append(pairs, client.KvPair{Key: kv.GetKey(), Value: kv.GetValue()})
+	}
+	return pairs, nil
+}

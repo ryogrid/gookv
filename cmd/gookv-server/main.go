@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -41,6 +42,7 @@ func main() {
 	initialCluster := flag.String("initial-cluster", "", "Initial cluster topology: storeID=addr,... (e.g. 1=127.0.0.1:20160,2=127.0.0.1:20161)")
 	logLevel := flag.String("log-level", "", "Log level: debug, info, warn, error (overrides config)")
 	logFile := flag.String("log-file", "", "Log file path (overrides config)")
+	maxPeerCount := flag.Int("max-peer-count", 3, "Maximum replicas per region (must match PD --max-peer-count)")
 	flag.Parse()
 
 	// Load configuration.
@@ -203,8 +205,9 @@ func main() {
 				bsCtx, bsCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				bootstrapped, _ := pdClient.IsBootstrapped(bsCtx)
 				if !bootstrapped {
-					peers := make([]*metapb.Peer, 0, len(clusterMap))
-					for sid := range clusterMap {
+					bsSIDs, _ := bootstrapStoreIDs(clusterMap, *maxPeerCount)
+					peers := make([]*metapb.Peer, 0, len(bsSIDs))
+					for _, sid := range bsSIDs {
 						peers = append(peers, &metapb.Peer{Id: sid, StoreId: sid})
 					}
 					region := &metapb.Region{Id: 1, Peers: peers}
@@ -276,24 +279,42 @@ func main() {
 			slog.Info("Recovered persisted regions", "count", recovered)
 		}
 
-		// Bootstrap a single region (region 1) spanning all stores.
+		// Bootstrap a single region (region 1) with a voter subset.
+		// Only the first min(NumNodes, MaxPeerCount) stores become initial
+		// Raft voters. Non-bootstrap nodes start empty and receive regions
+		// from PD scheduling (via maybeCreatePeerForMessage → CreatePeer).
 		// Skip if regions were already recovered (restart scenario).
 		if recovered == 0 {
-			peers := make([]*metapb.Peer, 0, len(clusterMap))
-			raftPeers := make([]raft.Peer, 0, len(clusterMap))
-			for sid := range clusterMap {
-				peers = append(peers, &metapb.Peer{Id: sid, StoreId: sid})
-				raftPeers = append(raftPeers, raft.Peer{ID: sid})
+			bsSIDs, _ := bootstrapStoreIDs(clusterMap, *maxPeerCount)
+
+			isBootstrapNode := false
+			for _, sid := range bsSIDs {
+				if sid == *storeID {
+					isBootstrapNode = true
+					break
+				}
 			}
-			region := &metapb.Region{
-				Id:    1,
-				Peers: peers,
+
+			if isBootstrapNode {
+				peers := make([]*metapb.Peer, 0, len(bsSIDs))
+				raftPeers := make([]raft.Peer, 0, len(bsSIDs))
+				for _, sid := range bsSIDs {
+					peers = append(peers, &metapb.Peer{Id: sid, StoreId: sid})
+					raftPeers = append(raftPeers, raft.Peer{ID: sid})
+				}
+				region := &metapb.Region{
+					Id:    1,
+					Peers: peers,
+				}
+				if err := coord.BootstrapRegion(region, raftPeers); err != nil {
+					slog.Error("Failed to bootstrap region", "error", err)
+					os.Exit(1)
+				}
+				slog.Info("Raft cluster bootstrapped", "region", 1, "peers", len(raftPeers))
+			} else {
+				slog.Info("Non-bootstrap node: starting empty, waiting for PD region scheduling",
+					"store-id", *storeID, "bootstrap-stores", bsSIDs)
 			}
-			if err := coord.BootstrapRegion(region, raftPeers); err != nil {
-				slog.Error("Failed to bootstrap region", "error", err)
-				os.Exit(1)
-			}
-			slog.Info("Raft cluster bootstrapped", "region", 1, "peers", len(raftPeers))
 		}
 	} else if hasPD {
 		// Join mode: connect to PD, obtain store ID, register, start empty.
@@ -459,6 +480,24 @@ func splitEndpoints(s string) []string {
 		}
 	}
 	return parts
+}
+
+// bootstrapStoreIDs selects the subset of store IDs that participate in the
+// initial Raft group bootstrap. Returns sorted slices of bootstrap and join IDs.
+// Bootstrap stores become initial Raft voters; join stores start empty and
+// receive regions from PD scheduling.
+func bootstrapStoreIDs(clusterMap map[uint64]string, maxPeerCount int) (bootstrap, join []uint64) {
+	all := make([]uint64, 0, len(clusterMap))
+	for sid := range clusterMap {
+		all = append(all, sid)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i] < all[j] })
+
+	bootstrapCount := len(all)
+	if maxPeerCount > 0 && maxPeerCount < bootstrapCount {
+		bootstrapCount = maxPeerCount
+	}
+	return all[:bootstrapCount], all[bootstrapCount:]
 }
 
 // parseInitialCluster parses "storeID=addr,storeID=addr,..." into a map.

@@ -3,6 +3,7 @@ package e2elib
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,12 +13,13 @@ import (
 
 // GokvClusterConfig holds configuration for a multi-node gookv cluster.
 type GokvClusterConfig struct {
-	NumNodes           int
-	PDConfig           PDNodeConfig
-	SplitSize          string // e.g., "20KB"
-	SplitCheckInterval string // e.g., "5s"
-	ServerBinaryPath   string
-	PDBinaryPath       string
+	NumNodes            int
+	PDConfig            PDNodeConfig
+	SplitSize           string // e.g., "20KB"
+	SplitCheckInterval  string // e.g., "5s"
+	PdHeartbeatInterval string // e.g., "5s" — accelerates PD region balance for tests
+	ServerBinaryPath    string
+	PDBinaryPath        string
 }
 
 // GokvCluster manages a PD node and multiple gookv-server nodes for e2e testing.
@@ -53,14 +55,10 @@ func (c *GokvCluster) Start() error {
 		return fmt.Errorf("e2elib: cluster already started")
 	}
 
-	// Create and start PD. Set MaxPeerCount to NumNodes so the scheduler
-	// doesn't try to remove peers from regions that already have all nodes.
+	// Create and start PD.
 	pdCfg := c.cfg.PDConfig
 	if pdCfg.BinaryPath == "" {
 		pdCfg.BinaryPath = c.cfg.PDBinaryPath
-	}
-	if pdCfg.MaxPeerCount == 0 {
-		pdCfg.MaxPeerCount = c.cfg.NumNodes
 	}
 	c.pd = NewPDNode(c.t, c.alloc, pdCfg)
 	if err := c.pd.Start(); err != nil {
@@ -88,18 +86,29 @@ func (c *GokvCluster) Start() error {
 		pairs[i] = portPair{grpc: grpcPort, status: statusPort}
 	}
 
-	// Build initial cluster string: "1=127.0.0.1:port1,2=127.0.0.1:port2,..."
+	// Determine bootstrap subset: first min(NumNodes, MaxPeerCount) nodes are
+	// initial Raft voters. Remaining nodes start in join mode (empty).
+	maxPeerCount := pdCfg.MaxPeerCount
+	if maxPeerCount == 0 {
+		maxPeerCount = 3 // PD default
+	}
+	bootstrapCount := c.cfg.NumNodes
+	if maxPeerCount < bootstrapCount {
+		bootstrapCount = maxPeerCount
+	}
+
+	// Build initial cluster string for bootstrap nodes only.
 	var parts []string
-	for i, p := range pairs {
-		parts = append(parts, fmt.Sprintf("%d=127.0.0.1:%d", i+1, p.grpc))
+	for i := 0; i < bootstrapCount; i++ {
+		parts = append(parts, fmt.Sprintf("%d=127.0.0.1:%d", i+1, pairs[i].grpc))
 	}
 	initialCluster := strings.Join(parts, ",")
 
 	pdEndpoints := []string{c.pd.Addr()}
 
-	// Build TOML config if split settings are provided.
+	// Build TOML config if any raft-store settings are provided.
 	var tomlConfig string
-	if c.cfg.SplitSize != "" || c.cfg.SplitCheckInterval != "" {
+	if c.cfg.SplitSize != "" || c.cfg.SplitCheckInterval != "" || c.cfg.PdHeartbeatInterval != "" {
 		var lines []string
 		lines = append(lines, "[raft-store]")
 		if c.cfg.SplitSize != "" {
@@ -108,17 +117,26 @@ func (c *GokvCluster) Start() error {
 		if c.cfg.SplitCheckInterval != "" {
 			lines = append(lines, fmt.Sprintf("split-check-tick-interval = %q", c.cfg.SplitCheckInterval))
 		}
+		if c.cfg.PdHeartbeatInterval != "" {
+			lines = append(lines, fmt.Sprintf("pd-heartbeat-tick-interval = %q", c.cfg.PdHeartbeatInterval))
+		}
 		tomlConfig = strings.Join(lines, "\n") + "\n"
 	}
 
-	// Create and start each node.
+	// Create and start each node. Nodes beyond bootstrapCount start in join mode.
+	maxPeerCountStr := strconv.Itoa(maxPeerCount)
 	for i := 0; i < c.cfg.NumNodes; i++ {
+		nodeInitialCluster := initialCluster
+		if i >= bootstrapCount {
+			nodeInitialCluster = "" // join mode
+		}
 		nodeCfg := GokvNodeConfig{
 			BinaryPath:     c.cfg.ServerBinaryPath,
 			StoreID:        uint64(i + 1),
 			PDEndpoints:    pdEndpoints,
-			InitialCluster: initialCluster,
+			InitialCluster: nodeInitialCluster,
 			LogLevel:       "info",
+			ExtraFlags:     []string{"--max-peer-count", maxPeerCountStr},
 		}
 
 		// Create the node manually with pre-allocated ports.
@@ -200,8 +218,8 @@ func (c *GokvCluster) AddNode() (*GokvNode, error) {
 
 	node := NewGokvNode(c.t, c.alloc, nodeCfg)
 
-	// Apply split config if set.
-	if c.cfg.SplitSize != "" || c.cfg.SplitCheckInterval != "" {
+	// Apply raft-store config if set.
+	if c.cfg.SplitSize != "" || c.cfg.SplitCheckInterval != "" || c.cfg.PdHeartbeatInterval != "" {
 		var lines []string
 		lines = append(lines, "[raft-store]")
 		if c.cfg.SplitSize != "" {
@@ -209,6 +227,9 @@ func (c *GokvCluster) AddNode() (*GokvNode, error) {
 		}
 		if c.cfg.SplitCheckInterval != "" {
 			lines = append(lines, fmt.Sprintf("split-check-tick-interval = %q", c.cfg.SplitCheckInterval))
+		}
+		if c.cfg.PdHeartbeatInterval != "" {
+			lines = append(lines, fmt.Sprintf("pd-heartbeat-tick-interval = %q", c.cfg.PdHeartbeatInterval))
 		}
 		node.WriteConfig(strings.Join(lines, "\n") + "\n")
 	}

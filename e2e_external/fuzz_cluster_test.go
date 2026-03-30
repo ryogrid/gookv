@@ -632,9 +632,10 @@ func TestFuzzCluster(t *testing.T) {
 	// Start cluster with split config for multi-region distribution.
 	e2elib.SkipIfNoBinary(t, "gookv-server", "gookv-pd")
 	cluster := e2elib.NewGokvCluster(t, e2elib.GokvClusterConfig{
-		NumNodes:           fuzzNodeCount,
-		SplitSize:          "128KB",
-		SplitCheckInterval: "5s",
+		NumNodes:            fuzzNodeCount,
+		SplitSize:           "128KB",
+		SplitCheckInterval:  "5s",
+		PdHeartbeatInterval: "5s",
 	})
 	require.NoError(t, cluster.Start())
 	t.Cleanup(func() { cluster.Stop() })

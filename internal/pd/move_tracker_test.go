@@ -98,7 +98,7 @@ func TestMoveTracker_FullCycle(t *testing.T) {
 	assert.Nil(t, cmd, "should return nil when move is complete")
 	// Move is complete but region is in cooldown — HasPendingMove still true.
 	assert.True(t, tracker.HasPendingMove(100), "should be in cooldown after completion")
-	assert.Equal(t, 0, tracker.ActiveMoveCount())
+	assert.Equal(t, 1, tracker.ActiveMoveCount(), "cooldown counts as active")
 }
 
 func TestMoveTracker_SourceNotLeader(t *testing.T) {
@@ -185,7 +185,7 @@ func TestMoveTracker_CooldownExpiry(t *testing.T) {
 
 	// Should be in cooldown.
 	assert.True(t, tracker.HasPendingMove(100), "should be in cooldown")
-	assert.Equal(t, 0, tracker.ActiveMoveCount())
+	assert.Equal(t, 1, tracker.ActiveMoveCount(), "cooldown counts as active")
 
 	// Advance enough times to expire the cooldown (each Advance increments heartbeatCount).
 	// Need to advance with a different region to tick the counter without affecting region 100's move.
@@ -378,7 +378,7 @@ func TestMoveTracker_ActiveCount(t *testing.T) {
 		},
 	}
 	tracker.Advance(100, region, leader)
-	assert.Equal(t, 1, tracker.ActiveMoveCount(), "count should decrement after move completes")
+	assert.Equal(t, 2, tracker.ActiveMoveCount(), "region 200 pending + region 100 in cooldown")
 
 	// Region 200 still pending.
 	assert.True(t, tracker.HasPendingMove(200))

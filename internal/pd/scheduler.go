@@ -231,10 +231,14 @@ func (s *Scheduler) scheduleRegionBalance(regionID uint64, region *metapb.Region
 	mean := float64(totalRegions) / float64(schedulableCount)
 
 	// Check if any of the region's peer stores is overloaded.
+	// To prevent infinite rebalancing when perfect balance is impossible
+	// (e.g., 9 peers across 5 stores → 1.8 mean, never exactly balanced),
+	// require the overloaded store to have at least ceil(mean)+1 regions.
 	overloaded := false
+	ceilMean := int(mean) + 1
 	for _, peer := range region.GetPeers() {
 		count := regionCounts[peer.GetStoreId()]
-		if float64(count) > mean*(1+s.regionBalanceThreshold) {
+		if count > ceilMean && float64(count) > mean*(1+s.regionBalanceThreshold) {
 			overloaded = true
 			break
 		}
@@ -250,6 +254,9 @@ func (s *Scheduler) scheduleRegionBalance(regionID uint64, region *metapb.Region
 	}
 
 	// Find an underloaded schedulable store not already hosting this region.
+	// Require the underloaded store to have at most floor(mean)-1 regions
+	// to avoid oscillation when perfect balance is impossible.
+	floorMean := int(mean)
 	var targetStoreID uint64
 	for _, store := range stores {
 		storeID := store.GetId()
@@ -260,7 +267,7 @@ func (s *Scheduler) scheduleRegionBalance(regionID uint64, region *metapb.Region
 			continue
 		}
 		count := regionCounts[storeID]
-		if float64(count) < mean*(1-s.regionBalanceThreshold) {
+		if count < floorMean && float64(count) < mean*(1-s.regionBalanceThreshold) {
 			targetStoreID = storeID
 			break
 		}
@@ -277,7 +284,7 @@ func (s *Scheduler) scheduleRegionBalance(regionID uint64, region *metapb.Region
 		var sourcePeer *metapb.Peer
 		for _, peer := range region.GetPeers() {
 			count := regionCounts[peer.GetStoreId()]
-			if float64(count) > mean*(1+s.regionBalanceThreshold) {
+			if count > ceilMean && float64(count) > mean*(1+s.regionBalanceThreshold) {
 				sourcePeer = peer
 				break
 			}

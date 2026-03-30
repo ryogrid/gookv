@@ -17,6 +17,8 @@ const stabilizeHeartbeats = 3
 // moveCooldownHeartbeats is the number of heartbeat cycles after a move completes
 // during which the same region cannot be the target of another balance move.
 // This prevents continuous peer shuffling when multiple stores are underloaded.
+// With PdHeartbeatInterval=5s, 10 heartbeats = 50 seconds cooldown.
+// With default 60s, 10 heartbeats = 10 minutes cooldown.
 const moveCooldownHeartbeats = 10
 
 // MoveState tracks the current stage of a region move.
@@ -111,11 +113,18 @@ func (t *MoveTracker) HasPendingMove(regionID uint64) bool {
 	return false
 }
 
-// ActiveMoveCount returns the number of in-progress moves.
+// ActiveMoveCount returns the number of in-progress moves plus regions in cooldown.
+// This is used by the scheduler's rate limiter to prevent bursts of balance moves.
 func (t *MoveTracker) ActiveMoveCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return len(t.moves)
+	count := len(t.moves)
+	for _, cd := range t.cooldowns {
+		if t.heartbeatCount < cd.cooldownExpiry {
+			count++
+		}
+	}
+	return count
 }
 
 // Advance progresses the move state machine for the given region based on the

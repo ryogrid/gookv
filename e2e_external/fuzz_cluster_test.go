@@ -763,6 +763,7 @@ func TestFuzzCluster(t *testing.T) {
 		}
 		t.Logf("Initial audit attempt %d: %v (retrying...)", attempt+1, initErr)
 		time.Sleep(5 * time.Second)
+		cluster.ResetClient() // refresh region cache after splits/balance
 	}
 	require.NoError(t, initErr, "initial audit failed after retries")
 	require.Equal(t, fuzzExpectedTotal, initTotal, "initial total balance mismatch")

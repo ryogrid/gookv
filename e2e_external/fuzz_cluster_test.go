@@ -30,7 +30,7 @@ const (
 	fuzzDefaultIters     = 500
 	fuzzDefaultClients   = 8
 	fuzzStabilizeTimeout = 180 * time.Second
-	fuzzNodeCount        = 3
+	fuzzNodeCount        = 5
 	fuzzFaultInterval    = 10 * time.Second // time between fault injection events
 )
 
@@ -591,6 +591,9 @@ func (fc *fuzzCluster) faultLoop(ctx context.Context, rng *rand.Rand) {
 		case <-statsTicker.C:
 			fc.t.Logf("[stats] %s", &fc.stats)
 		case <-faultTicker.C:
+			if faultTotalWeight == 0 {
+				continue
+			}
 			op := pickFaultOp(rng)
 			switch op {
 			case fopStopNode:
@@ -857,6 +860,22 @@ func TestFuzzCluster(t *testing.T) {
 		}
 		t.Logf("Final audit attempt %d failed: %v (retrying...)", attempt+1, finalErr)
 		time.Sleep(5 * time.Second)
+	}
+	if finalErr != nil {
+		// Dump diagnostic info before failing.
+		stdout, _, _ := e2elib.CLIExecRaw(t, pdAddr, "REGION LIST")
+		t.Logf("REGION LIST at failure:\n%s", stdout)
+		// Try reading the failing key directly via CLI.
+		if strings.Contains(finalErr.Error(), "account-") {
+			// Extract account name from error.
+			parts := strings.SplitN(finalErr.Error(), "account-", 2)
+			if len(parts) == 2 {
+				acctName := "account-" + strings.SplitN(parts[1], " ", 2)[0]
+				acctName = strings.TrimRight(acctName, ":")
+				out, _, _ := e2elib.CLIExecRaw(t, pdAddr, "GET "+acctName)
+				t.Logf("CLI GET %s: %s", acctName, out)
+			}
+		}
 	}
 	require.NoError(t, finalErr, "final audit failed after retries")
 	assert.Equal(t, fuzzExpectedTotal, finalTotal, "final total balance mismatch")

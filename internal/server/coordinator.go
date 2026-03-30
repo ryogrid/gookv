@@ -21,6 +21,8 @@ import (
 	"github.com/ryogrid/gookv/internal/raftstore/split"
 	"github.com/ryogrid/gookv/internal/server/transport"
 	"github.com/ryogrid/gookv/internal/storage/mvcc"
+	"os"
+
 	"github.com/ryogrid/gookv/pkg/cfnames"
 	"github.com/ryogrid/gookv/pkg/keys"
 	"github.com/ryogrid/gookv/pkg/pdclient"
@@ -140,7 +142,9 @@ func (sc *StoreCoordinator) RecoverPersistedRegions() int {
 	iter := sc.engine.NewIterator(cfnames.CFRaft, traits.IterOptions{})
 	defer iter.Close()
 
+	scanCount := 0
 	for iter.Seek(prefix); iter.Valid(); iter.Next() {
+		scanCount++
 		k := iter.Key()
 		if len(k) < 2 || k[0] != keys.LocalPrefix || k[1] != keys.RegionRaftPrefix {
 			break
@@ -151,6 +155,10 @@ func (sc *StoreCoordinator) RecoverPersistedRegions() int {
 		}
 		regionIDs[regionID] = true
 	}
+
+	// Log scan results to stdout (not slog) to ensure visibility even if slog file is stale.
+	fmt.Fprintf(os.Stderr, "[RecoverPersistedRegions] store=%d scanned=%d regionIDs=%d regions=%v\n",
+		sc.storeID, scanCount, len(regionIDs), regionIDs)
 
 	recovered := 0
 	for regionID := range regionIDs {

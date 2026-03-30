@@ -74,3 +74,6 @@ gookv is a Go-based distributed transactional KV store modeled after TiKV.
   - `make -f Makefile test`
   - `make -f Makefile test-e2e`
   - `make -f Makefile test-e2e-external`
+
+### Logging (for debugging and verification)
+- Server Log: <DataDir>/log/server.log

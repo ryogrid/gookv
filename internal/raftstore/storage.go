@@ -285,6 +285,27 @@ func (s *PeerStorage) SetPersistedLastIndex(idx uint64) {
 	s.persistedLastIndex = idx
 }
 
+// FlushInitialState persists the current hard state and apply state to the engine.
+// Called immediately after peer creation to ensure HasPersistedRaftState returns
+// true if the node crashes before the first Ready cycle.
+func (s *PeerStorage) FlushInitialState() error {
+	s.mu.RLock()
+	hs := s.hardState
+	s.mu.RUnlock()
+
+	// Persist hard state.
+	data, err := hs.Marshal()
+	if err != nil {
+		return fmt.Errorf("raftstore: marshal hard state: %w", err)
+	}
+	if err := s.engine.Put(cfnames.CFRaft, keys.RaftStateKey(s.regionID), data); err != nil {
+		return err
+	}
+
+	// Persist apply state.
+	return s.PersistApplyState()
+}
+
 // SetDummyEntry adds a dummy entry at index 0 with term 0,
 // matching etcd/raft's MemoryStorage convention for empty storage.
 func (s *PeerStorage) SetDummyEntry() {

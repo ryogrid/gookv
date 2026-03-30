@@ -238,6 +238,13 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 		return err
 	}
 
+	// Persist initial Raft state immediately so that if the node crashes
+	// before the first Ready cycle, HasPersistedRaftState returns true
+	// on restart and the peer is recovered instead of re-bootstrapped.
+	if err := peer.FlushInitialState(); err != nil {
+		slog.Warn("BootstrapRegion: flush initial state failed", "region", regionID, "err", err)
+	}
+
 	// Wire sendFunc to use gRPC transport.
 	// Use peer.Region() (not the captured region) so that ConfChange updates
 	// (added/removed peers) are visible when resolving msg.To → store ID.
@@ -646,6 +653,13 @@ func (sc *StoreCoordinator) CreatePeer(req *raftstore.CreatePeerRequest) error {
 	)
 	if err != nil {
 		return err
+	}
+
+	// Persist initial Raft state immediately so that if the node crashes
+	// before the first Ready cycle, HasPersistedRaftState returns true
+	// on restart and the peer is recovered instead of re-bootstrapped.
+	if err := peer.FlushInitialState(); err != nil {
+		slog.Warn("CreatePeer: flush initial state failed", "region", regionID, "err", err)
 	}
 
 	// Wire sendFunc and applyFunc (same pattern as BootstrapRegion).

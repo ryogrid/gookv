@@ -256,6 +256,14 @@ func NewPeer(
 	return p, nil
 }
 
+// FlushInitialState persists the initial Raft hard state and apply state to
+// the engine. This should be called immediately after peer creation (before
+// the peer goroutine starts) to ensure that HasPersistedRaftState returns true
+// even if the node crashes before the first Ready cycle processes SaveReady.
+func (p *Peer) FlushInitialState() error {
+	return p.storage.FlushInitialState()
+}
+
 // RegionID returns the region ID.
 func (p *Peer) RegionID() uint64 { return p.regionID }
 

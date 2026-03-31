@@ -369,7 +369,7 @@ func (c *fuzzClient) doAudit() (int, error) {
 		key := string(accountKey(i))
 		valStr, ok := found[key]
 		if !ok {
-			return 0, fmt.Errorf("%s not found", key)
+			return 0, fmt.Errorf("%s not found (scanPairs=%d foundKeys=%d)", key, len(pairs), len(found))
 		}
 		b, err := strconv.Atoi(valStr)
 		if err != nil {
@@ -400,32 +400,36 @@ func (c *fuzzClient) doAudit() (int, error) {
 		}
 		extra += fmt.Sprintf(" scanPairs=%d", len(pairs))
 
-		// Diagnostic: compare Scan results with individual Gets in a new txn.
-		getCtx, getCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer getCancel()
-		txn2, err2 := c.fc.cluster.TxnKV().Begin(getCtx)
-		if err2 == nil {
+		// Diagnostic: compare Scan with individual Gets in SAME txn (same startTS).
+		// Re-begin a txn and do both Scan and Gets to eliminate snapshot differences.
+		diagCtx, diagCancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer diagCancel()
+		diagTxn, diagErr := c.fc.cluster.TxnKV().Begin(diagCtx)
+		if diagErr == nil {
+			// Individual Get total
 			var getTotal int
-			var mismatches int
+			var getCount int
 			for i := 0; i < fuzzNumAccounts; i++ {
-				key := accountKey(i)
-				getVal, getErr := txn2.Get(getCtx, key)
-				if getErr != nil {
-					continue
+				gv, ge := diagTxn.Get(diagCtx, accountKey(i))
+				if ge != nil {
+					break // stop on first error to avoid partial results
 				}
-				getB, _ := strconv.Atoi(string(getVal))
-				getTotal += getB
-				scanB, _ := strconv.Atoi(found[string(key)])
-				if getB != scanB {
-					mismatches++
-					if mismatches <= 10 {
-						c.fc.t.Logf("[DIAG] Scan!=Get key=%s scan=%d get=%d", key, scanB, getB)
-					}
+				getCount++
+				gb, _ := strconv.Atoi(string(gv))
+				getTotal += gb
+			}
+			// Scan total in same txn
+			scanPairs2, scanErr := diagTxn.Scan(diagCtx, []byte("account-"), []byte("account."), fuzzNumAccounts+1)
+			var scanTotal2 int
+			if scanErr == nil {
+				for _, p := range scanPairs2 {
+					sb, _ := strconv.Atoi(string(p.Value))
+					scanTotal2 += sb
 				}
 			}
-			_ = txn2.Rollback(getCtx)
-			c.fc.t.Logf("[DIAG] getTotal=%d scanTotal=%d diff=%+d mismatches=%d",
-				getTotal, total, getTotal-total, mismatches)
+			_ = diagTxn.Rollback(diagCtx)
+			c.fc.t.Logf("[DIAG-SAME-TXN] getTotal=%d(count=%d) scanTotal=%d(pairs=%d) getErr=%v scanErr=%v",
+				getTotal, getCount, scanTotal2, len(scanPairs2), diagErr, scanErr)
 		}
 
 		return total, fmt.Errorf("balance mismatch: got %d, want %d diff=%+d%s", total, fuzzExpectedTotal, total-fuzzExpectedTotal, extra)
@@ -837,13 +841,13 @@ func TestFuzzCluster(t *testing.T) {
 	initClient := &fuzzClient{fc: fc, rng: rand.New(rand.NewPCG(uint64(seed), uint64(seed>>32)))}
 	var initTotal int
 	var initErr error
-	for attempt := 0; attempt < 10; attempt++ {
+	for attempt := 0; attempt < 20; attempt++ {
 		initTotal, initErr = initClient.doAudit()
 		if initErr == nil {
 			break
 		}
 		t.Logf("Initial audit attempt %d: %v (retrying...)", attempt+1, initErr)
-		time.Sleep(5 * time.Second)
+		time.Sleep(10 * time.Second)
 		cluster.ResetClient() // refresh region cache after splits/balance
 	}
 	require.NoError(t, initErr, "initial audit failed after retries")

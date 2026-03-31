@@ -12,6 +12,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/tikvpb"
+	"github.com/ryogrid/gookv/pkg/codec"
 	"github.com/ryogrid/gookv/pkg/txntypes"
 )
 
@@ -629,6 +630,14 @@ func (t *TxnHandle) Scan(ctx context.Context, startKey, endKey []byte, limit int
 			err := t.client.sender.SendToRegion(ctx, currentKey,
 				func(cli tikvpb.TikvClient, info *RegionInfo) (*errorpb.Error, error) {
 					regionEnd = info.Region.GetEndKey()
+					// Region boundaries are memcomparable-encoded; decode to raw
+					// user key so that subsequent comparisons and the next-region
+					// startKey remain in the raw key space expected by the server.
+					if len(regionEnd) > 0 {
+						if raw, _, decErr := codec.DecodeBytes(regionEnd); decErr == nil {
+							regionEnd = raw
+						}
+					}
 					scanEnd := endKey
 					if len(regionEnd) > 0 && (len(scanEnd) == 0 || bytes.Compare(regionEnd, scanEnd) < 0) {
 						scanEnd = regionEnd

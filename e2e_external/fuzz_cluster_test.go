@@ -255,6 +255,22 @@ func (c *fuzzClient) doTransfer() {
 		return
 	}
 	c.fc.stats.txnSuccesses.Add(1)
+
+	// Diagnostic: verify committed values by reading back in a new txn.
+	vCtx, vCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer vCancel()
+	vTxn, vErr := c.fc.cluster.TxnKV().Begin(vCtx)
+	if vErr == nil {
+		va, _ := vTxn.Get(vCtx, accountKey(a))
+		vb, _ := vTxn.Get(vCtx, accountKey(b))
+		_ = vTxn.Rollback(vCtx)
+		readA, _ := strconv.Atoi(string(va))
+		readB, _ := strconv.Atoi(string(vb))
+		if readA != newA || readB != newB {
+			c.fc.t.Logf("[VERIFY-XFER] WRITE MISMATCH a=%d(want %d) b=%d(want %d) amount=%d startTS=%v",
+				readA, newA, readB, newB, amount, txn.StartTS())
+		}
+	}
 }
 
 func (c *fuzzClient) doMultiTransfer() {
@@ -383,6 +399,35 @@ func (c *fuzzClient) doAudit() (int, error) {
 			extra = fmt.Sprintf(" abnormal(%d): %v", len(diag), diag)
 		}
 		extra += fmt.Sprintf(" scanPairs=%d", len(pairs))
+
+		// Diagnostic: compare Scan results with individual Gets in a new txn.
+		getCtx, getCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer getCancel()
+		txn2, err2 := c.fc.cluster.TxnKV().Begin(getCtx)
+		if err2 == nil {
+			var getTotal int
+			var mismatches int
+			for i := 0; i < fuzzNumAccounts; i++ {
+				key := accountKey(i)
+				getVal, getErr := txn2.Get(getCtx, key)
+				if getErr != nil {
+					continue
+				}
+				getB, _ := strconv.Atoi(string(getVal))
+				getTotal += getB
+				scanB, _ := strconv.Atoi(found[string(key)])
+				if getB != scanB {
+					mismatches++
+					if mismatches <= 10 {
+						c.fc.t.Logf("[DIAG] Scan!=Get key=%s scan=%d get=%d", key, scanB, getB)
+					}
+				}
+			}
+			_ = txn2.Rollback(getCtx)
+			c.fc.t.Logf("[DIAG] getTotal=%d scanTotal=%d diff=%+d mismatches=%d",
+				getTotal, total, getTotal-total, mismatches)
+		}
+
 		return total, fmt.Errorf("balance mismatch: got %d, want %d diff=%+d%s", total, fuzzExpectedTotal, total-fuzzExpectedTotal, extra)
 	}
 

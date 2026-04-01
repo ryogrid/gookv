@@ -605,6 +605,8 @@ func (p *Peer) handleScheduleMessage(msg *ScheduleMsg) {
 }
 
 func (p *Peer) propose(cmd *RaftCommand) {
+	ProposalTotal.Inc()
+
 	if cmd.Request == nil {
 		slog.Warn("propose: nil request", "region", p.regionID)
 		return
@@ -645,6 +647,9 @@ func (p *Peer) propose(cmd *RaftCommand) {
 }
 
 func (p *Peer) handleReady() {
+	start := time.Now()
+	defer func() { HandleReadyDuration.Observe(time.Since(start).Seconds()) }()
+
 	if !p.rawNode.HasReady() {
 		return
 	}
@@ -656,6 +661,7 @@ func (p *Peer) handleReady() {
 		wasLeader := p.isLeader.Load()
 		p.isLeader.Store(rd.SoftState.Lead == p.peerID)
 		if p.isLeader.Load() && !wasLeader {
+			LeaderCount.Inc()
 			p.sendRegionHeartbeatToPD()
 			// Extend leader lease on leadership confirmation.
 			electionTimeout := time.Duration(p.cfg.RaftElectionTimeoutTicks) * p.cfg.RaftBaseTickInterval
@@ -664,6 +670,7 @@ func (p *Peer) handleReady() {
 		}
 		// Invalidate lease, fail pending proposals, and cleanup pending reads on leader stepdown.
 		if !p.isLeader.Load() && wasLeader {
+			LeaderCount.Dec()
 			p.leaseValid.Store(false)
 			p.failAllPendingProposals(fmt.Errorf("leader stepped down"))
 		}
@@ -681,6 +688,7 @@ func (p *Peer) handleReady() {
 	}
 
 	// Persist entries and hard state.
+	persistStart := time.Now()
 	if p.raftLogWriter != nil {
 		// Batch write path: submit to shared writer for I/O coalescing.
 		task, err := p.storage.BuildWriteTask(rd)
@@ -700,6 +708,7 @@ func (p *Peer) handleReady() {
 			return
 		}
 	}
+	LogPersistDuration.Observe(time.Since(persistStart).Seconds())
 
 	// Apply snapshot if present.
 	if !raft.IsEmptySnap(rd.Snapshot) {
@@ -729,6 +738,7 @@ func (p *Peer) handleReady() {
 			}
 		}
 		p.sendFunc(rd.Messages)
+		SendMessageTotal.Add(float64(len(rd.Messages)))
 	}
 
 	// Apply committed entries.
@@ -739,11 +749,14 @@ func (p *Peer) handleReady() {
 		// ordering guarantee that Raft provides.
 		for _, e := range rd.CommittedEntries {
 			if e.Type == raftpb.EntryConfChange || e.Type == raftpb.EntryConfChangeV2 {
+				AdminCmdTotal.WithLabelValues("conf_change").Inc()
 				p.applyConfChangeEntry(e)
 			} else if e.Type == raftpb.EntryNormal && IsSplitAdmin(e.Data) {
+				AdminCmdTotal.WithLabelValues("split").Inc()
 				eCopy := e
 				p.applySplitAdminEntry(&eCopy)
 			} else if e.Type == raftpb.EntryNormal && IsCompactLog(e.Data) {
+				AdminCmdTotal.WithLabelValues("compact_log").Inc()
 				p.applyCompactLogEntry(e)
 			}
 		}
@@ -833,6 +846,9 @@ func (p *Peer) sweepStaleProposals(maxAge time.Duration) {
 // applyInline applies committed entries synchronously (legacy path).
 // This preserves the original inline apply behavior when applyWorkerPool is nil.
 func (p *Peer) applyInline(committedEntries []raftpb.Entry) {
+	applyStart := time.Now()
+	defer func() { ApplyDuration.Observe(time.Since(applyStart).Seconds()) }()
+
 	// Filter admin entries out before passing to applyFunc.
 	// Only send data entries (non-admin, with 8-byte proposal ID prefix) to the apply worker.
 	if p.applyFunc != nil {
@@ -1189,6 +1205,8 @@ func (p *Peer) handleReadIndexRequest(req *ReadIndexRequest) {
 		req.Callback(fmt.Errorf("not leader for region %d", p.regionID))
 		return
 	}
+	ReadIndexTotal.Inc()
+
 	// Propose a no-op entry to ensure committedEntryInCurrentTerm() is true.
 	// etcd raft postpones ReadIndex until the leader has committed at least
 	// one entry in the current term (raft.go:1083). After a leader transfer

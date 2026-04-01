@@ -539,6 +539,9 @@ func (s *PDServer) Tso(stream pdpb.PD_TsoServer) error {
 			count = 1
 		}
 
+		pdTsoTotal.Inc()
+		tsoStart := time.Now()
+
 		if s.raftPeer == nil {
 			// Single-node mode: direct allocation.
 			ts, err := s.tso.Allocate(int(count))
@@ -568,6 +571,7 @@ func (s *PDServer) Tso(stream pdpb.PD_TsoServer) error {
 				return err
 			}
 		}
+		pdTsoHandleDuration.Observe(time.Since(tsoStart).Seconds())
 	}
 }
 
@@ -687,6 +691,9 @@ func (s *PDServer) GetAllStores(ctx context.Context, req *pdpb.GetAllStoresReque
 }
 
 func (s *PDServer) StoreHeartbeat(ctx context.Context, req *pdpb.StoreHeartbeatRequest) (*pdpb.StoreHeartbeatResponse, error) {
+	pdStoreHeartbeatTotal.Inc()
+	pdStoreCount.Set(float64(len(s.meta.GetAllStores())))
+
 	if s.raftPeer == nil {
 		// Single-node mode: existing direct code.
 		if stats := req.GetStats(); stats != nil {
@@ -727,6 +734,9 @@ func (s *PDServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 			return err
 		}
 
+		pdRegionHeartbeatTotal.Inc()
+		hbStart := time.Now()
+
 		region := req.GetRegion()
 		leader := req.GetLeader()
 
@@ -761,6 +771,9 @@ func (s *PDServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 				}
 			}
 		}
+
+		pdRegionHeartbeatDuration.Observe(time.Since(hbStart).Seconds())
+		pdRegionCount.Set(float64(len(s.meta.GetAllRegions())))
 
 		if err := stream.Send(resp); err != nil {
 			return err

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"sync/atomic"
+	"time"
 
 	"github.com/ryogrid/gookv/internal/engine/traits"
 	"github.com/ryogrid/gookv/internal/storage/mvcc"
@@ -73,6 +74,10 @@ func (s *Storage) ReleaseLatch(g *LatchGuard) {
 // unapplied entries are replayed from the persisted (synced) Raft log.
 // Exported so coordinator can call it from applyFunc.
 func (s *Storage) ApplyModifies(modifies []mvcc.Modify) error {
+	start := time.Now()
+	defer func() { storageCommandDuration.WithLabelValues("apply_modifies").Observe(time.Since(start).Seconds()) }()
+	storageApplyBatchSize.Observe(float64(len(modifies)))
+
 	if len(modifies) == 0 {
 		return nil
 	}
@@ -98,6 +103,9 @@ func (s *Storage) ApplyModifies(modifies []mvcc.Modify) error {
 
 // Get performs a transactional point read at the given timestamp.
 func (s *Storage) Get(key []byte, version txntypes.TimeStamp) ([]byte, error) {
+	start := time.Now()
+	defer func() { storageCommandDuration.WithLabelValues("get").Observe(time.Since(start).Seconds()) }()
+
 	return s.GetWithIsolation(key, version, mvcc.IsolationLevelSI)
 }
 
@@ -113,6 +121,9 @@ func (s *Storage) GetWithIsolation(key []byte, version txntypes.TimeStamp, level
 
 // Scan performs a transactional range scan at the given timestamp.
 func (s *Storage) Scan(startKey, endKey []byte, limit uint32, version txntypes.TimeStamp, keyOnly bool) ([]*KvPairResult, error) {
+	start := time.Now()
+	defer func() { storageCommandDuration.WithLabelValues("scan").Observe(time.Since(start).Seconds()) }()
+
 	snap := s.engine.NewSnapshot()
 	defer snap.Close()
 
@@ -161,6 +172,9 @@ type KvPairResult struct {
 
 // BatchGet performs transactional multi-key reads at the given timestamp.
 func (s *Storage) BatchGet(keys [][]byte, version txntypes.TimeStamp) ([]*KvPairResult, error) {
+	start := time.Now()
+	defer func() { storageCommandDuration.WithLabelValues("batch_get").Observe(time.Since(start).Seconds()) }()
+
 	snap := s.engine.NewSnapshot()
 	reader := mvcc.NewMvccReader(snap)
 	defer reader.Close()
@@ -184,6 +198,9 @@ func (s *Storage) BatchGet(keys [][]byte, version txntypes.TimeStamp) ([]*KvPair
 // without applying them to the engine. Used in cluster mode to propose via Raft.
 // The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
 func (s *Storage) PrewriteModifies(mutations []txn.Mutation, primary []byte, startTS txntypes.TimeStamp, lockTTL uint64) ([]mvcc.Modify, []error, *LatchGuard) {
+	start := time.Now()
+	defer func() { storageCommandDuration.WithLabelValues("prewrite").Observe(time.Since(start).Seconds()) }()
+
 	keys := make([][]byte, len(mutations))
 	for i, m := range mutations {
 		keys[i] = m.Key
@@ -230,6 +247,9 @@ func (s *Storage) PrewriteModifies(mutations []txn.Mutation, primary []byte, sta
 // without applying them to the engine. Used in cluster mode to propose via Raft.
 // The caller MUST call ReleaseLatch(guard) after the Raft proposal completes.
 func (s *Storage) CommitModifies(keys [][]byte, startTS, commitTS txntypes.TimeStamp) ([]mvcc.Modify, error, *LatchGuard) {
+	start := time.Now()
+	defer func() { storageCommandDuration.WithLabelValues("commit").Observe(time.Since(start).Seconds()) }()
+
 	cmdID := s.allocCmdID()
 	lock := s.latches.GenLock(keys)
 	s.latches.AcquireBlocking(context.Background(), lock, cmdID)

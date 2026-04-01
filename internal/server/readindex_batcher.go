@@ -125,6 +125,7 @@ func (b *ReadIndexBatcher) flushLocked() {
 
 	// Dispatch ReadIndex asynchronously to avoid holding the lock
 	// during the Raft round-trip.
+	readindexBatchSize.Observe(float64(len(batch)))
 	go b.dispatchAndFanout(batch)
 }
 

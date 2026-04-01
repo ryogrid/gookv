@@ -182,6 +182,12 @@ type tikvService struct {
 
 // KvGet implements transactional point read.
 func (svc *tikvService) KvGet(ctx context.Context, req *kvrpcpb.GetRequest) (*kvrpcpb.GetResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_get").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_get").Inc()
+
 	resp := &kvrpcpb.GetResponse{}
 
 	// Validate region context (includes epoch check).
@@ -226,11 +232,20 @@ func (svc *tikvService) KvGet(ctx context.Context, req *kvrpcpb.GetRequest) (*kv
 		resp.Value = value
 	}
 
+	if resp.RegionError != nil || resp.Error != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_get").Inc()
+	}
 	return resp, nil
 }
 
 // KvScan implements transactional range scan.
 func (svc *tikvService) KvScan(ctx context.Context, req *kvrpcpb.ScanRequest) (*kvrpcpb.ScanResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_scan").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_scan").Inc()
+
 	resp := &kvrpcpb.ScanResponse{}
 
 	if regErr := svc.validateRegionContext(req.GetContext(), req.GetStartKey()); regErr != nil {
@@ -276,11 +291,20 @@ func (svc *tikvService) KvScan(ctx context.Context, req *kvrpcpb.ScanRequest) (*
 		})
 	}
 
+	if resp.RegionError != nil || resp.Error != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_scan").Inc()
+	}
 	return resp, nil
 }
 
 // KvPrewrite implements the first phase of 2PC, with async commit and 1PC support.
 func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteRequest) (*kvrpcpb.PrewriteResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_prewrite").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_prewrite").Inc()
+
 	resp := &kvrpcpb.PrewriteResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), nil); regErr != nil {
 		resp.RegionError = regErr
@@ -482,11 +506,20 @@ func (svc *tikvService) KvPrewrite(ctx context.Context, req *kvrpcpb.PrewriteReq
 		}
 	}
 
+	if resp.RegionError != nil || len(resp.Errors) > 0 {
+		grpcMsgFailTotal.WithLabelValues("kv_prewrite").Inc()
+	}
 	return resp, nil
 }
 
 // KvCommit implements the second phase of 2PC.
 func (svc *tikvService) KvCommit(ctx context.Context, req *kvrpcpb.CommitRequest) (*kvrpcpb.CommitResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_commit").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_commit").Inc()
+
 	resp := &kvrpcpb.CommitResponse{}
 	// Validate with the first key so that after a region split, a commit
 	// sent to the wrong region returns KeyNotInRegion (retriable) instead
@@ -571,11 +604,20 @@ func (svc *tikvService) KvCommit(ctx context.Context, req *kvrpcpb.CommitRequest
 		resp.Error = errToKeyError(err)
 	}
 
+	if resp.RegionError != nil || resp.Error != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_commit").Inc()
+	}
 	return resp, nil
 }
 
 // KvBatchGet implements transactional multi-key read.
 func (svc *tikvService) KvBatchGet(ctx context.Context, req *kvrpcpb.BatchGetRequest) (*kvrpcpb.BatchGetResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_batch_get").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_batch_get").Inc()
+
 	resp := &kvrpcpb.BatchGetResponse{}
 
 	if regErr := svc.validateRegionContext(req.GetContext(), nil); regErr != nil {
@@ -621,11 +663,20 @@ func (svc *tikvService) KvBatchGet(ctx context.Context, req *kvrpcpb.BatchGetReq
 		})
 	}
 
+	if resp.RegionError != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_batch_get").Inc()
+	}
 	return resp, nil
 }
 
 // KvBatchRollback implements batch rollback.
 func (svc *tikvService) KvBatchRollback(ctx context.Context, req *kvrpcpb.BatchRollbackRequest) (*kvrpcpb.BatchRollbackResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_batch_rollback").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_batch_rollback").Inc()
+
 	resp := &kvrpcpb.BatchRollbackResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), nil); regErr != nil {
 		resp.RegionError = regErr
@@ -698,11 +749,20 @@ func (svc *tikvService) KvBatchRollback(ctx context.Context, req *kvrpcpb.BatchR
 		resp.Error = errToKeyError(err)
 	}
 
+	if resp.RegionError != nil || resp.Error != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_batch_rollback").Inc()
+	}
 	return resp, nil
 }
 
 // KvCleanup implements lock cleanup.
 func (svc *tikvService) KvCleanup(ctx context.Context, req *kvrpcpb.CleanupRequest) (*kvrpcpb.CleanupResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_cleanup").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_cleanup").Inc()
+
 	resp := &kvrpcpb.CleanupResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), req.GetKey()); regErr != nil {
 		resp.RegionError = regErr
@@ -754,12 +814,21 @@ func (svc *tikvService) KvCleanup(ctx context.Context, req *kvrpcpb.CleanupReque
 		resp.CommitVersion = uint64(commitTS)
 	}
 
+	if resp.RegionError != nil || resp.Error != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_cleanup").Inc()
+	}
 	return resp, nil
 }
 
 // KvCheckTxnStatus implements transaction status check.
 // Handles TTL-based lock cleanup and RollbackIfNotExist.
 func (svc *tikvService) KvCheckTxnStatus(ctx context.Context, req *kvrpcpb.CheckTxnStatusRequest) (*kvrpcpb.CheckTxnStatusResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_check_txn_status").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_check_txn_status").Inc()
+
 	resp := &kvrpcpb.CheckTxnStatusResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), req.GetPrimaryKey()); regErr != nil {
 		resp.RegionError = regErr
@@ -818,6 +887,9 @@ func (svc *tikvService) KvCheckTxnStatus(ctx context.Context, req *kvrpcpb.Check
 	}
 	// else: rolled back (both LockTtl and CommitVersion are 0)
 
+	if resp.RegionError != nil || resp.Error != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_check_txn_status").Inc()
+	}
 	return resp, nil
 }
 
@@ -825,6 +897,12 @@ func (svc *tikvService) KvCheckTxnStatus(ctx context.Context, req *kvrpcpb.Check
 
 // KvPessimisticLock implements the KvPessimisticLock RPC.
 func (svc *tikvService) KvPessimisticLock(ctx context.Context, req *kvrpcpb.PessimisticLockRequest) (*kvrpcpb.PessimisticLockResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_pessimistic_lock").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_pessimistic_lock").Inc()
+
 	resp := &kvrpcpb.PessimisticLockResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), nil); regErr != nil {
 		resp.RegionError = regErr
@@ -865,11 +943,20 @@ func (svc *tikvService) KvPessimisticLock(ctx context.Context, req *kvrpcpb.Pess
 			}
 		}
 	}
+	if resp.RegionError != nil || len(resp.Errors) > 0 {
+		grpcMsgFailTotal.WithLabelValues("kv_pessimistic_lock").Inc()
+	}
 	return resp, nil
 }
 
 // KVPessimisticRollback implements the KVPessimisticRollback RPC.
 func (svc *tikvService) KVPessimisticRollback(ctx context.Context, req *kvrpcpb.PessimisticRollbackRequest) (*kvrpcpb.PessimisticRollbackResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_pessimistic_rollback").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_pessimistic_rollback").Inc()
+
 	resp := &kvrpcpb.PessimisticRollbackResponse{}
 
 	var validateKey []byte
@@ -915,11 +1002,20 @@ func (svc *tikvService) KVPessimisticRollback(ctx context.Context, req *kvrpcpb.
 			resp.Errors = append(resp.Errors, errToKeyError(err))
 		}
 	}
+	if resp.RegionError != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_pessimistic_rollback").Inc()
+	}
 	return resp, nil
 }
 
 // KvTxnHeartBeat implements the KvTxnHeartBeat RPC.
 func (svc *tikvService) KvTxnHeartBeat(ctx context.Context, req *kvrpcpb.TxnHeartBeatRequest) (*kvrpcpb.TxnHeartBeatResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_txn_heartbeat").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_txn_heartbeat").Inc()
+
 	resp := &kvrpcpb.TxnHeartBeatResponse{}
 
 	if regErr := svc.validateRegionContext(req.GetContext(), req.GetPrimaryLock()); regErr != nil {
@@ -960,11 +1056,20 @@ func (svc *tikvService) KvTxnHeartBeat(ctx context.Context, req *kvrpcpb.TxnHear
 		return resp, nil
 	}
 	resp.LockTtl = ttl
+	if resp.RegionError != nil || resp.Error != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_txn_heartbeat").Inc()
+	}
 	return resp, nil
 }
 
 // KvResolveLock implements the KvResolveLock RPC.
 func (svc *tikvService) KvResolveLock(ctx context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_resolve_lock").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_resolve_lock").Inc()
+
 	resp := &kvrpcpb.ResolveLockResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), nil); regErr != nil {
 		resp.RegionError = regErr
@@ -1004,6 +1109,9 @@ func (svc *tikvService) KvResolveLock(ctx context.Context, req *kvrpcpb.ResolveL
 			resp.Error = errToKeyError(err)
 		}
 	}
+	if resp.RegionError != nil || resp.Error != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_resolve_lock").Inc()
+	}
 	return resp, nil
 }
 
@@ -1011,6 +1119,12 @@ func (svc *tikvService) KvResolveLock(ctx context.Context, req *kvrpcpb.ResolveL
 
 // KvCheckSecondaryLocks implements the KvCheckSecondaryLocks RPC for async commit.
 func (svc *tikvService) KvCheckSecondaryLocks(ctx context.Context, req *kvrpcpb.CheckSecondaryLocksRequest) (*kvrpcpb.CheckSecondaryLocksResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_check_secondary_locks").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_check_secondary_locks").Inc()
+
 	resp := &kvrpcpb.CheckSecondaryLocksResponse{}
 
 	// ReadIndex: ensure linearizable read in cluster mode.
@@ -1043,11 +1157,20 @@ func (svc *tikvService) KvCheckSecondaryLocks(ctx context.Context, req *kvrpcpb.
 		resp.CommitTs = uint64(commitTS)
 	}
 
+	if resp.RegionError != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_check_secondary_locks").Inc()
+	}
 	return resp, nil
 }
 
 // KvScanLock implements the KvScanLock RPC, scanning for locks with StartTS <= maxVersion.
 func (svc *tikvService) KvScanLock(ctx context.Context, req *kvrpcpb.ScanLockRequest) (*kvrpcpb.ScanLockResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_scan_lock").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_scan_lock").Inc()
+
 	resp := &kvrpcpb.ScanLockResponse{}
 
 	if regErr := svc.validateRegionContext(req.GetContext(), req.GetStartKey()); regErr != nil {
@@ -1083,6 +1206,9 @@ func (svc *tikvService) KvScanLock(ctx context.Context, req *kvrpcpb.ScanLockReq
 		resp.Locks = append(resp.Locks, lockToLockInfo(r.Key, r.Lock))
 	}
 
+	if resp.RegionError != nil || resp.Error != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_scan_lock").Inc()
+	}
 	return resp, nil
 }
 
@@ -1210,6 +1336,12 @@ func (svc *tikvService) validateRegionContext(reqCtx *kvrpcpb.Context, key []byt
 
 // RawGet implements the RawGet RPC.
 func (svc *tikvService) RawGet(ctx context.Context, req *kvrpcpb.RawGetRequest) (*kvrpcpb.RawGetResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("raw_get").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("raw_get").Inc()
+
 	resp := &kvrpcpb.RawGetResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), req.GetKey()); regErr != nil {
 		resp.RegionError = regErr
@@ -1224,6 +1356,9 @@ func (svc *tikvService) RawGet(ctx context.Context, req *kvrpcpb.RawGetRequest) 
 		resp.NotFound = true
 	} else {
 		resp.Value = value
+	}
+	if resp.RegionError != nil || resp.Error != "" {
+		grpcMsgFailTotal.WithLabelValues("raw_get").Inc()
 	}
 	return resp, nil
 }
@@ -1339,6 +1474,12 @@ func proposeErrorToRegionError(err error, regionID uint64) *errorpb.Error {
 
 // RawPut implements the RawPut RPC.
 func (svc *tikvService) RawPut(ctx context.Context, req *kvrpcpb.RawPutRequest) (*kvrpcpb.RawPutResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("raw_put").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("raw_put").Inc()
+
 	resp := &kvrpcpb.RawPutResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), req.GetKey()); regErr != nil {
 		resp.RegionError = regErr
@@ -1360,11 +1501,20 @@ func (svc *tikvService) RawPut(ctx context.Context, req *kvrpcpb.RawPutRequest) 
 			resp.Error = err.Error()
 		}
 	}
+	if resp.RegionError != nil || resp.Error != "" {
+		grpcMsgFailTotal.WithLabelValues("raw_put").Inc()
+	}
 	return resp, nil
 }
 
 // RawDelete implements the RawDelete RPC.
 func (svc *tikvService) RawDelete(ctx context.Context, req *kvrpcpb.RawDeleteRequest) (*kvrpcpb.RawDeleteResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("raw_delete").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("raw_delete").Inc()
+
 	resp := &kvrpcpb.RawDeleteResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), req.GetKey()); regErr != nil {
 		resp.RegionError = regErr
@@ -1385,11 +1535,20 @@ func (svc *tikvService) RawDelete(ctx context.Context, req *kvrpcpb.RawDeleteReq
 			resp.Error = err.Error()
 		}
 	}
+	if resp.RegionError != nil || resp.Error != "" {
+		grpcMsgFailTotal.WithLabelValues("raw_delete").Inc()
+	}
 	return resp, nil
 }
 
 // RawScan implements the RawScan RPC.
 func (svc *tikvService) RawScan(ctx context.Context, req *kvrpcpb.RawScanRequest) (*kvrpcpb.RawScanResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("raw_scan").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("raw_scan").Inc()
+
 	resp := &kvrpcpb.RawScanResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), req.GetStartKey()); regErr != nil {
 		resp.RegionError = regErr
@@ -1405,11 +1564,20 @@ func (svc *tikvService) RawScan(ctx context.Context, req *kvrpcpb.RawScanRequest
 	for _, p := range pairs {
 		resp.Kvs = append(resp.Kvs, &kvrpcpb.KvPair{Key: p.Key, Value: p.Value})
 	}
+	if resp.RegionError != nil {
+		grpcMsgFailTotal.WithLabelValues("raw_scan").Inc()
+	}
 	return resp, nil
 }
 
 // RawBatchGet implements the RawBatchGet RPC.
 func (svc *tikvService) RawBatchGet(ctx context.Context, req *kvrpcpb.RawBatchGetRequest) (*kvrpcpb.RawBatchGetResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("raw_batch_get").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("raw_batch_get").Inc()
+
 	resp := &kvrpcpb.RawBatchGetResponse{}
 	if regErr := svc.validateRegionContext(req.GetContext(), nil); regErr != nil {
 		resp.RegionError = regErr
@@ -1422,11 +1590,20 @@ func (svc *tikvService) RawBatchGet(ctx context.Context, req *kvrpcpb.RawBatchGe
 	for _, p := range pairs {
 		resp.Pairs = append(resp.Pairs, &kvrpcpb.KvPair{Key: p.Key, Value: p.Value})
 	}
+	if resp.RegionError != nil {
+		grpcMsgFailTotal.WithLabelValues("raw_batch_get").Inc()
+	}
 	return resp, nil
 }
 
 // RawBatchPut implements the RawBatchPut RPC.
 func (svc *tikvService) RawBatchPut(ctx context.Context, req *kvrpcpb.RawBatchPutRequest) (*kvrpcpb.RawBatchPutResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("raw_batch_put").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("raw_batch_put").Inc()
+
 	resp := &kvrpcpb.RawBatchPutResponse{}
 	pairs := make([]KvPair, len(req.GetPairs()))
 	for i, p := range req.GetPairs() {
@@ -1455,6 +1632,9 @@ func (svc *tikvService) RawBatchPut(ctx context.Context, req *kvrpcpb.RawBatchPu
 		if err := svc.server.rawStorage.BatchPutWithTTL(req.GetCf(), pairs, ttls); err != nil {
 			resp.Error = err.Error()
 		}
+	}
+	if resp.RegionError != nil || resp.Error != "" {
+		grpcMsgFailTotal.WithLabelValues("raw_batch_put").Inc()
 	}
 	return resp, nil
 }
@@ -1622,6 +1802,12 @@ func (svc *tikvService) RawChecksum(ctx context.Context, req *kvrpcpb.RawChecksu
 
 // KvGC implements the KvGC RPC.
 func (svc *tikvService) KvGC(ctx context.Context, req *kvrpcpb.GCRequest) (*kvrpcpb.GCResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_gc").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_gc").Inc()
+
 	resp := &kvrpcpb.GCResponse{}
 	if svc.server.gcWorker == nil {
 		return resp, nil
@@ -1655,6 +1841,9 @@ func (svc *tikvService) KvGC(ctx context.Context, req *kvrpcpb.GCRequest) (*kvrp
 		}
 	}
 
+	if resp.RegionError != nil || resp.Error != nil {
+		grpcMsgFailTotal.WithLabelValues("kv_gc").Inc()
+	}
 	return resp, nil
 }
 
@@ -1662,6 +1851,12 @@ func (svc *tikvService) KvGC(ctx context.Context, req *kvrpcpb.GCRequest) (*kvrp
 
 // KvDeleteRange implements transactional range deletion.
 func (svc *tikvService) KvDeleteRange(ctx context.Context, req *kvrpcpb.DeleteRangeRequest) (*kvrpcpb.DeleteRangeResponse, error) {
+	start := time.Now()
+	defer func() {
+		grpcMsgDuration.WithLabelValues("kv_delete_range").Observe(time.Since(start).Seconds())
+	}()
+	grpcMsgTotal.WithLabelValues("kv_delete_range").Inc()
+
 	resp := &kvrpcpb.DeleteRangeResponse{}
 
 	startKey := req.GetStartKey()
@@ -1707,6 +1902,9 @@ func (svc *tikvService) KvDeleteRange(ctx context.Context, req *kvrpcpb.DeleteRa
 		}
 	}
 
+	if resp.RegionError != nil || resp.Error != "" {
+		grpcMsgFailTotal.WithLabelValues("kv_delete_range").Inc()
+	}
 	return resp, nil
 }
 

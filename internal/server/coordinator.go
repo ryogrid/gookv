@@ -309,6 +309,7 @@ func (sc *StoreCoordinator) BootstrapRegion(region *metapb.Region, allPeers []ra
 	sc.peers[regionID] = peer
 	sc.cancels[regionID] = cancel
 	sc.dones[regionID] = done
+	raftstore.RegionCount.Inc()
 
 	go func() {
 		peer.Run(ctx)
@@ -371,6 +372,9 @@ func (sc *StoreCoordinator) applyEntriesForPeer(peer *raftstore.Peer, entries []
 // then waits for the applied index to reach the committed index.
 // Returns nil when it is safe to read from the local engine.
 func (sc *StoreCoordinator) ReadIndex(regionID uint64, timeout time.Duration) error {
+	start := time.Now()
+	defer func() { readindexDuration.Observe(time.Since(start).Seconds()) }()
+
 	sc.mu.RLock()
 	peer, ok := sc.peers[regionID]
 	sc.mu.RUnlock()
@@ -456,6 +460,9 @@ func (d *coordinatorDispatcher) Dispatch(regionID uint64) error {
 // If reqEpoch is provided and the region's current epoch differs, the proposal
 // is rejected with an epoch-not-match error (client should retry with fresh region info).
 func (sc *StoreCoordinator) ProposeModifies(regionID uint64, modifies []mvcc.Modify, timeout time.Duration, reqEpoch ...*metapb.RegionEpoch) error {
+	start := time.Now()
+	defer func() { proposeDuration.Observe(time.Since(start).Seconds()) }()
+
 	sc.mu.RLock()
 	peer, ok := sc.peers[regionID]
 	sc.mu.RUnlock()
@@ -786,6 +793,7 @@ func (sc *StoreCoordinator) CreatePeer(req *raftstore.CreatePeerRequest) error {
 	sc.peers[regionID] = peer
 	sc.cancels[regionID] = cancel
 	sc.dones[regionID] = done
+	raftstore.RegionCount.Inc()
 
 	go func() {
 		peer.Run(ctx)
@@ -824,6 +832,7 @@ func (sc *StoreCoordinator) DestroyPeer(req *raftstore.DestroyPeerRequest) error
 	delete(sc.peers, regionID)
 	delete(sc.cancels, regionID)
 	delete(sc.dones, regionID)
+	raftstore.RegionCount.Dec()
 
 	// Clean up persisted Raft state for this region.
 	if err := raftstore.CleanupRegionData(sc.engine, regionID); err != nil {

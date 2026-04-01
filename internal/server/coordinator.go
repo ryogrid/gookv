@@ -654,6 +654,21 @@ func (sc *StoreCoordinator) CreatePeer(req *raftstore.CreatePeerRequest) error {
 		return err
 	}
 
+	// For split-created regions (non-empty StartKey) bootstrapped on a NEW
+	// node (via maybeCreatePeerForMessage / PD rebalance), advance
+	// TruncatedIndex so the leader sends a full snapshot containing
+	// pre-split engine data instead of Raft log entries that lack it.
+	// This does NOT affect peers created via BootstrapRegion (the original
+	// split-apply path) because those use BootstrapRegion, not CreatePeer.
+	if len(raftPeers) > 0 && len(req.Region.GetStartKey()) > 0 {
+		state := raftstore.ApplyState{
+			AppliedIndex:   0,
+			TruncatedIndex: 1,
+			TruncatedTerm:  1,
+		}
+		peer.SetApplyState(state)
+	}
+
 	// Persist initial Raft state immediately so that if the node crashes
 	// before the first Ready cycle, HasPersistedRaftState returns true
 	// on restart and the peer is recovered instead of re-bootstrapped.

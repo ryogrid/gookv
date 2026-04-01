@@ -156,6 +156,53 @@ type Peer struct {
 	stopped     atomic.Bool
 	isLeader    atomic.Bool
 	initialized bool
+
+	// splitOrigin is set for regions created by a split. When this peer
+	// becomes leader, it proposes a CompactLog to advance TruncatedIndex,
+	// forcing new replicas to receive a snapshot (which includes pre-split
+	// engine data not present in the child's Raft log).
+	splitOrigin     bool
+	splitCompactDone bool
+}
+
+// SetApplyState updates the peer's apply state (used by coordinator for
+// forcing snapshot on new replicas of split-created regions).
+func (p *Peer) SetApplyState(state ApplyState) {
+	p.storage.SetApplyState(state)
+}
+
+// applyCompactLogEntry processes a committed CompactLog admin entry.
+// It advances TruncatedIndex so that future new replicas receive a snapshot
+// instead of incomplete Raft log entries.
+func (p *Peer) applyCompactLogEntry(e raftpb.Entry) {
+	req, ok := unmarshalCompactLogRequest(e.Data)
+	if !ok {
+		return
+	}
+	state := p.storage.GetApplyState()
+	result, err := execCompactLog(&state, req)
+	if err != nil {
+		slog.Warn("compact log failed", "region", p.regionID, "err", err)
+		return
+	}
+	if result == nil {
+		return // no-op (already compacted)
+	}
+	p.storage.SetApplyState(state)
+	if err := p.storage.PersistApplyState(); err != nil {
+		slog.Error("persist apply state after compact log failed", "region", p.regionID, "err", err)
+	}
+	// Schedule background deletion of compacted entries.
+	if p.logGCWorkerCh != nil {
+		select {
+		case p.logGCWorkerCh <- RaftLogGCTask{
+			RegionID: p.regionID,
+			StartIdx: result.FirstIndex,
+			EndIdx:   result.TruncatedIndex + 1,
+		}:
+		default:
+		}
+	}
 }
 
 // SetSplitResultCh sets the channel for receiving split results.
@@ -194,6 +241,7 @@ func NewPeer(
 	peers []raft.Peer,
 ) (*Peer, error) {
 	storage := NewPeerStorage(regionID, engine)
+	var splitOriginFlag bool
 
 	if len(peers) > 0 {
 		// For bootstrap, we need truly empty storage (matching MemoryStorage convention).
@@ -235,17 +283,10 @@ func NewPeer(
 		if err := rawNode.Bootstrap(peers); err != nil {
 			return nil, fmt.Errorf("raftstore: bootstrap: %w", err)
 		}
-		// For split-created regions (non-empty StartKey), advance TruncatedIndex
-		// past the bootstrap ConfChange at index 1. This ensures that when PD
-		// adds a new replica on a different node, the leader cannot send log
-		// entries (which don't contain pre-split data inherited from the parent
-		// region's engine) and must send a full snapshot instead.
+		// Mark split-created regions so the leader proposes CompactLog after
+		// election to force snapshot for future new replicas.
 		if len(region.GetStartKey()) > 0 {
-			storage.SetApplyState(ApplyState{
-				AppliedIndex:   0,
-				TruncatedIndex: 1,
-				TruncatedTerm:  1,
-			})
+			splitOriginFlag = true
 		}
 	}
 
@@ -263,6 +304,7 @@ func NewPeer(
 		pendingProposals: make(map[uint64]proposalEntry),
 		pendingReads:     make(map[string]*pendingRead),
 		initialized:      true,
+		splitOrigin:      splitOriginFlag,
 	}
 
 	return p, nil
@@ -701,6 +743,8 @@ func (p *Peer) handleReady() {
 			} else if e.Type == raftpb.EntryNormal && IsSplitAdmin(e.Data) {
 				eCopy := e
 				p.applySplitAdminEntry(&eCopy)
+			} else if e.Type == raftpb.EntryNormal && IsCompactLog(e.Data) {
+				p.applyCompactLogEntry(e)
 			}
 		}
 
@@ -740,6 +784,24 @@ func (p *Peer) handleReady() {
 			if pr.readIndex > 0 && appliedIdx >= pr.readIndex {
 				pr.callback(nil)
 				delete(p.pendingReads, key)
+			}
+		}
+	}
+
+	// For split-created regions: once the leader has applied initial entries,
+	// propose CompactLog to advance TruncatedIndex. This forces future new
+	// replicas (added by PD rebalance) to receive a snapshot containing
+	// pre-split engine data that is not in the child's Raft log.
+	if p.splitOrigin && !p.splitCompactDone && p.IsLeader() {
+		appliedIdx := p.storage.AppliedIndex()
+		if appliedIdx >= 1 {
+			req := CompactLogRequest{
+				CompactIndex: appliedIdx,
+				CompactTerm:  1,
+			}
+			data := marshalCompactLogRequest(req)
+			if err := p.rawNode.Propose(data); err == nil {
+				p.splitCompactDone = true
 			}
 		}
 	}

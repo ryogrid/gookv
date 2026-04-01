@@ -155,8 +155,20 @@ type fuzzCluster struct {
 	stats fuzzStats
 }
 
+// maxStoppableNodes returns the maximum number of nodes that can be
+// stopped simultaneously without risking per-region quorum loss.
+// With MaxPeerCount replicas per region, quorum requires ceil(MaxPeerCount/2)
+// peers. In the worst case, the stopped nodes host MaxPeerCount-1 replicas
+// of a single region, so we limit stops to MaxPeerCount/2 (integer division).
+func (fc *fuzzCluster) maxStoppableNodes() int {
+	const maxPeerCount = 3 // must match the PD/server --max-peer-count
+	return maxPeerCount / 2 // = 1 for 3 replicas (quorum=2, tolerate 1 loss)
+}
+
+// majority returns the minimum number of nodes that must remain running.
+// Deprecated: use maxStoppableNodes for per-region quorum safety.
 func (fc *fuzzCluster) majority() int {
-	return len(fc.nodeUp)/2 + 1
+	return len(fc.nodeUp) - fc.maxStoppableNodes()
 }
 
 func (fc *fuzzCluster) runningCount() int {
@@ -824,6 +836,28 @@ func TestFuzzCluster(t *testing.T) {
 	}
 	t.Logf("Region topology stabilized (stable for 30s)")
 
+	// Verify all regions have elected leaders by attempting a read.
+	// This prevents the initial audit from hitting "not leader" errors
+	// due to Raft elections still in progress after splits.
+	cluster.ResetClient()
+	e2elib.WaitForCondition(t, 60*time.Second, "all regions have leaders", func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		txn, err := cluster.TxnKV().Begin(ctx)
+		if err != nil {
+			return false
+		}
+		// Scan the full account range — this touches all regions.
+		_, err = txn.Scan(ctx, []byte("account-"), []byte("account."), fuzzNumAccounts+1)
+		_ = txn.Rollback(ctx)
+		if err != nil {
+			t.Logf("Leader readiness check: %v", err)
+			cluster.ResetClient()
+			return false
+		}
+		return true
+	})
+
 	// Initialize shared cluster state.
 	fc := &fuzzCluster{
 		t:       t,
@@ -913,18 +947,23 @@ func TestFuzzCluster(t *testing.T) {
 			return strings.Contains(output, "OK")
 		}, fuzzStabilizeTimeout)
 
-	// Warmup Go client after fault recovery.
+	// Warmup Go client after fault recovery: verify all regions have leaders
+	// by scanning the full account range (touches all regions).
 	cluster.ResetClient()
-	e2elib.WaitForCondition(t, 60*time.Second, "go client warmup", func() bool {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	e2elib.WaitForCondition(t, 120*time.Second, "all regions have leaders after recovery", func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		txn, err := cluster.TxnKV().Begin(ctx)
 		if err != nil {
 			return false
 		}
-		_, err = txn.Get(ctx, []byte("account-0"))
-		_ = txn.Commit(ctx)
-		return err == nil
+		_, err = txn.Scan(ctx, []byte("account-"), []byte("account."), fuzzNumAccounts+1)
+		_ = txn.Rollback(ctx)
+		if err != nil {
+			cluster.ResetClient()
+			return false
+		}
+		return true
 	})
 
 	// Final consistency check.

@@ -6,7 +6,37 @@
   },
   "permissions": {
     "allow": [
-      "Bash(git submodule:*)"
+      "Bash(git submodule:*)",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Find",
+      "Read",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git status *)",
+      "Bash(git rev-parse --abrev-ref HEAD)",
+      "Bash(git commit -m *)",
+      "Bash(awk *)",
+      "Bash(sed *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(ls *)",
+      "Bash(cd *)",
+      "Bash(pwd)",
+      "Bash(mkdir *)",
+      "Bash(rm -rf *)",
+      "Bash(git checkout *)",
+      "Bash(git branch *)",
+      "Bash(git add *)",
+      "Bash(go *)",
+      "Write(/tmp*)",
+      "Read(/tmp*)"
+          ],
+    "deny": [
+      "Bash(git merge *)"
     ],
     "additionalDirectories": [
       "/home/ryo/.claude/homunculus"
@@ -23,7 +53,7 @@
             "timeout": 10
           }
         ]
-      }
+      }      
     ],
     "PostToolUse": [
       {

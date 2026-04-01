@@ -52,6 +52,15 @@
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
 - **No Band-Aid Fixes**: Before applying a local fix, verify it won't break other parts of the system. Check how TiKV handles the same situation (search `tikv/` source). If a fix feels like a workaround, find the architecturally correct solution first. A fix that solves one problem but makes another design unsound is worse than no fix.
 
+## Shell
+- **Commands**: Do not use compound commands (e.g., pipes, `&&`, `;`, subshells). Run each command as a separate Bash invocation.
+
+## Temporary Files
+- Use `tmp` directory instead of `/tmp` for any temporary files during development or testing
+
+## Git
+- ** Don't merge to master/main without order from the user. **
+
 ## gookv Development
 
 ### Overview

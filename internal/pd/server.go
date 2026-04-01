@@ -22,6 +22,7 @@ import (
 
 	"github.com/ryogrid/gookv/internal/engine/rocks"
 	"github.com/ryogrid/gookv/internal/engine/traits"
+	statusserver "github.com/ryogrid/gookv/internal/server/status"
 	"github.com/ryogrid/gookv/pkg/cfnames"
 	"github.com/ryogrid/gookv/pkg/codec"
 	"github.com/ryogrid/gookv/pkg/keys"
@@ -52,6 +53,7 @@ type PDServerRaftConfig struct {
 // PDServerConfig holds configuration for the PD server.
 type PDServerConfig struct {
 	ListenAddr string
+	StatusAddr string // HTTP status/pprof listen address
 	DataDir    string
 	ClusterID  uint64
 
@@ -75,6 +77,7 @@ type PDServerConfig struct {
 func DefaultPDServerConfig() PDServerConfig {
 	return PDServerConfig{
 		ListenAddr:                "0.0.0.0:2379",
+		StatusAddr:                "127.0.0.1:2382",
 		DataDir:                   "/tmp/gookv-pd",
 		ClusterID:                 1,
 		TSOSaveInterval:           3 * time.Second,
@@ -101,8 +104,9 @@ type PDServer struct {
 	scheduler   *Scheduler
 	moveTracker *MoveTracker
 
-	grpcServer *grpc.Server
-	listener   net.Listener
+	grpcServer   *grpc.Server
+	listener     net.Listener
+	statusServer *statusserver.Server
 
 	// Raft replication (nil in single-node mode).
 	raftPeer       *PDRaftPeer
@@ -335,6 +339,21 @@ func (s *PDServer) Start() error {
 		s.runStoreStateWorker(s.ctx)
 	}()
 
+	// Start HTTP status/pprof server.
+	if s.cfg.StatusAddr != "" {
+		s.statusServer = statusserver.New(statusserver.Config{
+			Addr: s.cfg.StatusAddr,
+			ConfigFn: func() interface{} {
+				return s.cfg
+			},
+		})
+		if err := s.statusServer.Start(); err != nil {
+			slog.Warn("PD status server failed to start", "err", err)
+		} else {
+			slog.Info("PD status server listening", "addr", s.statusServer.Addr())
+		}
+	}
+
 	// Start Raft subsystem if configured.
 	if s.raftPeer != nil {
 		if err := s.startRaft(); err != nil {
@@ -440,6 +459,10 @@ func (s *PDServer) Stop() {
 			s.cachedLeaderID = 0
 		}
 		s.leaderConnMu.Unlock()
+
+		if s.statusServer != nil {
+			_ = s.statusServer.Stop()
+		}
 
 		s.grpcServer.GracefulStop()
 		s.wg.Wait()

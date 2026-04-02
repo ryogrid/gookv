@@ -4,10 +4,10 @@ GO_SRC := $(shell find cmd/ internal/ pkg/ -name '*.go')
 
 CLUSTER_DIR = /tmp/gookv-cluster
 CLUSTER_NODES = 5
-CLUSTER_TOPOLOGY = 1=127.0.0.1:20160,2=127.0.0.1:20161,3=127.0.0.1:20162,4=127.0.0.1:20163,5=127.0.0.1:20164
+CLUSTER_TOPOLOGY = 1=0.0.0.0:20160,2=0.0.0.0:20161,3=0.0.0.0:20162,4=0.0.0.0:20163,5=0.0.0.0:20164
 
 PD_CLUSTER_DIR = /tmp/gookv-pd-cluster
-PD_ADDR = 127.0.0.1:2379
+PD_ADDR = 0.0.0.0:2379
 
 test:
 	go test ./pkg/... ./internal/... -v -count=1
@@ -61,14 +61,14 @@ pd-cluster-start: build
 		mkdir -p $$DATA_DIR; \
 		./gookv-server \
 			--store-id $$i \
-			--addr 127.0.0.1:$$GRPC_PORT \
-			--status-addr 127.0.0.1:$$STATUS_PORT \
+			--addr 0.0.0.0:$$GRPC_PORT \
+			--status-addr 0.0.0.0:$$STATUS_PORT \
 			--data-dir $$DATA_DIR \
 			--pd-endpoints $(PD_ADDR) \
 			--initial-cluster $(CLUSTER_TOPOLOGY) \
 			> $$LOG_FILE 2>&1 & \
 		echo $$! > $$PID_FILE; \
-		echo "  Node $$i: gRPC=127.0.0.1:$$GRPC_PORT status=127.0.0.1:$$STATUS_PORT pd=$(PD_ADDR) pid=$$(cat $$PID_FILE)"; \
+		echo "  Node $$i: gRPC=0.0.0.0:$$GRPC_PORT status=0.0.0.0:$$STATUS_PORT pd=$(PD_ADDR) pid=$$(cat $$PID_FILE)"; \
 	done
 	@echo "PD cluster started. Use 'make pd-cluster-stop' to shut down."
 
@@ -86,8 +86,8 @@ pd-cluster-verify:
 
 TXN_DEMO_DIR = /tmp/gookv-txn-demo
 TXN_DEMO_NODES = 3
-TXN_DEMO_TOPOLOGY = 1=127.0.0.1:20170,2=127.0.0.1:20171,3=127.0.0.1:20172
-TXN_DEMO_PD_ADDR = 127.0.0.1:2389
+TXN_DEMO_TOPOLOGY = 1=0.0.0.0:20170,2=0.0.0.0:20171,3=0.0.0.0:20172
+TXN_DEMO_PD_ADDR = 0.0.0.0:2389
 
 txn-demo-start: build
 	@echo "Starting PD + $(TXN_DEMO_NODES)-node gookv cluster for txn demo..."
@@ -119,14 +119,14 @@ txn-demo-start: build
 		./gookv-server \
 			--config scripts/txn-demo/config.toml \
 			--store-id $$i \
-			--addr 127.0.0.1:$$GRPC_PORT \
-			--status-addr 127.0.0.1:$$STATUS_PORT \
+			--addr 0.0.0.0:$$GRPC_PORT \
+			--status-addr 0.0.0.0:$$STATUS_PORT \
 			--data-dir $$DATA_DIR \
 			--pd-endpoints $(TXN_DEMO_PD_ADDR) \
 			--initial-cluster $(TXN_DEMO_TOPOLOGY) \
 			> $$LOG_FILE 2>&1 & \
 		echo $$! > $$PID_FILE; \
-		echo "  Node $$i: gRPC=127.0.0.1:$$GRPC_PORT status=127.0.0.1:$$STATUS_PORT pid=$$(cat $$PID_FILE)"; \
+		echo "  Node $$i: gRPC=0.0.0.0:$$GRPC_PORT status=0.0.0.0:$$STATUS_PORT pid=$$(cat $$PID_FILE)"; \
 	done
 	@echo "Txn demo cluster started. Use 'make txn-demo-verify' to run the demo."
 
@@ -146,8 +146,8 @@ txn-demo-stop:
 SCALE_DEMO_DIR = /tmp/gookv-scale-demo
 SCALE_DEMO_NODES = 3
 SCALE_DEMO_MAX_NODES = 4
-SCALE_DEMO_TOPOLOGY = 1=127.0.0.1:20270,2=127.0.0.1:20271,3=127.0.0.1:20272
-SCALE_DEMO_PD_ADDR = 127.0.0.1:2399
+SCALE_DEMO_TOPOLOGY = 1=0.0.0.0:20270,2=0.0.0.0:20271,3=0.0.0.0:20272
+SCALE_DEMO_PD_ADDR = 0.0.0.0:2399
 
 scale-demo-start: build
 	@echo "Starting PD + $(SCALE_DEMO_NODES)-node gookv cluster for scale demo..."
@@ -179,14 +179,14 @@ scale-demo-start: build
 		./gookv-server \
 			--config scripts/txn-demo/config.toml \
 			--store-id $$i \
-			--addr 127.0.0.1:$$GRPC_PORT \
-			--status-addr 127.0.0.1:$$STATUS_PORT \
+			--addr 0.0.0.0:$$GRPC_PORT \
+			--status-addr 0.0.0.0:$$STATUS_PORT \
 			--data-dir $$DATA_DIR \
 			--pd-endpoints $(SCALE_DEMO_PD_ADDR) \
 			--initial-cluster $(SCALE_DEMO_TOPOLOGY) \
 			> $$LOG_FILE 2>&1 & \
 		echo $$! > $$PID_FILE; \
-		echo "  Node $$i: gRPC=127.0.0.1:$$GRPC_PORT status=127.0.0.1:$$STATUS_PORT pid=$$(cat $$PID_FILE)"; \
+		echo "  Node $$i: gRPC=0.0.0.0:$$GRPC_PORT status=0.0.0.0:$$STATUS_PORT pid=$$(cat $$PID_FILE)"; \
 	done
 	@echo "Scale demo cluster started. Use 'make scale-demo-verify' to run the demo."
 
@@ -206,10 +206,10 @@ scale-demo-stop:
 PD_FAILOVER_DIR = /tmp/gookv-pd-failover-demo
 PD_FAILOVER_PD_NODES = 3
 PD_FAILOVER_KVS_NODES = 3
-PD_FAILOVER_INITIAL_CLUSTER = 1=127.0.0.1:2410,2=127.0.0.1:2412,3=127.0.0.1:2414
-PD_FAILOVER_CLIENT_CLUSTER = 1=127.0.0.1:2409,2=127.0.0.1:2411,3=127.0.0.1:2413
-PD_FAILOVER_PD_ENDPOINTS = 127.0.0.1:2409,127.0.0.1:2411,127.0.0.1:2413
-PD_FAILOVER_KVS_TOPOLOGY = 1=127.0.0.1:20370,2=127.0.0.1:20371,3=127.0.0.1:20372
+PD_FAILOVER_INITIAL_CLUSTER = 1=0.0.0.0:2410,2=0.0.0.0:2412,3=0.0.0.0:2414
+PD_FAILOVER_CLIENT_CLUSTER = 1=0.0.0.0:2409,2=0.0.0.0:2411,3=0.0.0.0:2413
+PD_FAILOVER_PD_ENDPOINTS = 0.0.0.0:2409,0.0.0.0:2411,0.0.0.0:2413
+PD_FAILOVER_KVS_TOPOLOGY = 1=0.0.0.0:20370,2=0.0.0.0:20371,3=0.0.0.0:20372
 
 pd-failover-demo-start: build
 	@echo "Starting 3-PD Raft cluster + 3 KVS nodes for failover demo..."
@@ -232,14 +232,14 @@ pd-failover-demo-start: build
 		./gookv-pd \
 			--pd-id $$i \
 			--initial-cluster $(PD_FAILOVER_INITIAL_CLUSTER) \
-			--peer-port 127.0.0.1:$$PEER_PORT \
+			--peer-port 0.0.0.0:$$PEER_PORT \
 			--client-cluster $(PD_FAILOVER_CLIENT_CLUSTER) \
-			--addr 127.0.0.1:$$CLIENT_PORT \
+			--addr 0.0.0.0:$$CLIENT_PORT \
 			--data-dir $$DATA_DIR \
 			--cluster-id 1 \
 			> $$LOG_FILE 2>&1 & \
 		echo $$! > $$PID_FILE; \
-		echo "  PD $$i: client=127.0.0.1:$$CLIENT_PORT peer=127.0.0.1:$$PEER_PORT pid=$$(cat $$PID_FILE)"; \
+		echo "  PD $$i: client=0.0.0.0:$$CLIENT_PORT peer=0.0.0.0:$$PEER_PORT pid=$$(cat $$PID_FILE)"; \
 	done
 	@echo "  Waiting for PD leader election..."
 	@sleep 3
@@ -252,14 +252,14 @@ pd-failover-demo-start: build
 		mkdir -p $$DATA_DIR; \
 		./gookv-server \
 			--store-id $$i \
-			--addr 127.0.0.1:$$GRPC_PORT \
-			--status-addr 127.0.0.1:$$STATUS_PORT \
+			--addr 0.0.0.0:$$GRPC_PORT \
+			--status-addr 0.0.0.0:$$STATUS_PORT \
 			--data-dir $$DATA_DIR \
 			--pd-endpoints $(PD_FAILOVER_PD_ENDPOINTS) \
 			--initial-cluster $(PD_FAILOVER_KVS_TOPOLOGY) \
 			> $$LOG_FILE 2>&1 & \
 		echo $$! > $$PID_FILE; \
-		echo "  Node $$i: gRPC=127.0.0.1:$$GRPC_PORT status=127.0.0.1:$$STATUS_PORT pid=$$(cat $$PID_FILE)"; \
+		echo "  Node $$i: gRPC=0.0.0.0:$$GRPC_PORT status=0.0.0.0:$$STATUS_PORT pid=$$(cat $$PID_FILE)"; \
 	done
 	@echo "PD failover demo cluster started. Use 'make pd-failover-demo-verify' to run the demo."
 
@@ -278,8 +278,8 @@ pd-failover-demo-stop:
 # --- Transaction Integrity Demo ---
 TXN_INTEGRITY_DIR = /tmp/gookv-txn-integrity-demo
 TXN_INTEGRITY_NODES = 3
-TXN_INTEGRITY_TOPOLOGY = 1=127.0.0.1:20470,2=127.0.0.1:20471,3=127.0.0.1:20472
-TXN_INTEGRITY_PD_ADDR = 127.0.0.1:2419
+TXN_INTEGRITY_TOPOLOGY = 1=0.0.0.0:20470,2=0.0.0.0:20471,3=0.0.0.0:20472
+TXN_INTEGRITY_PD_ADDR = 0.0.0.0:2419
 
 txn-integrity-demo-start: build
 	@echo "Starting PD + $(TXN_INTEGRITY_NODES)-node gookv cluster for txn integrity demo..."
@@ -311,14 +311,14 @@ txn-integrity-demo-start: build
 		./gookv-server \
 			--config scripts/txn-integrity-demo/config.toml \
 			--store-id $$i \
-			--addr 127.0.0.1:$$GRPC_PORT \
-			--status-addr 127.0.0.1:$$STATUS_PORT \
+			--addr 0.0.0.0:$$GRPC_PORT \
+			--status-addr 0.0.0.0:$$STATUS_PORT \
 			--data-dir $$DATA_DIR \
 			--pd-endpoints $(TXN_INTEGRITY_PD_ADDR) \
 			--initial-cluster $(TXN_INTEGRITY_TOPOLOGY) \
 			> $$LOG_FILE 2>&1 & \
 		echo $$! > $$PID_FILE; \
-		echo "  Node $$i: gRPC=127.0.0.1:$$GRPC_PORT status=127.0.0.1:$$STATUS_PORT pid=$$(cat $$PID_FILE)"; \
+		echo "  Node $$i: gRPC=0.0.0.0:$$GRPC_PORT status=0.0.0.0:$$STATUS_PORT pid=$$(cat $$PID_FILE)"; \
 	done
 	@echo "Txn integrity demo cluster started. Use 'make txn-integrity-demo-verify' to run the demo."
 

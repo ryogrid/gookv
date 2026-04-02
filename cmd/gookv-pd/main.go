@@ -57,7 +57,7 @@ func parseClusterString(s string) (map[uint64]string, error) {
 
 func main() {
 	listenAddr := flag.String("addr", "0.0.0.0:2379", "gRPC listen address")
-	statusAddr := flag.String("status-addr", "127.0.0.1:2382", "HTTP status/pprof listen address")
+	statusAddr := flag.String("status-addr", "0.0.0.0:2382", "HTTP status/pprof listen address")
 	dataDir := flag.String("data-dir", "/tmp/gookv-pd", "Data directory for metadata")
 	clusterID := flag.Uint64("cluster-id", 1, "Cluster ID")
 	logLevel := flag.String("log-level", "", "Log level: debug, info, warn, error (overrides default)")

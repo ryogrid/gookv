@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'gookv-kvs'
+    scrape_interval: 5s
+    static_configs:
+      - targets:
+          - '172.30.249.175:20490'
+          - '172.30.249.175:20491'
+          - '172.30.249.175:20492'
+        labels:
+          cluster: 'txn-integrity-demo'
+
+  - job_name: 'gookv-pd'
+    scrape_interval: 5s
+    static_configs:
+      - targets:
+          - '172.30.249.175:2382'
+        labels:
+          cluster: 'txn-integrity-demo'

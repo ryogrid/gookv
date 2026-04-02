@@ -183,8 +183,8 @@ func DefaultConfig() *Config {
 			EnableTimestamp: true,
 		},
 		Server: ServerConfig{
-			Addr:               "127.0.0.1:20160",
-			StatusAddr:         "127.0.0.1:20180",
+			Addr:               "0.0.0.0:20160",
+			StatusAddr:         "0.0.0.0:20180",
 			GRPCConcurrency:    4,
 			GRPCMaxRecvMsgSize: 16 * MB,
 			GRPCMaxSendMsgSize: 16 * MB,

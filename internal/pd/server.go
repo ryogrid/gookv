@@ -77,7 +77,7 @@ type PDServerConfig struct {
 func DefaultPDServerConfig() PDServerConfig {
 	return PDServerConfig{
 		ListenAddr:                "0.0.0.0:2379",
-		StatusAddr:                "127.0.0.1:2382",
+		StatusAddr:                "0.0.0.0:2382",
 		DataDir:                   "/tmp/gookv-pd",
 		ClusterID:                 1,
 		TSOSaveInterval:           3 * time.Second,

@@ -6,9 +6,9 @@ scrape_configs:
     scrape_interval: 5s
     static_configs:
       - targets:
-          - '172.30.249.175:20490'
-          - '172.30.249.175:20491'
-          - '172.30.249.175:20492'
+          - 'host.docker.internal:20490'
+          - 'host.docker.internal:20491'
+          - 'host.docker.internal:20492'
         labels:
           cluster: 'txn-integrity-demo'
 
@@ -16,6 +16,6 @@ scrape_configs:
     scrape_interval: 5s
     static_configs:
       - targets:
-          - '172.30.249.175:2382'
+          - 'host.docker.internal:2382'
         labels:
           cluster: 'txn-integrity-demo'
